@@ -39,15 +39,18 @@ Land a small batch of efficiency and robustness tweaks across `yt-dlp`, `whisper
       lang_state = Some(match ctx.create_state() {
           Ok(s) => s,
           Err(e) => {
-              let _ = req.reply.send(Err(TranscribeError::StateCreate {
-                  detail: format!("lang_state lazy alloc: {e}"),
+              let _ = req.reply.send(Err(TranscribeError::Bug {
+                  detail: format!(
+                      "lazy lang_state create_state failure \
+                       (should be classified, not Bug, in Epic 3): {e}"
+                  ),
               }));
               continue;
           }
       });
   }
   ```
-- `TranscribeError::StateCreate` variant — verify existence in `src/errors.rs` or `src/transcribe.rs`; add if needed during implementation.
+- **Error-variant decision (resolved in spec):** lazy `create_state` failure surfaces as `TranscribeError::Bug { detail }`. This matches the existing pattern at `src/errors.rs` for the `AudioDecodeError → TranscribeError::Bug` conversion (carries an Epic-3-will-reclassify breadcrumb in the detail string). No new variant is added; Epic 3's failure-classification taxonomy will rebuild the enum.
 - Update the explanatory comment block at lines 434–439 to describe the new lifecycle: "lazily allocated; only present when a `compute_lang_probs=true` request has run during this worker's lifetime. AD0016 invariant preserved (state stays inside the worker thread)."
 
 ### #2 `set_no_timestamps(true)`
@@ -86,10 +89,11 @@ Land a small batch of efficiency and robustness tweaks across `yt-dlp`, `whisper
 
 ### #6 Explicit ffmpeg flags inside yt-dlp postprocessor-args
 
-- Change the postprocessor-args string at `src/fetcher/ytdlp.rs:55` from `"ffmpeg:-ar 16000 -ac 1"` to `"ffmpeg:-vn -sn -dn -map 0:a:0 -c:a pcm_s16le -ar 16000 -ac 1"`.
+- Proposed postprocessor-args string at `src/fetcher/ytdlp.rs:55`: change from `"ffmpeg:-ar 16000 -ac 1"` to `"ffmpeg:-vn -sn -dn -map 0:a:0 -c:a pcm_s16le -ar 16000 -ac 1"`.
 - The added flags: `-vn -sn -dn` drop video/subtitle/data streams; `-map 0:a:0` selects only the first audio stream; `-c:a pcm_s16le` makes the WAV codec explicit.
-- **Open question for implementation:** confirm against `AD0014` and the `hound` decoder whether `pcm_s16le` is correct. yt-dlp's `--audio-format wav` default may already be `pcm_s16le`, in which case the codec flag is redundant and should be dropped to keep args minimal. If `AD0014`'s float-format note implies `pcm_f32le` is preferred, adjust accordingly.
-- Existing arg-assertion tests at `src/fetcher/ytdlp.rs:139–141` need updating to match the new string.
+- **Mandatory pre-implementation validation (added per second-review High-2):** ffmpeg's `-map` flag is position-sensitive, and yt-dlp's generic `--postprocessor-args ffmpeg:…` form passes args at a specific point in yt-dlp's own internally-constructed ffmpeg command line. The change could be inert (yt-dlp ignores some args) OR break extraction on some inputs if `-map` lands in the wrong position. **Before locking the arg string, run `yt-dlp -v --postprocessor-args 'ffmpeg:-vn -sn -dn -map 0:a:0 -c:a pcm_s16le -ar 16000 -ac 1' …` against a representative TikTok URL and inspect the verbose log for the actual ffmpeg invocation.** Adjust the arg string (or split into per-postprocessor-key forms like `ExtractAudio+ffmpeg:…`) until the verbose output shows ffmpeg invoked with the flags in the intended positions. Document the verbose snippet in the implementation commit message.
+- **Codec sanity check (also pre-implementation):** confirm against `AD0014` and the `hound` decoder whether `pcm_s16le` is correct. yt-dlp's `--audio-format wav` default may already produce `pcm_s16le`, in which case the codec flag is redundant and should be dropped. If `AD0014`'s float-format note implies `pcm_f32le` is preferred, adjust accordingly.
+- Existing arg-assertion tests at `src/fetcher/ytdlp.rs:139–141` need updating to match the final string after both validations land.
 
 ## Test plan
 
@@ -107,17 +111,17 @@ Both use the same `Arc<AtomicUsize>` shape, both are `#[cfg(feature = "test-help
 
 ### Per-item
 
-**#1 — `tests/transcribe_lang_state.rs`** (new file)
-- Worker that never receives `compute_lang_probs=true` requests: assert `lang_state` stays `None` for the worker's lifetime (requires a `#[cfg(feature = "test-helpers")]` accessor).
-- First opt-in request allocates `lang_state`; subsequent opt-in requests reuse the same state.
-- A `create_state` failure on the lazy path returns `TranscribeError::StateCreate` for that request only and does not crash the worker.
+**#1 — `tests/transcribe_lang_state.rs`** (new file). Uses the `lang_state_allocations: Arc<AtomicUsize>` counter pattern defined in the "Cross-thread / closure-internal observability" subsection above; no test-helpers accessor on `WhisperEngine` internals.
+- Worker that never receives `compute_lang_probs=true` requests: send N non-opt-in requests, assert `lang_state_allocations.load() == 0`.
+- First opt-in request: assert counter goes to 1. Subsequent opt-in requests: assert counter stays at 1 (state reused, not reallocated).
+- A `create_state` failure on the lazy path returns `TranscribeError::Bug { detail: … }` for that request only; the worker keeps running and handles a follow-up non-opt-in request fine. Inject the failure by either mocking `ctx.create_state` (if feasible behind a test-helpers facade) or by exhausting VRAM in a manner the test environment can reproduce — concrete approach left to the implementation plan since it depends on whisper-rs's test seams.
 
-**#2** — unit-level assertion that `params.no_timestamps()` returns `true`. The behavioral verification is the bake.
+**#2** — **no unit-level assertion.** whisper-rs 0.16.0 exposes `set_no_timestamps` but no corresponding getter; a `params.no_timestamps()` assertion would not compile. The hypothesis from §"#2 `set_no_timestamps(true)`" is verified empirically by the bake's per-token equality check (§ Bake plan #2 below).
 
 **#3a** — extend `tests/output_artifacts.rs`:
-- Round-trip: compact bytes parse back into `TranscriptMetadata`, structural equality.
-- Size assertion: build a fixture metadata with one segment and one token; `to_vec` length is meaningfully smaller than `to_vec_pretty` length.
-- Negative: compact form has no leading-space-indent bytes.
+- Round-trip: compact bytes parse back into `TranscriptMetadata`; structural equality assertion.
+- Negative: compact form contains no leading-whitespace indentation bytes (no `\n  ` or `\n    ` sequences); this is the structural test that compact-vs-pretty differs.
+- Size reduction is **informational, not asserted**. The one-segment one-token fixture is too small to make a meaningful relative-size assertion (the savings come from large multi-token-per-segment payloads). If the implementation plan wants a size-reduction test, it should build a fixture with at least 5 segments and ~50 tokens to make the assertion non-brittle; otherwise leave size as a `println!` for visual inspection.
 
 **#4** — extend `build_args_selects_download_format_first` in `src/fetcher/ytdlp.rs` (or move to `tests/fetch_ytdlp.rs` if it exists):
 - Assert `--format-sort` flag is present with the agreed value.
@@ -125,7 +129,7 @@ Both use the same `Arc<AtomicUsize>` shape, both are `#[cfg(feature = "test-help
 **#5 — `tests/process_bounded_capture.rs`** (new file — filename appears in Epic 2's anticipated list; this worktree writes it first):
 - *Test A — stderr overflow:* spawn a child emitting `N × stderr_capture_bytes` bytes; assert `stderr_excerpt.len() <= stderr_capture_bytes` AND the bytes equal the tail of the emitted stream.
 - *Test B — stdout opt-in / opt-out:* `stdout_capture_bytes == 0` ⇒ `outcome.stdout == None`; `stdout_capture_bytes == N` ⇒ `outcome.stdout == Some(bounded Vec)`.
-- *Test C — peak memory bounded:* via a `#[cfg(feature = "test-helpers")]` accessor on the streaming reader, assert the `VecDeque<u8>` length never exceeds `cap` during a pathological 10 MB emit.
+- *Test C — peak memory bounded:* uses the `peak_buffer_len: Arc<AtomicUsize>` counter pattern from the observability subsection above. Wire the counter into the streaming reader, run a pathological 10 MB emit with `stderr_capture_bytes = 8192`, then assert `peak_buffer_len.load() <= 8192`.
 - *Test D — exit code passthrough:* bounded capture does not lose process exit signal.
 
 **#6** — extend the `build_args` test in `src/fetcher/ytdlp.rs:139–141`: assert the new postprocessor-args string contains all six ffmpeg flags in order.
@@ -148,13 +152,15 @@ Two bake commits gate the two behavioral changes. Both append to `docs/SRC-BAKE-
 ### Bake for #2 (`set_no_timestamps`) — commit 9 in the sequence
 
 - Same `news_orgs` fixture.
-- Two runs (pre + post), each video run 2× per side to verify determinism under `Greedy { best_of: 1 }`.
-- Capture per-video: (a) transcript text equality vs pre-change baseline, (b) raw_signals.segments structure — segment count, token count, presence of `p`/`plog`/`no_speech_prob`, (c) end-to-end transcription wall-clock.
-- **Pass criteria:**
-  - Transcript text matches baseline byte-for-byte OR semantically (whitespace tolerance documented).
-  - `raw_signals.segments[*].tokens[*]` still populates with valid `id`/`text`/`p`/`plog` on each video.
-  - Per-video wall-clock not worse than baseline (best case: small win from skipping timestamp generation).
-- **Fail handling:** revert commit 8; add the bake commit as `revert: bake gate failed for set_no_timestamps`; add a FOLLOWUPS entry documenting the regression for future re-investigation.
+- Two runs (pre + post), each video run 2× per side to verify determinism under `Greedy { best_of: 1 }` (assert intra-side identical raw_signals across the 2× runs).
+- Capture per-video: (a) full transcript text, (b) full `raw_signals.segments` payload — including per-segment `no_speech_prob` and the complete per-token `id`/`text`/`p`/`plog` arrays in emission order, (c) end-to-end transcription wall-clock.
+- **Pass criteria — hypothesis-aligned, tight on confidence signals:**
+  - **Transcript text:** byte-for-byte equality with the pre-change baseline.
+  - **Per-token sequence:** concatenated `tokens.id` and `tokens.text` arrays across all segments are equal pre vs. post (token grouping into segments may change per the hypothesis, but the flattened token sequence must not).
+  - **Per-token `p` and `plog`:** equal pre vs. post within absolute tolerance `1e-6` (covers floating-point reordering noise without permitting actual sampling drift). If equality is exact, great; if differences exceed `1e-6`, the hypothesis is wrong and the change must be reverted.
+  - **Per-segment `no_speech_prob`:** for each pre-change segment, the post-change segment that contains its tokens must have an identical `no_speech_prob` value (since whisper.cpp computes it per-window — see hypothesis). Implementation: walk the flattened token sequence pre and post, find the window-boundary segment break, assert `no_speech_prob` matches.
+  - **Wall-clock:** per-video post-change median ≤ pre-change median (median over the 2× intra-side runs). The hypothesis predicts a small win; a meaningful regression here is also a failure signal.
+- **Fail handling:** if any of the four signal-equality checks fails (transcript bytes, token sequence, p/plog within tolerance, per-window `no_speech_prob`), revert commit 8 with subject `revert: bake gate failed for set_no_timestamps — see commit body`. The revert commit body documents which signal diverged and by how much. A new FOLLOWUPS entry routes the finding for future re-investigation. If only wall-clock regresses (signals identical), still revert — the perf rationale evaporates. **No schema-impact / AD0010-amendment work is attempted from inside this worktree even if signals diverge** — that's Plan C scope.
 
 ## AD0021 — Bounded subprocess output capture
 
@@ -175,7 +181,7 @@ Two bake commits gate the two behavioral changes. Both append to `docs/SRC-BAKE-
 
 **Consequences.**
 
-- Memory ceiling is now `stdout_capture_bytes + stderr_capture_bytes` per subprocess (call-site controlled), not "tool exit + truncation."
+- **Retained-output memory ceiling** is now `stdout_capture_bytes + stderr_capture_bytes` per subprocess (call-site controlled), not "tool exit + truncation." Total peak memory during a `run` call is `retained + O(read_chunk_size_stdout + read_chunk_size_stderr + tokio task overhead)` — the chunk buffers used by the streaming reader hold at most one `read()` worth of bytes each before draining into the `VecDeque<u8>`. This caveat exists because "bounded by construction" applies to the retained buffer, not to instantaneous transient allocations.
 - Call sites must explicitly opt in to stdout capture; `yt-dlp` and ffmpeg-postprocessor paths get `0` (no behavioral change — they did not read `outcome.stdout`).
 - Plan B Epic 2's T13 inherits this design. T13 may add symmetric stdout policy decisions (different defaults for specific tools) without authoring a new ADR; if it changes the design, it supersedes AD0021 with a new ADR per existing convention.
 - Test coverage in new `tests/process_bounded_capture.rs` covers overflow/preservation/exit-code/stdout opt-in/peak-memory-bounded.
@@ -243,11 +249,13 @@ Total: 10 commits. Each independently reviewable and selectively revertable.
 
 ## Open questions carried into the implementation plan
 
-1. **#6 final arg string.** Verify against `AD0014` and the `hound` decoder whether `-c:a pcm_s16le` is correct, or whether yt-dlp's `--audio-format wav` default already supplies it.
-2. **#1 error-variant decision.** Does deferred `create_state` failure get a new `TranscribeError::StateCreate` variant, or fold into an existing variant? Confirm against `src/errors.rs` / `src/transcribe.rs` during implementation.
-3. **#5 streaming reader idiom.** Likely a `tokio::io::AsyncReadExt::read` loop feeding the `VecDeque<u8>`. Confirm cancellation-safe pattern compatible with the existing `tokio::try_join!` shape.
-4. **#4 `-S` value.** Verify `+size,+br,+res,+fps` syntax against the yt-dlp version pinned in this repo / CI.
-5. **#2 bake reproducibility.** Confirm whisper.cpp's `Greedy { best_of: 1 }` is deterministic for a fixed input; run each fixture video 2× per side as a sanity check.
+1. **#6 mandatory pre-implementation validation (lifted from per-item section for visibility).** Two coupled checks must run before the arg string is locked: (a) `yt-dlp -v --postprocessor-args 'ffmpeg:…' …` against a representative TikTok URL to confirm `-map` and the other flags land in the correct positions in yt-dlp's internal ffmpeg invocation; (b) codec sanity check against `AD0014` + `hound` decoder to confirm `pcm_s16le` matches the expected WAV format. The implementation commit message must include the verbose-log snippet showing the resulting ffmpeg command line.
+2. **#5 streaming reader idiom.** Likely a `tokio::io::AsyncReadExt::read` loop into a small fixed-size chunk buffer, draining into the `VecDeque<u8>` and instrumenting `peak_buffer_len` after each push/pop. Confirm cancellation-safe pattern compatible with the existing `tokio::try_join!` shape; consider `tokio::select!` on `child.wait()` + the two reader futures if `try_join!` semantics block clean cancellation.
+3. **#4 `-S` value.** Verify `+size,+br,+res,+fps` syntax against the yt-dlp version pinned in this repo / CI. yt-dlp's sort syntax has evolved across versions; the pinned-version docs are authoritative.
+4. **#2 bake determinism.** Confirm whisper.cpp's `Greedy { best_of: 1 }` is bit-identical for a fixed input by running each fixture video 2× per side (pre + post) and asserting intra-side equality of all raw_signals values BEFORE comparing across sides. If intra-side equality fails on `p`/`plog`, raise the absolute tolerance from `1e-6` to a measured value — but document the floor.
+
+(Closed during second review:)
+- ~~#1 error-variant decision.~~ Resolved in spec: lazy `create_state` failure uses `TranscribeError::Bug { detail }` per existing convention; Epic 3 will reclassify.
 
 ## Cross-session coordination
 
