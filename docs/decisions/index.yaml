@@ -215,3 +215,39 @@ decisions:
             - author: Danielle McCool
               date: "2026-05-12 13:07:38"
               comment: "1"
+    "0018":
+        adr_id: "0018"
+        title: Three-tier review protocol with codex-advisor delegated via Sonnet reviewer
+        status: decided
+        tags: []
+        links:
+            precedes: []
+            succeeds: []
+        comments:
+            - author: Danielle McCool
+              date: "2026-05-13 15:46:23"
+              comment: "1"
+    "0019":
+        adr_id: "0019"
+        title: Subagent report format and phase-boundary controller restart
+        status: decided
+        tags: []
+        links:
+            precedes: []
+            succeeds: []
+        comments:
+            - author: Danielle McCool
+              date: "2026-05-13 16:06:27"
+              comment: "1"
+    "0020":
+        adr_id: "0020"
+        title: FOLLOWUPS four-file split with archive-at-epic-close and unverified-hypothesis marking
+        status: decided
+        tags: []
+        links:
+            precedes: []
+            succeeds: []
+        comments:
+            - author: Danielle McCool
+              date: "2026-05-13 16:06:27"
+              comment: "1"

@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Emits SessionStart additionalContext as JSON: active plan, codex-advisor
+# session UUID, current git branch, recent commits. Wired in by the
+# SessionStart hook in .claude/settings.json. All state is queried at session
+# start so it never goes stale in CLAUDE.md (per AD0020).
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
+
+plan="$(find docs/superpowers/plans -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -1)"
+plan="${plan:-(none)}"
+codex="$(codex-advisor id 2>/dev/null || echo unset)"
+branch="$(git branch --show-current 2>/dev/null || echo unknown)"
+log="$(git log --oneline -5 2>/dev/null | sed 's/^/    /')"
+
+context=$(printf 'Active state:\n- active plan: %s\n- codex-advisor session: %s\n- current branch: %s\n- recent commits:\n%s' \
+    "$plan" "$codex" "$branch" "$log")
+
+jq -nc --arg ctx "$context" \
+    '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:$ctx}}'
