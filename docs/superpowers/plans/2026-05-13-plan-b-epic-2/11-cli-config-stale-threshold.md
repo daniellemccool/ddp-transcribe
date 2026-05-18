@@ -1,8 +1,8 @@
 # Task 11 — CLI + Config: `--stale-claim-threshold` flag with 30-min default
 
-**Goal:** Add `--stale-claim-threshold` to the CLI (parsed via `humantime`-style "30m"/"1h"/"45s"), a corresponding `Config::stale_claim_threshold: Duration` field with 30-min default, and plumb it through to `pipeline::ProcessOptions::stale_claim_threshold`. Per AD0023.
+**Goal:** Add `--stale-claim-threshold` to the CLI (parsed via `humantime`-style "30m"/"1h"/"45s"), a corresponding `Config::stale_claim_threshold: Duration` field with 30-min default, and plumb it through to `pipeline::ProcessOptions::stale_claim_threshold`. Per 0024.
 
-**ADRs touched:** AD0023 (30-min default).
+**ADRs touched:** 0024 (30-min default).
 
 **Files:**
 - Modify: `Cargo.toml` (add `humantime = "2"` to deps)
@@ -72,7 +72,7 @@ pub struct GlobalArgs {
 
     /// Threshold for sweeping stale (process-crashed) claims back to pending.
     /// Accepts humantime strings: "30m" (default), "1h", "45s".
-    /// AD0023: 30-min default is well above bake worst-case (~25s).
+    /// 0024: 30-min default is well above bake worst-case (~25s).
     #[arg(
         long,
         env = "UU_TIKTOK_STALE_CLAIM_THRESHOLD",
@@ -119,7 +119,7 @@ pub struct Config {
     pub ytdlp_timeout: Duration,
     pub transcribe_timeout: Duration,
     pub compute_lang_probs: bool,
-    /// Stale-claim sweep threshold (AD0023). Default 30 min if CLI/env
+    /// Stale-claim sweep threshold (0024). Default 30 min if CLI/env
     /// did not supply a value.
     pub stale_claim_threshold: Duration,
 }
@@ -202,13 +202,13 @@ Expected: clean.
 ```bash
 git add Cargo.toml Cargo.lock src/cli.rs src/config.rs src/main.rs src/pipeline.rs
 git commit -m "$(cat <<'EOF'
-feat(cli,config): --stale-claim-threshold flag (humantime, 30-min default) per AD0023
+feat(cli,config): --stale-claim-threshold flag (humantime, 30-min default) per 0024
 
 Plumbs the stale-claim sweep threshold from CLI → Config → ProcessOptions →
 run_serial. Accepts humantime strings ("30m", "1h", "45s"). Env var
 UU_TIKTOK_STALE_CLAIM_THRESHOLD also reads through clap's env support.
 
-Default is 30 minutes per AD0023 — well above bake worst-case (~25s
+Default is 30 minutes per 0024 — well above bake worst-case (~25s
 end-to-end per video on large-v3-turbo-q5_0) and prevents stealing
 from healthy peers in any future multi-instance scenario.
 
@@ -217,7 +217,7 @@ matches the rest of the project's "operator-readable" CLI ergonomics.
 
 Tests: default is 30 min; CLI override flows through to Config.
 
-Refs: AD0023
+Refs: 0024
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -233,4 +233,4 @@ EOF
 - [ ] Default is 30 min when flag is absent
 - [ ] `UU_TIKTOK_STALE_CLAIM_THRESHOLD` env var also works (clap env support)
 - [ ] Clippy/fmt clean
-- [ ] Phase 1 task list is now complete — controller writes `PHASE-1-CLOSE.md` per AD0019 before starting Phase 2
+- [ ] Phase 1 task list is now complete — controller writes `PHASE-1-CLOSE.md` per 0019 before starting Phase 2

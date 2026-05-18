@@ -2,7 +2,7 @@
 
 **Goal:** The existing `concurrent_claim_serializes_via_begin_immediate` test (in `tests/state_claims.rs` or equivalent) runs two claim attempts sequentially — it asserts BEGIN-IMMEDIATE serialization but never actually contends. Rewrite using `std::thread::spawn` + `std::sync::Barrier` so both threads enter `claim_next` simultaneously, racing for the same pending row. Confirms exactly one wins and one returns `None`. Resolves FOLLOWUPS T10 (test rewrite).
 
-**ADRs touched:** — (this is a test-discipline cleanup per AD0003; no design ADR).
+**ADRs touched:** — (this is a test-discipline cleanup per 0003; no design ADR).
 
 **Files:**
 - Modify: `tests/state_claims.rs` (or wherever the existing test lives)
@@ -148,7 +148,7 @@ If BEGIN-IMMEDIATE ever regresses (or a future schema change breaks
 it), this test fails with some_count == 2 (both threads won — bug
 in the claim path) instead of passing silently.
 
-Refs: AD0003 (test discipline); FOLLOWUPS T10 (test rewrite) resolved.
+Refs: 0003 (test discipline); FOLLOWUPS T10 (test rewrite) resolved.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF

@@ -2,7 +2,7 @@
 
 **Goal:** Operational validation on the SRC A10 workspace. Two measurements: (a) throughput comparison N=3 vs N=1 (serial) against the `news_orgs` fixture; capture wallclock + per-stage breakdown; (b) coordinated-shutdown drill: `kill -KILL` the running process mid-batch, restart, confirm the sweep recovers in-progress rows. Append findings to `docs/SRC-BAKE-NOTES.md`.
 
-**ADRs touched:** AD0027 (validates the N=3 default).
+**ADRs touched:** 0027 (validates the N=3 default).
 
 **Files:**
 - Modify: `docs/SRC-BAKE-NOTES.md` (append a Phase 2 section)
@@ -77,7 +77,7 @@ time UU_TIKTOK_DOWNLOAD_WORKERS=5 ./target/release/uu-tiktok \
     process
 ```
 
-Capture wallclock. Confirm marginal-or-no improvement vs N=3 (per AD0027 throughput math). If N=5 substantially outperforms N=3, that's a finding to record — AD0027's default may need revision. Document either way.
+Capture wallclock. Confirm marginal-or-no improvement vs N=3 (per 0027 throughput math). If N=5 substantially outperforms N=3, that's a finding to record — 0027's default may need revision. Document either way.
 
 - [ ] **Step 6: Coordinated-shutdown drill**
 
@@ -135,7 +135,7 @@ Add a "Plan B Epic 2 bake" section at the bottom (matching the format of the exi
 | N=5 | <Xs> | <Xs> | <X.XX×> |
 
 **Finding 1**: N=3 vs N=1 speedup is <X.XX×> (predicted ~3.5×; <within | exceeds | below expectation>).
-**Finding 2**: N=5 vs N=3 delta is <X%>; <consistent with curve-flattening prediction in AD0027 | suggests revisiting the default>.
+**Finding 2**: N=5 vs N=3 delta is <X%>; <consistent with curve-flattening prediction in 0027 | suggests revisiting the default>.
 
 ### Coordinated-shutdown drill
 
@@ -147,7 +147,7 @@ Add a "Plan B Epic 2 bake" section at the bottom (matching the format of the exi
 - Recovered rows re-claimed and processed to success.
 - Final DB state: all rows `succeeded`.
 
-**Finding 3**: AD0024 shutdown order + AD0023 sweep work as designed; no manual operator intervention needed beyond restarting `process`.
+**Finding 3**: 0025 shutdown order + 0024 sweep work as designed; no manual operator intervention needed beyond restarting `process`.
 
 ### Resource envelope
 
@@ -170,15 +170,15 @@ Throughput (large-v3-turbo-q5_0, news_orgs fixture):
 - N=3 (default): <wallclock>s, <speedup>×
 - N=5: <wallclock>s, <speedup>×
 
-N=3 vs N=1 speedup matches AD0027's ~3.5× prediction within <margin>%.
-N=5 shows <marginal | substantial> improvement vs N=3 — AD0027's
+N=3 vs N=1 speedup matches 0027's ~3.5× prediction within <margin>%.
+N=5 shows <marginal | substantial> improvement vs N=3 — 0027's
 default remains correct / needs revision per Finding 2.
 
 Coordinated-shutdown drill: kill -KILL mid-batch → restart with short
 stale-claim threshold → sweep recovers in-progress rows → rerun
-succeeds. AD0024 shutdown order + AD0023 sweep both validated.
+succeeds. 0025 shutdown order + 0024 sweep both validated.
 
-Refs: AD0023, AD0024, AD0027
+Refs: 0024, 0025, 0027
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -187,15 +187,15 @@ EOF
 
 - [ ] **Step 9: FOLLOWUPS resolution sweep**
 
-Move resolved entries from `docs/followups/epic-2.md` to `docs/archive/followups-resolved.md` with the resolving commit SHAs. Per AD0020:
+Move resolved entries from `docs/followups/epic-2.md` to `docs/archive/followups-resolved.md` with the resolving commit SHAs. Per 0020:
 
 - `Store::open` schema-version not read → T2/T3 (record SHAs)
 - `concurrent_claim_serializes_via_begin_immediate` doesn't race → T10
 - `mark_succeeded` predicate + missing round-trip → T5
-- `claim_next` polling semantics → T12 (AD0025)
+- `claim_next` polling semantics → T12 (0026)
 - `process::run` unbounded → T14
 - `ring_buffer_tail` misnamed → T14
-- WhisperEngine teardown can hang → T18 (AD0024)
+- WhisperEngine teardown can hang → T18 (0025)
 - Config dead fields (whisper_use_gpu/whisper_threads) → T18
 
 Update `docs/FOLLOWUPS.md` scope-index to remove the corresponding lines under "Epic 2".
@@ -205,7 +205,7 @@ git add docs/FOLLOWUPS.md docs/followups/epic-2.md docs/archive/followups-resolv
 git commit -m "$(cat <<'EOF'
 docs(followups): Epic 2 resolution sweep — archive entries resolved by T2-T18
 
-Per AD0020, move resolved FOLLOWUPS entries from docs/followups/epic-2.md
+Per 0020, move resolved FOLLOWUPS entries from docs/followups/epic-2.md
 to docs/archive/followups-resolved.md with resolving commit SHAs. Update
 the scope-index in docs/FOLLOWUPS.md.
 
@@ -213,13 +213,13 @@ Entries archived:
 - T7: Store::open schema-version not read → T2/T3
 - T10: concurrent_claim doesn't race → T10
 - T10: mark_succeeded predicate + round-trip → T5
-- T10: claim_next polling semantics → AD0025
+- T10: claim_next polling semantics → 0026
 - T6: process::run unbounded → T14
 - T6: ring_buffer_tail misnamed → T14
-- T5: WhisperEngine teardown → AD0024
+- T5: WhisperEngine teardown → 0025
 - (Config dead fields → T18)
 
-Refs: AD0020
+Refs: 0020
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -240,8 +240,8 @@ gh pr create --base main --head feat/plan-b-epic-2 --title "Plan B Epic 2 — st
   classifier wiring into run_serial).
 - Phase 2: pipelined orchestrator (N=3 fetch + 1 transcribe over bounded
   mpsc, JoinSet + CancellationToken supervision, load-bearing shutdown
-  ORDER per AD0024).
-- Seven new ADRs: AD0021–AD0027.
+  ORDER per 0025).
+- Seven new ADRs: 0022–0027.
 - Bake findings appended to docs/SRC-BAKE-NOTES.md (N=3 throughput,
   coordinated-shutdown drill).
 - FOLLOWUPS Epic 2 entries resolved and archived.

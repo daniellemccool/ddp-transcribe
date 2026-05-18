@@ -1,8 +1,8 @@
 # Task 6 — `Store::mark_retryable_failure(video_id, worker_id, kind, message)`
 
-**Goal:** New `Store` mutator that flips a row from `in_progress` to `failed_retryable` and records the kind + message in the new columns. Same `WHERE status='in_progress' AND claimed_by = ?` predicate as the tightened `mark_succeeded` (AD0022 symmetric). Returns `Result<usize>` per AD0006.
+**Goal:** New `Store` mutator that flips a row from `in_progress` to `failed_retryable` and records the kind + message in the new columns. Same `WHERE status='in_progress' AND claimed_by = ?` predicate as the tightened `mark_succeeded` (0023 symmetric). Returns `Result<usize>` per 0006.
 
-**ADRs touched:** AD0006 (return shape), AD0022 (predicate + signature).
+**ADRs touched:** 0006 (return shape), 0023 (predicate + signature).
 
 **Files:**
 - Modify: `src/state/mod.rs` (`mark_retryable_failure` mutator + doc comment)
@@ -85,9 +85,9 @@ In `src/state/mod.rs`, alongside `mark_succeeded`:
 
 ```rust
 /// Flip a video row from `in_progress` to `failed_retryable`, recording
-/// the failure classification (kind + message) per AD0022. Same
+/// the failure classification (kind + message) per 0023. Same
 /// stale-claim predicate as `mark_succeeded`. Returns the row-change
-/// count per AD0006: 0 on stale claim, 1 on successful flip.
+/// count per 0006: 0 on stale claim, 1 on successful flip.
 ///
 /// `kind` is a stable short tag (e.g. "FetchTimeout", "TranscribeError").
 /// Epic 3's typed RetryableKind serializes via tag()/message() into the
@@ -143,7 +143,7 @@ pub fn mark_retryable_failure(
 }
 ```
 
-Design note: `claimed_by` and `claimed_at` are cleared on transition to `failed_retryable` so a subsequent `claim_next` doesn't see the stale claim. AD0023's sweep handles the operator-recovery path for `in_progress` rows; this mutator handles the application-noticed-failure path.
+Design note: `claimed_by` and `claimed_at` are cleared on transition to `failed_retryable` so a subsequent `claim_next` doesn't see the stale claim. 0024's sweep handles the operator-recovery path for `in_progress` rows; this mutator handles the application-noticed-failure path.
 
 - [ ] **Step 3: Run the tests**
 
@@ -175,7 +175,7 @@ tx.execute(
 ```bash
 git add src/state/mod.rs tests/state_claims.rs
 git commit -m "$(cat <<'EOF'
-feat(state): mark_retryable_failure mutator (AD0006, AD0022)
+feat(state): mark_retryable_failure mutator (0006, 0023)
 
 Flips status='in_progress' → 'failed_retryable' when the application
 notices a transient failure (fetch timeout, transcribe error). Records
@@ -183,16 +183,16 @@ kind + message in last_retryable_kind / last_retryable_message; clears
 claimed_by/claimed_at so claim_next doesn't see a phantom claim.
 
 Symmetric stale-claim predicate (status='in_progress' AND claimed_by=?)
-returns 0 on the wrong-worker case per AD0022.
+returns 0 on the wrong-worker case per 0023.
 
 Tests: happy path (status flips, columns populated, video_events row
 inserted) + stale-claim path (returns 0, row unchanged).
 
-`kind` is a string today per AD0022. Epic 3 introduces typed
+`kind` is a string today per 0023. Epic 3 introduces typed
 RetryableKind that serializes into the same columns via tag()/message();
 no schema change.
 
-Refs: AD0006, AD0022
+Refs: 0006, 0023
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF

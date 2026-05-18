@@ -2,14 +2,14 @@
 
 **Goal:** `Store::open` reads `meta.schema_version` and compares against the `SCHEMA_VERSION` constant. On mismatch, return a typed `SchemaVersionMismatch { expected, found }` error containing an operator-readable instruction directing them to `uu-tiktok migrate`. Resolves FOLLOWUPS T7 (`Store::open` schema-version not read).
 
-**ADRs touched:** AD0021 (schema-version policy: hard-fail).
+**ADRs touched:** 0022 (schema-version policy: hard-fail).
 
 **Files:**
 - Modify: `src/state/mod.rs` (the `Store::open` body + add `StateError` type)
 - Modify: `src/state/schema.rs` (no change to the SQL; constant unchanged this task — T4 bumps it)
 - Modify: `tests/state_ingest.rs` or new `tests/state_schema_version.rs` (round-trip test for the version check)
 
-**Pre-reqs:** T1 complete (AD0021 decided).
+**Pre-reqs:** T1 complete (0022 decided).
 
 ---
 
@@ -32,10 +32,10 @@ pub enum StateError {
 
 - [ ] **Step 2: Write the failing tests first**
 
-Add a new test file `tests/state_schema_version.rs` (gated on `test-helpers` per AD0005 — register it in `Cargo.toml` if not already):
+Add a new test file `tests/state_schema_version.rs` (gated on `test-helpers` per 0005 — register it in `Cargo.toml` if not already):
 
 ```rust
-//! Schema-version handling on Store::open. Per AD0021, mismatches are
+//! Schema-version handling on Store::open. Per 0022, mismatches are
 //! a typed error that directs the operator to `uu-tiktok migrate`.
 
 use anyhow::Result;
@@ -122,13 +122,13 @@ pub use schema::SCHEMA_VERSION;
 // (StateError is defined below; the enum itself is already pub. No re-export needed.)
 ```
 
-If the integration test can't see `StateError` because `src/state/mod.rs` isn't at the crate root, confirm `src/lib.rs` has `pub mod state;`. (If the project is a binary-only crate at this point, T2 needs to also create `src/lib.rs` and have `main.rs` consume from it; see AD0005 for the test-helpers feature pattern. Confirm shape before editing.)
+If the integration test can't see `StateError` because `src/state/mod.rs` isn't at the crate root, confirm `src/lib.rs` has `pub mod state;`. (If the project is a binary-only crate at this point, T2 needs to also create `src/lib.rs` and have `main.rs` consume from it; see 0005 for the test-helpers feature pattern. Confirm shape before editing.)
 
 ```bash
 ls src/lib.rs 2>/dev/null && echo "(lib.rs present)" || echo "(bin-only — confirm with controller)"
 ```
 
-If `src/lib.rs` is absent, **STOP** and surface to the controller. Epic 1 explicitly defers bin/lib reassessment to Epic 5 (per AD0002 cleanup-on-consumption + AD0020 FOLLOWUPS). Integration tests reach into the crate via the test-helpers feature; confirm the existing test pattern (`tests/state_ingest.rs` etc.) before adding the new test file.
+If `src/lib.rs` is absent, **STOP** and surface to the controller. Epic 1 explicitly defers bin/lib reassessment to Epic 5 (per 0002 cleanup-on-consumption + 0020 FOLLOWUPS). Integration tests reach into the crate via the test-helpers feature; confirm the existing test pattern (`tests/state_ingest.rs` etc.) before adding the new test file.
 
 - [ ] **Step 4: Implement the version check in `Store::open`**
 
@@ -178,13 +178,13 @@ pub fn open(path: &Path) -> Result<Self> {
     // Apply schema idempotently. CREATE TABLE IF NOT EXISTS is safe on
     // both fresh DBs and existing DBs at any version — the column set
     // declared here is the CURRENT version; older DBs miss the new
-    // columns and require `migrate` (per AD0021).
+    // columns and require `migrate` (per 0022).
     conn.execute_batch(schema::SCHEMA_SQL)
         .context("applying schema")?;
 
     // Read schema_version. On a fresh DB the meta row doesn't exist yet;
     // record the current version. On an existing DB at the current version,
-    // continue. On a mismatch, return SchemaVersionMismatch (AD0021).
+    // continue. On a mismatch, return SchemaVersionMismatch (0022).
     let found: Option<String> = conn
         .query_row(
             "SELECT value FROM meta WHERE key = 'schema_version'",
@@ -236,7 +236,7 @@ cargo test --features test-helpers
 Expected: all existing tests still pass. Two specific concerns:
 
 - `state_ingest.rs` and `state_claims.rs` open `Store` against fresh tempdirs; they hit the fresh-DB path and stay green.
-- `main` opens `Store::open` for `init`, `ingest`, `process`. On a fresh DB the path is unchanged; on an existing v1 DB (Plan A users) `init` and `ingest` and `process` will all fail. **This is the intended AD0021 behavior** — the operator runs `uu-tiktok migrate` (T3) before re-running.
+- `main` opens `Store::open` for `init`, `ingest`, `process`. On a fresh DB the path is unchanged; on an existing v1 DB (Plan A users) `init` and `ingest` and `process` will all fail. **This is the intended 0022 behavior** — the operator runs `uu-tiktok migrate` (T3) before re-running.
 
 - [ ] **Step 7: cargo fmt + clippy**
 
@@ -251,12 +251,12 @@ Expected: clean.
 ```bash
 git add src/state/mod.rs tests/state_schema_version.rs Cargo.toml
 git commit -m "$(cat <<'EOF'
-feat(state): Store::open reads schema_version; typed SchemaVersionMismatch error (AD0021)
+feat(state): Store::open reads schema_version; typed SchemaVersionMismatch error (0022)
 
 Plan A's Store::open recorded schema_version on first run via
 INSERT OR IGNORE INTO meta but never read it back. Epic 2 needs to
 hard-fail on version mismatch so operators are explicitly directed
-to the new `migrate` subcommand (per AD0021).
+to the new `migrate` subcommand (per 0022).
 
 This task: Store::open now SELECTs meta.schema_version. On a fresh DB
 the row doesn't exist yet; record the current version. On an existing
@@ -268,10 +268,10 @@ Integration test (tests/state_schema_version.rs, --features test-helpers):
 fresh-DB happy path + mismatch round-trip via raw connection.
 
 Pre-Epic-2 v1 DBs (Plan A users) now fail every subcommand until
-migrate runs. This is the intended AD0021 behavior — operationally
+migrate runs. This is the intended 0022 behavior — operationally
 visible by design.
 
-Refs: AD0021, FOLLOWUPS T7
+Refs: 0022, FOLLOWUPS T7
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF

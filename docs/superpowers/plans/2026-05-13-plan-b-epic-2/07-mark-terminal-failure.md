@@ -2,10 +2,10 @@
 
 **Goal:** Add a `mark_terminal_failure(video_id, worker_id, reason, message) -> Result<usize>` mutator that flips a row from `in_progress` to `failed_terminal` and records reason + message in the terminal columns. **No Epic 2 caller wires this** — Epic 3's classifier dispatcher is the first caller. Surface lands in Epic 2 so Epic 3 is a classifier-add task, not a mutator-add task. Test the mutator anyway.
 
-**ADRs touched:** AD0006 (return shape), AD0022 (predicate + signature).
+**ADRs touched:** 0006 (return shape), 0023 (predicate + signature).
 
 **Files:**
-- Modify: `src/state/mod.rs` (`mark_terminal_failure` mutator + `#[allow(dead_code)]` per AD0002)
+- Modify: `src/state/mod.rs` (`mark_terminal_failure` mutator + `#[allow(dead_code)]` per 0002)
 - Modify: `tests/state_claims.rs` (mutator round-trip test; gated on `--features test-helpers` so the dead-code suppression doesn't fire in the bin compile)
 
 **Pre-reqs:** T4 (terminal_reason/terminal_message columns exist), T6 (mark_retryable_failure pattern established).
@@ -86,7 +86,7 @@ In `src/state/mod.rs`, alongside `mark_retryable_failure`:
 /// Flip a video row from `in_progress` to `failed_terminal`, recording
 /// the terminal reason + message in the terminal_reason/terminal_message
 /// columns. Same stale-claim predicate as the rest of the family
-/// (AD0022). Returns the row-change count per AD0006.
+/// (0023). Returns the row-change count per 0006.
 ///
 /// **SURFACE ONLY in Epic 2 — no caller wires this.** Epic 3's classifier
 /// dispatcher is the first caller (when failure classification distinguishes
@@ -95,7 +95,7 @@ In `src/state/mod.rs`, alongside `mark_retryable_failure`:
 /// surface in Epic 2 means Epic 3 is a classifier-add task, not a
 /// mutator-add task — keeps Epic 3's diff focused on the new logic.
 ///
-/// AD0002 cleanup discipline: `#[allow(dead_code)]` lives on this method
+/// 0002 cleanup discipline: `#[allow(dead_code)]` lives on this method
 /// until Epic 3's first caller wires it. The closing task of Epic 3's
 /// classifier work removes the attribute.
 #[allow(dead_code)]
@@ -142,7 +142,7 @@ pub fn mark_terminal_failure(
 }
 ```
 
-The `#[allow(dead_code)]` is intentional and visible: per AD0002, the bin compile has no caller, so without the attribute clippy `-D warnings` fails. The attribute documents that Epic 3 is the first caller (matching the doc comment).
+The `#[allow(dead_code)]` is intentional and visible: per 0002, the bin compile has no caller, so without the attribute clippy `-D warnings` fails. The attribute documents that Epic 3 is the first caller (matching the doc comment).
 
 - [ ] **Step 3: Run the tests**
 
@@ -173,11 +173,11 @@ Expected: clean (with the `#[allow(dead_code)]`).
 ```bash
 git add src/state/mod.rs tests/state_claims.rs
 git commit -m "$(cat <<'EOF'
-feat(state): mark_terminal_failure mutator — surface only, no Epic 2 caller (AD0022)
+feat(state): mark_terminal_failure mutator — surface only, no Epic 2 caller (0023)
 
 Companion to mark_retryable_failure (T6). Flips status='in_progress' →
 'failed_terminal' with the terminal_reason + terminal_message columns.
-Same stale-claim predicate; same Result<usize> return per AD0006.
+Same stale-claim predicate; same Result<usize> return per 0006.
 
 **No Epic 2 caller wires this.** Epic 3's classifier dispatcher is the
 first caller, when failure classification distinguishes terminal classes
@@ -186,13 +186,13 @@ mutator surface in Epic 2 means Epic 3 is a classifier-add task, not a
 mutator-add task.
 
 #[allow(dead_code)] lives on the method until Epic 3's classifier wires
-it — AD0002 cleanup discipline (the attribute is removed in the same
+it — 0002 cleanup discipline (the attribute is removed in the same
 commit that lands the first caller).
 
 Tests gated on --features test-helpers so the lint doesn't fire on bin
 compiles. Round-trip + stale-claim cases covered.
 
-Refs: AD0002, AD0006, AD0022
+Refs: 0002, 0006, 0023
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -206,4 +206,4 @@ EOF
 - [ ] `cargo test --features test-helpers --test state_claims` passes
 - [ ] `cargo clippy --all-targets -- -D warnings` clean (the `#[allow(dead_code)]` is necessary)
 - [ ] The doc comment explicitly names Epic 3 as the first caller (future-reader signal)
-- [ ] Same predicate + same return shape as mark_retryable_failure (AD0022 symmetric)
+- [ ] Same predicate + same return shape as mark_retryable_failure (0023 symmetric)

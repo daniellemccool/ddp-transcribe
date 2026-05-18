@@ -2,7 +2,7 @@
 
 **Goal:** Add a `migrate` subcommand that opens the DB **raw** (bypassing `Store::open`'s version check, which would reject a v1 DB), runs `ALTER TABLE videos ADD COLUMN ... NULL` × 4 + `UPDATE meta SET value='2'` inside one transaction, and commits. Idempotent on v2 DBs (no-op if already migrated).
 
-**ADRs touched:** AD0021 (schema-version policy).
+**ADRs touched:** 0022 (schema-version policy).
 
 **Files:**
 - Modify: `src/cli.rs` (add `Migrate` variant)
@@ -11,7 +11,7 @@
 - Modify: `src/state/mod.rs` (`mod migrate;` declaration)
 - Create: `tests/state_migrate.rs` (integration test against a synthesized v1 fixture)
 
-**Pre-reqs:** T1 + T2 complete (AD0021 decided; SchemaVersionMismatch error exists). **NOTE:** T4 (which bumps SCHEMA_VERSION constant and adds the four columns to the CREATE TABLE block) MUST land alongside or before T3 for the integration test's "post-migrate Store::open succeeds" assertion to work end-to-end. Implementer can choose to land T3+T4 as a paired commit or land T4 first; if T3 lands alone, mark the post-migrate-open assertion `#[ignore]` until T4.
+**Pre-reqs:** T1 + T2 complete (0022 decided; SchemaVersionMismatch error exists). **NOTE:** T4 (which bumps SCHEMA_VERSION constant and adds the four columns to the CREATE TABLE block) MUST land alongside or before T3 for the integration test's "post-migrate Store::open succeeds" assertion to work end-to-end. Implementer can choose to land T3+T4 as a paired commit or land T4 first; if T3 lands alone, mark the post-migrate-open assertion `#[ignore]` until T4.
 
 ---
 
@@ -183,7 +183,7 @@ Expected: FAIL — `uu_tiktok::state::migrate` module doesn't exist.
 - [ ] **Step 3: Create `src/state/migrate.rs`**
 
 ```rust
-//! Pre-Epic-2 → Epic 2 schema migration (AD0021). Opens the DB raw,
+//! Pre-Epic-2 → Epic 2 schema migration (0022). Opens the DB raw,
 //! bypassing Store::open's version check; runs ALTER TABLE + UPDATE meta
 //! inside one transaction. Idempotent on already-migrated DBs.
 
@@ -216,7 +216,7 @@ pub fn run_migrate(path: &Path) -> Result<()> {
         None => {
             // No meta.schema_version row at all. Treat as v1 (Plan A) since
             // the schema apply path in Store::open would have inserted it
-            // for any non-pre-Plan-A DB. AD0021 records this as the
+            // for any non-pre-Plan-A DB. 0022 records this as the
             // pre-Plan-A migration target if ever needed.
             "1".to_string()
         }
@@ -278,7 +278,7 @@ Add at the top of `src/state/mod.rs`:
 pub mod migrate;
 ```
 
-The `pub` is intentional: `tests/state_migrate.rs` (an integration test) consumes `migrate::run_migrate`. AD0005 (test-helpers feature) doesn't apply here because `run_migrate` is also called from `main.rs` (the binary). The function is genuinely public API.
+The `pub` is intentional: `tests/state_migrate.rs` (an integration test) consumes `migrate::run_migrate`. 0005 (test-helpers feature) doesn't apply here because `run_migrate` is also called from `main.rs` (the binary). The function is genuinely public API.
 
 - [ ] **Step 5: Wire the `Migrate` dispatch arm in `src/main.rs`**
 
@@ -329,7 +329,7 @@ Expected: clean. (Clippy may flag `if let Some(v) = found.parse::<u32>().ok()` �
 ```bash
 git add src/cli.rs src/main.rs src/state/mod.rs src/state/migrate.rs tests/state_migrate.rs Cargo.toml
 git commit -m "$(cat <<'EOF'
-feat(state): `migrate` CLI subcommand for v1→v2 schema upgrade (AD0021)
+feat(state): `migrate` CLI subcommand for v1→v2 schema upgrade (0022)
 
 Adds:
 - `Migrate` CLI variant
@@ -345,7 +345,7 @@ Idempotent on already-v2 DBs (no-op + log). Hard-fails on newer-than-binary
 versions (downgrade not supported). v0/pre-Plan-A DBs (no meta row) are
 treated as v1 — same migration ladder applies.
 
-Refs: AD0021
+Refs: 0022
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF

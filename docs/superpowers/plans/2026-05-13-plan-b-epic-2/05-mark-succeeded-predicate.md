@@ -2,7 +2,7 @@
 
 **Goal:** Tighten `Store::mark_succeeded` to require `WHERE status='in_progress' AND claimed_by = ?` so calling it on a stale-claimed row returns 0 (no rows updated) instead of silently succeeding. Adds a round-trip test (`claim → mark_succeeded → second claim_next returns the row again if first claim was stale`). Resolves FOLLOWUPS T10 (mark_succeeded doesn't require `status='in_progress'`) and FOLLOWUPS T10 (missing round-trip test).
 
-**ADRs touched:** AD0006 (mutators return `Result<usize>`), AD0022 (predicate symmetry with retryable/terminal mutators).
+**ADRs touched:** 0006 (mutators return `Result<usize>`), 0023 (predicate symmetry with retryable/terminal mutators).
 
 **Files:**
 - Modify: `src/state/mod.rs` (`mark_succeeded` body; signature gains `worker_id: &str` parameter)
@@ -138,7 +138,7 @@ pub fn mark_succeeded(
         .with_context(|| format!("update videos for succeeded {}", video_id))?;
 
     // Only insert the event row if the UPDATE matched — symmetry with the
-    // mutator's row-change count. AD0008 invariant: artifacts are durable
+    // mutator's row-change count. 0008 invariant: artifacts are durable
     // before this call regardless of outcome; the event row is bookkeeping
     // for "the DB acknowledged the success."
     if changed > 0 {
@@ -158,10 +158,10 @@ Update the doc-comment above:
 
 ```rust
 /// Mark a video as succeeded and record a `succeeded` event, atomically.
-/// Returns the row-change count from the videos UPDATE per AD0006.
+/// Returns the row-change count from the videos UPDATE per 0006.
 ///
 /// The UPDATE is guarded by `WHERE status='in_progress' AND claimed_by = ?`
-/// (AD0022 symmetric with mark_retryable_failure / mark_terminal_failure):
+/// (0023 symmetric with mark_retryable_failure / mark_terminal_failure):
 /// callers can detect "0 means the row was not in_progress or claimed by
 /// a different worker (stale claim)" without a separate query. The event
 /// row is inserted only when the UPDATE matches, so video_events stays
@@ -173,7 +173,7 @@ Update the doc-comment above:
 In `src/pipeline.rs::process_one`, change the `mark_succeeded` call:
 
 ```rust
-// AD0008: artifacts durable, now mark the row succeeded.
+// 0008: artifacts durable, now mark the row succeeded.
 store.mark_succeeded(
     &claim.video_id,
     &opts.worker_id,
@@ -225,12 +225,12 @@ Expected: clean.
 ```bash
 git add src/state/mod.rs src/pipeline.rs tests/state_claims.rs
 git commit -m "$(cat <<'EOF'
-feat(state): mark_succeeded gains WHERE status='in_progress' AND claimed_by=? predicate (AD0022)
+feat(state): mark_succeeded gains WHERE status='in_progress' AND claimed_by=? predicate (0023)
 
 Plan A's mark_succeeded had no predicate beyond video_id — a stale claim
 (operator-recovered or test-injected) could still flip status to
 succeeded. Plan B Epic 2 tightens the predicate to enforce
-status='in_progress' AND claimed_by = ? (AD0022 symmetric with the
+status='in_progress' AND claimed_by = ? (0023 symmetric with the
 retryable/terminal mutators).
 
 Signature change: (video_id, artifacts) → (video_id, worker_id, artifacts).
@@ -242,7 +242,7 @@ Tests (tests/state_claims.rs, --features test-helpers):
 - stale-claim mark_succeeded returns 0 and leaves status='in_progress'
 - claim → mark_succeeded → second claim_next returns None (round-trip)
 
-Refs: AD0006, AD0022; FOLLOWUPS T10 (mark_succeeded predicate + missing
+Refs: 0006, 0023; FOLLOWUPS T10 (mark_succeeded predicate + missing
 round-trip test) resolved.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>

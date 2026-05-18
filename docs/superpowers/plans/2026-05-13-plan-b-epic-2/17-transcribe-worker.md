@@ -1,8 +1,8 @@
 # Task 17 — `async fn transcribe_worker(...)`: receive → transcribe → write → mark_succeeded
 
-**Goal:** Implement the transcribe worker (1 instance per AD0027). Loop: `tokio::select! { _ = token.cancelled() => break, Some(item) = receiver.recv() => transcribe_and_write(...) }`. On engine `Bug`: return `Err`. On retryable transcribe error (rare on Epic 1's surface — most transcribe errors are engine-internal Bug-class), classify via `mark_retryable_failure` and continue.
+**Goal:** Implement the transcribe worker (1 instance per 0027). Loop: `tokio::select! { _ = token.cancelled() => break, Some(item) = receiver.recv() => transcribe_and_write(...) }`. On engine `Bug`: return `Err`. On retryable transcribe error (rare on Epic 1's surface — most transcribe errors are engine-internal Bug-class), classify via `mark_retryable_failure` and continue.
 
-**ADRs touched:** AD0008 (preserved via `transcribe_and_write` helper), AD0024 (select-on-token), AD0027 (single transcribe worker).
+**ADRs touched:** 0008 (preserved via `transcribe_and_write` helper), 0025 (select-on-token), 0027 (single transcribe worker).
 
 **Files:**
 - Modify: `src/pipeline.rs` (or `src/pipeline/pipelined.rs`)
@@ -142,16 +142,16 @@ In `src/pipeline.rs`:
 ```rust
 use crate::transcribe::Transcriber;
 
-/// Phase 2 transcribe worker (1 instance per AD0027). Receives
+/// Phase 2 transcribe worker (1 instance per 0027). Receives
 /// FetchedItem from N fetch workers and runs Phase 3+4 (transcribe →
 /// write artifacts → mark_succeeded → cleanup).
 ///
 /// Wraps the per-item work in `tokio::select! { token.cancelled() | recv }`
 /// so cancellation interrupts a wait for the next item. The per-item
 /// transcribe call itself is uncancellable inside this worker — Epic 1's
-/// AD0012 CancelOnDrop fires when the future drops; whisper.cpp's
+/// 0012 CancelOnDrop fires when the future drops; whisper.cpp's
 /// abort_callback polls the per-request Arc<AtomicBool> and aborts within
-/// milliseconds. That composition is the AD0024 mechanism.
+/// milliseconds. That composition is the 0025 mechanism.
 pub async fn transcribe_worker(
     token: CancellationToken,
     mut receiver: mpsc::Receiver<FetchedItem>,
@@ -210,7 +210,7 @@ pub async fn transcribe_worker(
                     // 3+4 but without the transcribe call (already done above
                     // outside the lock).
                     //
-                    // duration_s derives from the AD0014 audio invariant
+                    // duration_s derives from the 0014 audio invariant
                     // (16 kHz mono): samples_len / 16_000. The transcribe
                     // call already moved `samples`, so we use `samples_len`
                     // captured in the FetchedItem at decode time (T16).
@@ -240,7 +240,7 @@ pub async fn transcribe_worker(
 
                     let mut guard = store.lock().await;
 
-                    // AD0008: artifacts on disk BEFORE mark_succeeded.
+                    // 0008: artifacts on disk BEFORE mark_succeeded.
                     crate::output::artifacts::atomic_write(
                         &txt_path,
                         output.text.as_bytes(),
@@ -260,7 +260,7 @@ pub async fn transcribe_worker(
                     )?;
 
                     // Cleanup wav after the DB commit; failure here is a
-                    // warning, not an error (AD0008 — success is durable).
+                    // warning, not an error (0008 — success is durable).
                     if let Err(e) = std::fs::remove_file(&wav_path) {
                         tracing::warn!(path = %wav_path.display(), error = %e,
                             "could not remove wav after success");
@@ -307,7 +307,7 @@ pub async fn transcribe_worker(
 
 ```
 
-**Note on `samples_len` carry:** the inlined code uses `samples_len` (captured at decode time in T16's fetch_worker, carried through `FetchedItem`) to derive `duration_s` per AD0014's 16 kHz mono invariant. Without the carry, this worker would need to compute `samples.len()` before moving `samples` into `transcriber.transcribe()` — feasible but more error-prone (a future refactor that moved the transcribe call could silently break the derivation). The `FetchedItem.samples_len` field is the explicit contract.
+**Note on `samples_len` carry:** the inlined code uses `samples_len` (captured at decode time in T16's fetch_worker, carried through `FetchedItem`) to derive `duration_s` per 0014's 16 kHz mono invariant. Without the carry, this worker would need to compute `samples.len()` before moving `samples` into `transcriber.transcribe()` — feasible but more error-prone (a future refactor that moved the transcribe call could silently break the derivation). The `FetchedItem.samples_len` field is the explicit contract.
 
 - [ ] **Step 3: Run the tests**
 
@@ -331,24 +331,24 @@ Expected: green; clean.
 ```bash
 git add src/pipeline.rs tests/pipeline_fakes.rs
 git commit -m "$(cat <<'EOF'
-feat(pipeline): transcribe_worker — select{cancelled|recv} → transcribe → write → mark (AD0008, AD0024, AD0027)
+feat(pipeline): transcribe_worker — select{cancelled|recv} → transcribe → write → mark (0008, 0025, 0027)
 
-1 instance per AD0027. Loops on a select! between token.cancelled() and
+1 instance per 0027. Loops on a select! between token.cancelled() and
 receiver.recv(); per-item path is transcribe → write artifacts →
-mark_succeeded → cleanup wav (AD0008 invariant lives in
+mark_succeeded → cleanup wav (0008 invariant lives in
 write_artifacts_and_mark, factored out of T15's transcribe_and_write).
 
 Cancellation latency: bounded by the in-flight transcribe call. Epic 1's
-AD0012 CancelOnDrop fires when the transcribe future drops; whisper.cpp's
+0012 CancelOnDrop fires when the transcribe future drops; whisper.cpp's
 abort_callback polls the per-request Arc<AtomicBool> and aborts inference
-within milliseconds. That composition is the AD0024 mechanism — token
+within milliseconds. That composition is the 0025 mechanism — token
 cancellation propagates to whisper.cpp through the cancellation primitive.
 
 Error handling:
 - TranscribeError::Cancelled: not a row failure; propagates as Ok(()) so
   the JoinSet doesn't flag a Bug. Row stays in_progress; sweep recovers
   on next startup.
-- TranscribeError::Bug: returns Err — orchestrator reacts per AD0024.
+- TranscribeError::Bug: returns Err — orchestrator reacts per 0025.
 - Other transcribe errors: classified retryable via mark_retryable_failure
   with kind="Transcribe"; loop continues.
 
@@ -359,8 +359,8 @@ during the ~1s transcribe.
 Tests: happy path (one item → row succeeded; worker exits on channel
 close) + cancellation (token.cancel() → worker exits within 2s).
 
-Refs: AD0008 (preserved), AD0012 (cancellation composition), AD0024,
-AD0027
+Refs: 0008 (preserved), 0012 (cancellation composition), 0025,
+0027
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -374,7 +374,7 @@ EOF
 - [ ] `cargo test --features test-helpers --test pipeline_fakes transcribe_worker` passes (both tests)
 - [ ] Worker exits within 2s of `token.cancel()`
 - [ ] Worker exits on channel close (clean shutdown)
-- [ ] AD0008: artifacts written before mark_succeeded (the helper preserves order)
+- [ ] 0008: artifacts written before mark_succeeded (the helper preserves order)
 - [ ] Store mutex NOT held across transcribe await
 - [ ] TranscribeError::Cancelled propagates as Ok(()) (not Bug)
 - [ ] Clippy/fmt clean

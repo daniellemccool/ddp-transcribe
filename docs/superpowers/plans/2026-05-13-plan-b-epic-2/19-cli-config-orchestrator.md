@@ -1,8 +1,8 @@
 # Task 19 — CLI + Config: `--download-workers` and `--channel-capacity` flags
 
-**Goal:** Add `--download-workers` (default 3, validate ≥ 1) and `--channel-capacity` (default 2, validate ≥ 1) flags. Plumb to `Config::download_workers` and `Config::channel_capacity`, then into `pipeline::ProcessOptions`. Per AD0027.
+**Goal:** Add `--download-workers` (default 3, validate ≥ 1) and `--channel-capacity` (default 2, validate ≥ 1) flags. Plumb to `Config::download_workers` and `Config::channel_capacity`, then into `pipeline::ProcessOptions`. Per 0027.
 
-**ADRs touched:** AD0027 (defaults).
+**ADRs touched:** 0027 (defaults).
 
 **Files:**
 - Modify: `src/cli.rs` (GlobalArgs gains the two flags)
@@ -66,7 +66,7 @@ pub struct GlobalArgs {
     // ... existing fields ...
 
     /// Number of parallel fetch workers in the pipelined orchestrator.
-    /// AD0027: default 3 (curve-flattening point on the bake throughput
+    /// 0027: default 3 (curve-flattening point on the bake throughput
     /// math; ~3.5× serial wallclock on news_orgs fixture). Must be ≥ 1.
     #[arg(
         long,
@@ -76,7 +76,7 @@ pub struct GlobalArgs {
     pub download_workers: Option<usize>,
 
     /// Bounded mpsc capacity between fetch workers and the transcribe
-    /// worker. AD0027: default 2 (small backpressure smoothing for
+    /// worker. 0027: default 2 (small backpressure smoothing for
     /// transcribe's ~1s variance; peak channel memory ~6 × 3 MB = 18 MB
     /// at default N=3 + capacity 2). Must be ≥ 1.
     #[arg(
@@ -118,9 +118,9 @@ Already covered in T18 Step 1 (when removing dead config fields). If T19 lands f
 pub struct Config {
     // ... existing fields (including, until T18, whisper_use_gpu/whisper_threads) ...
     pub stale_claim_threshold: Duration,
-    /// AD0027: default 3 (curve-flattening point).
+    /// 0027: default 3 (curve-flattening point).
     pub download_workers: usize,
-    /// AD0027: default 2 (small backpressure smoothing).
+    /// 0027: default 2 (small backpressure smoothing).
     pub channel_capacity: usize,
 }
 ```
@@ -144,9 +144,9 @@ pub struct ProcessOptions {
     pub compute_lang_probs: bool,
     pub transcribe_timeout: Duration,
     pub stale_claim_threshold: Duration,
-    /// AD0027: default 3; flag-tunable via --download-workers.
+    /// 0027: default 3; flag-tunable via --download-workers.
     pub download_workers: usize,
-    /// AD0027: default 2; flag-tunable via --channel-capacity.
+    /// 0027: default 2; flag-tunable via --channel-capacity.
     pub channel_capacity: usize,
 }
 ```
@@ -196,28 +196,28 @@ Expected: clean.
 ```bash
 git add src/cli.rs src/config.rs src/main.rs src/pipeline.rs
 git commit -m "$(cat <<'EOF'
-feat(cli,config): --download-workers + --channel-capacity flags with AD0027 defaults
+feat(cli,config): --download-workers + --channel-capacity flags with 0027 defaults
 
 CLI/Config/ProcessOptions plumbing for the pipelined orchestrator's
 two tunable knobs:
 
 - --download-workers: number of parallel fetch workers. Default 3
-  (AD0027: curve-flattening point on news_orgs bake; one stuck fetch
+  (0027: curve-flattening point on news_orgs bake; one stuck fetch
   drops effective capacity by only a third). Must be ≥ 1, enforced by
   clap's value_parser range.
 
 - --channel-capacity: bounded mpsc capacity between fetch workers and
-  the transcribe worker. Default 2 (AD0027: small backpressure smoothing
+  the transcribe worker. Default 2 (0027: small backpressure smoothing
   for transcribe's ~1s variance; peak channel memory ~18 MB at defaults).
   Must be ≥ 1.
 
 Both flags read env vars (UU_TIKTOK_DOWNLOAD_WORKERS,
 UU_TIKTOK_CHANNEL_CAPACITY) via clap env support.
 
-Tests: default values match AD0027; CLI override flows through to
+Tests: default values match 0027; CLI override flows through to
 Config and ProcessOptions.
 
-Refs: AD0027
+Refs: 0027
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF

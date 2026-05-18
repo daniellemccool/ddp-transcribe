@@ -2,7 +2,7 @@
 
 **Goal:** Make `run_serial` operationally recoverable: (a) call `store.sweep_stale_claims(opts.stale_claim_threshold)` at the top before the claim loop; (b) replace the current `return Err(e)` on failure with `store.mark_retryable_failure(video_id, worker_id, "FetchOrTranscribe", &format!("{e}"))` and `continue`. The string `"FetchOrTranscribe"` is Epic 2's placeholder kind; Epic 3 replaces it with classifier dispatch.
 
-**ADRs touched:** AD0008 (artifact-write ordering preserved), AD0022 (string-kind mutator).
+**ADRs touched:** 0008 (artifact-write ordering preserved), 0023 (string-kind mutator).
 
 **Files:**
 - Modify: `src/pipeline.rs` (the `run_serial` body)
@@ -26,7 +26,7 @@ pub struct ProcessOptions {
     pub compute_lang_probs: bool,
     pub transcribe_timeout: Duration,
     /// Threshold for `sweep_stale_claims` at the top of `run_serial`.
-    /// Default 30 min per AD0023; CLI flag is `--stale-claim-threshold`
+    /// Default 30 min per 0024; CLI flag is `--stale-claim-threshold`
     /// (T11). Constructed from `Config::stale_claim_threshold`.
     pub stale_claim_threshold: Duration,
 }
@@ -108,8 +108,8 @@ pub async fn run_serial(
     let mut stats = ProcessStats::default();
     let max = opts.max_videos.unwrap_or(usize::MAX);
 
-    // AD0023: recover any rows left in_progress by a crashed earlier run.
-    // No-op if there are none; threshold defaults to 30 min per AD0023.
+    // 0024: recover any rows left in_progress by a crashed earlier run.
+    // No-op if there are none; threshold defaults to 30 min per 0024.
     let recovered = store
         .sweep_stale_claims(opts.stale_claim_threshold)
         .context("sweep_stale_claims at run_serial start")?;
@@ -134,7 +134,7 @@ pub async fn run_serial(
                     error = %e,
                     "video failed; classifying as failed_retryable"
                 );
-                // AD0022: Epic 2 emits a single string-kind for all
+                // 0023: Epic 2 emits a single string-kind for all
                 // pipeline-noticed failures. Epic 3's classifier replaces
                 // this single arm with typed dispatch (RetryableKind /
                 // TerminalReason / VideoUnavailable).
@@ -186,37 +186,37 @@ Expected: all green. Pre-existing tests that exercised "happy path" still pass �
 cargo fmt --all && cargo clippy --all-targets -- -D warnings
 ```
 
-Expected: clean. AD0002 cleanup: confirm `#[allow(unused_assignments)]` was removed (clippy would now error on the unchanged attribute since the increment is no longer dead).
+Expected: clean. 0002 cleanup: confirm `#[allow(unused_assignments)]` was removed (clippy would now error on the unchanged attribute since the increment is no longer dead).
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add src/pipeline.rs tests/pipeline_fakes.rs
 git commit -m "$(cat <<'EOF'
-feat(pipeline): run_serial sweeps stale claims + classifies failures as retryable (AD0008, AD0022, AD0023)
+feat(pipeline): run_serial sweeps stale claims + classifies failures as retryable (0008, 0023, 0024)
 
 Plan A's run_serial aborted on first failure, leaving the row stuck in
 status='in_progress'. Plan B Epic 2's MVP behavior: classify the failure
-as failed_retryable (string-kind 'FetchOrTranscribe' per AD0022) and
+as failed_retryable (string-kind 'FetchOrTranscribe' per 0023) and
 continue. Epic 3 replaces the single string-kind arm with typed
 classifier dispatch.
 
 Two changes:
 1. Call store.sweep_stale_claims(opts.stale_claim_threshold) at the top
-   of run_serial, before the claim loop. AD0023: 30-min default.
+   of run_serial, before the claim loop. 0024: 30-min default.
    Recovers rows abandoned by a crashed earlier process.
 2. Replace the early `return Err(e)` with mark_retryable_failure() +
-   continue. opts.worker_id is the predicate match per AD0022.
+   continue. opts.worker_id is the predicate match per 0023.
 
 #[allow(unused_assignments)] on run_serial removed — `stats.failed += 1`
-is now load-bearing in the continue-on-failure path (per AD0002 cleanup
+is now load-bearing in the continue-on-failure path (per 0002 cleanup
 discipline).
 
 Test (--features test-helpers): FakeFetcher::always_fails() + 2 pending
 videos → run_serial returns Ok(stats) with claimed=2, succeeded=0,
 failed=2; both rows are status='failed_retryable'.
 
-Refs: AD0008, AD0022, AD0023
+Refs: 0008, 0023, 0024
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF

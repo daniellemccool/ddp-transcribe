@@ -1,14 +1,14 @@
 # Task 4 — Schema columns: add 4 nullable columns + bump SCHEMA_VERSION
 
-**Goal:** Add four nullable columns to the `videos` table (`last_retryable_kind`, `last_retryable_message`, `terminal_reason`, `terminal_message`) and bump `SCHEMA_VERSION` from `"1"` to `"2"`. The columns hold the string-typed failure classification per AD0022; Epic 3 will introduce typed-enum values that serialize into the same columns.
+**Goal:** Add four nullable columns to the `videos` table (`last_retryable_kind`, `last_retryable_message`, `terminal_reason`, `terminal_message`) and bump `SCHEMA_VERSION` from `"1"` to `"2"`. The columns hold the string-typed failure classification per 0023; Epic 3 will introduce typed-enum values that serialize into the same columns.
 
-**ADRs touched:** AD0021 (schema-version policy).
+**ADRs touched:** 0022 (schema-version policy).
 
 **Files:**
 - Modify: `src/state/schema.rs` (SCHEMA_SQL and SCHEMA_VERSION constants)
 - Modify: `tests/state_ingest.rs` or new `tests/state_schema_v2.rs` (assert new columns exist; assert version bumped)
 
-**Pre-reqs:** T1 + T2 + T3 complete (AD0021 decided; version-check live; migrate subcommand live).
+**Pre-reqs:** T1 + T2 + T3 complete (0022 decided; version-check live; migrate subcommand live).
 
 ---
 
@@ -136,8 +136,8 @@ CREATE TABLE IF NOT EXISTS videos (
     language_detected   TEXT,
     fetcher             TEXT,
     transcript_source   TEXT,
-    -- Plan B Epic 2: failure classification columns (AD0021, AD0022).
-    -- String-typed today per AD0022; Epic 3's typed enums serialize into
+    -- Plan B Epic 2: failure classification columns (0022, 0023).
+    -- String-typed today per 0023; Epic 3's typed enums serialize into
     -- the same columns via tag()/message() projections.
     last_retryable_kind     TEXT,
     last_retryable_message  TEXT,
@@ -235,7 +235,7 @@ Integration test (tests/state_schema_v2.rs, --features test-helpers):
 column-existence on fresh DB; default-NULL on upsert_video; constant
 value matches.
 
-Refs: AD0021, AD0022
+Refs: 0022, 0023
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF

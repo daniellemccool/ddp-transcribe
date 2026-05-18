@@ -1,8 +1,8 @@
 # Task 8 — `Store::sweep_stale_claims(threshold)` for operator-recovery on crashed processes
 
-**Goal:** New mutator that flips rows with `status='in_progress' AND claimed_at < (now - threshold)` back to `status='pending'`, clearing `claimed_by`/`claimed_at` and touching `updated_at`. **No `attempt_count` bump** (operator-recovery semantics, not application-retry per AD0023). **No artifact validation** (AD0023 explicitly defers validate-and-mark-succeeded). Returns `Result<usize>` per AD0006.
+**Goal:** New mutator that flips rows with `status='in_progress' AND claimed_at < (now - threshold)` back to `status='pending'`, clearing `claimed_by`/`claimed_at` and touching `updated_at`. **No `attempt_count` bump** (operator-recovery semantics, not application-retry per 0024). **No artifact validation** (0024 explicitly defers validate-and-mark-succeeded). Returns `Result<usize>` per 0006.
 
-**ADRs touched:** AD0006, AD0023.
+**ADRs touched:** 0006, 0024.
 
 **Files:**
 - Modify: `src/state/mod.rs` (`sweep_stale_claims` mutator)
@@ -54,7 +54,7 @@ fn sweep_stale_claims_recovers_stale_row() -> anyhow::Result<()> {
     assert_eq!(cb, None);
     assert_eq!(ca, None);
 
-    // attempt_count is NOT bumped by sweep (AD0023).
+    // attempt_count is NOT bumped by sweep (0024).
     assert_eq!(row.attempt_count, 1, "attempt_count unchanged by sweep");
     Ok(())
 }
@@ -115,9 +115,9 @@ In `src/state/mod.rs` alongside the other mutators:
 /// Recover rows abandoned by a crashed process. Flips rows with
 /// `status='in_progress' AND claimed_at < (now - threshold)` back to
 /// `status='pending'`, clearing claimed_by/claimed_at. Returns the
-/// row-change count (per AD0006).
+/// row-change count (per 0006).
 ///
-/// Per AD0023: no artifact validation, no attempt_count bump. The
+/// Per 0024: no artifact validation, no attempt_count bump. The
 /// sweep is operator-recovery semantics; application-retry semantics
 /// (and the `attempt_count` ladder) belong to Epic 3's classifier.
 pub fn sweep_stale_claims(&mut self, threshold: std::time::Duration) -> Result<usize> {
@@ -151,7 +151,7 @@ pub fn sweep_stale_claims(&mut self, threshold: std::time::Duration) -> Result<u
 Design notes:
 
 - `claimed_at IS NOT NULL`: defense-in-depth. In v2 schema all `in_progress` rows have non-NULL `claimed_at` (set by `claim_next`); the IS-NOT-NULL check protects against a malformed DB.
-- No `video_events` row inserted: per AD0023, sweep is operator-recovery, not an application event. A single tracing line per recovered row (well, per sweep call) is the operational record.
+- No `video_events` row inserted: per 0024, sweep is operator-recovery, not an application event. A single tracing line per recovered row (well, per sweep call) is the operational record.
 - Threshold is `Duration` for ergonomics; converted to seconds internally because SQLite stores `claimed_at` as a Unix epoch integer.
 
 - [ ] **Step 3: Run the tests**
@@ -176,13 +176,13 @@ Expected: clean. T9 will wire `sweep_stale_claims` into `run_serial`; until then
 ```bash
 git add src/state/mod.rs tests/state_claims.rs
 git commit -m "$(cat <<'EOF'
-feat(state): sweep_stale_claims mutator for crash-recovery (AD0006, AD0023)
+feat(state): sweep_stale_claims mutator for crash-recovery (0006, 0024)
 
 Flips rows with status='in_progress' AND claimed_at < (now - threshold)
 back to pending. Clears claimed_by/claimed_at. Threshold is a Duration
 (converted to seconds internally for the SQLite epoch comparison).
 
-Per AD0023:
+Per 0024:
 - No artifact validation (validate-and-mark-succeeded deferred to Plan C)
 - No attempt_count bump (operator-recovery is not application-retry;
   Epic 3's classifier owns the retry ladder)
@@ -195,7 +195,7 @@ attempt_count unchanged); fresh claim left alone; idempotent on no-stale.
 T9 wires the sweep into the top of run_serial; this task lands the
 mutator surface independently.
 
-Refs: AD0006, AD0023
+Refs: 0006, 0024
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF

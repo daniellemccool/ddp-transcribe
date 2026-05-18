@@ -2,7 +2,7 @@
 
 **Goal:** Introduce `pipeline::run_pipelined` as a sibling of `run_serial`. Shared helpers (`process_one` or its decomposed parts) stay accessible to both. Module layout decision (single file vs `pipeline/{mod,serial,pipelined}.rs` submodule split) is made at task time per the existing-code-pattern discipline. **This task lands the orchestrator skeleton only** — fetch and transcribe workers are T16 and T17.
 
-**ADRs touched:** — (structural, no ADR; AD0024/AD0027 inform but don't directly land here).
+**ADRs touched:** — (structural, no ADR; 0025/0027 inform but don't directly land here).
 
 **Files:**
 - Modify or restructure: `src/pipeline.rs` → potentially `src/pipeline/{mod,serial,pipelined}.rs`
@@ -36,13 +36,13 @@ The Phase 1 `process_one` body has roughly four logical phases:
 3. **Transcribe:** `transcriber.transcribe(samples, per_call, timeout)` returns `TranscribeOutput`.
 4. **Write + commit:** atomic_write txt → atomic_write json → `mark_succeeded` → cleanup wav.
 
-In `run_pipelined`, phases 1+2 happen on a fetch worker (per AD0027 — fetch workers decode WAV so the transcribe path is lean) and phases 3+4 happen on the transcribe worker. Two options:
+In `run_pipelined`, phases 1+2 happen on a fetch worker (per 0027 — fetch workers decode WAV so the transcribe path is lean) and phases 3+4 happen on the transcribe worker. Two options:
 
 (a) **Decompose into helpers**: `pipeline::fetch_and_decode(...)` returns `(Vec<f32>, PathBuf)`; `pipeline::transcribe_and_write(...)` runs phases 3+4. Both `process_one` (serial) and the Phase 2 workers call into these helpers.
 
 (b) **Inline duplication**: keep `process_one` whole; the Phase 2 workers re-implement the same phases inline.
 
-**Recommended: option (a).** Extracting `fetch_and_decode` and `transcribe_and_write` keeps the AD0008 artifact-write-before-mark_succeeded invariant in ONE place (`transcribe_and_write`) and lets the orchestrator and serial loop share that discipline. DRY pays off here.
+**Recommended: option (a).** Extracting `fetch_and_decode` and `transcribe_and_write` keeps the 0008 artifact-write-before-mark_succeeded invariant in ONE place (`transcribe_and_write`) and lets the orchestrator and serial loop share that discipline. DRY pays off here.
 
 ```rust
 /// Phase 1+2: fetch the video and decode to samples. Returns the
@@ -72,7 +72,7 @@ pub(crate) async fn fetch_and_decode(
 
 /// Phase 3+4: transcribe → write artifacts → mark_succeeded → cleanup.
 ///
-/// Preserves AD0008: artifacts (txt + json) are durable on disk BEFORE
+/// Preserves 0008: artifacts (txt + json) are durable on disk BEFORE
 /// mark_succeeded. Cleanup of the WAV happens after the DB commit; a
 /// failure here leaves the WAV as disk churn that an operator can sweep.
 ///
@@ -107,7 +107,7 @@ pub(crate) async fn transcribe_and_write(
     std::fs::create_dir_all(&shard_dir)
         .with_context(|| format!("creating shard dir {}", shard_dir.display()))?;
 
-    // AD0008: artifacts before mark_succeeded.
+    // 0008: artifacts before mark_succeeded.
     let txt_path = shard_dir.join(format!("{}.txt", claim.video_id));
     artifacts::atomic_write(&txt_path, transcribe_output.text.as_bytes())
         .with_context(|| format!("writing transcript {}", txt_path.display()))?;
@@ -204,7 +204,7 @@ pub async fn run_pipelined(
 /// serializes via SQLite BEGIN IMMEDIATE — the Mutex is for Rust-level
 /// `&mut self` access; SQLite handles inter-connection contention).
 ///
-/// Alternative: each worker opens its own Connection. AD0024 brainstorm
+/// Alternative: each worker opens its own Connection. 0025 brainstorm
 /// noted this is also valid; Mutex<Store> keeps the type surface
 /// uniform (one Store handle for both serial and pipelined paths).
 pub type SharedStore = std::sync::Arc<tokio::sync::Mutex<Store>>;
@@ -243,27 +243,27 @@ feat(pipeline): reshape with run_pipelined skeleton + fetch_and_decode/transcrib
 
 Extracts process_one's body into two helpers so run_serial and Phase 2's
 workers share the same artifact-write-before-mark_succeeded invariant
-(AD0008):
+(0008):
 
 - fetch_and_decode(fetcher, claim) -> (Vec<f32>, PathBuf)
   Phase 1+2: acquire + decode WAV. Owned samples + WAV path returned.
 
 - transcribe_and_write(store, transcriber, claim, samples, wav, opts)
   Phase 3+4: transcribe → atomic_write txt → atomic_write json →
-  mark_succeeded → cleanup wav. AD0008 invariant lives here.
+  mark_succeeded → cleanup wav. 0008 invariant lives here.
 
 process_one is now a thin caller of both helpers.
 
 Adds run_pipelined SKELETON (returns Ok(ProcessStats::default())) and
 the SharedStore = Arc<Mutex<Store>> type alias. T16 fills in
 fetch_worker; T17 fills in transcribe_worker; T18 wires the
-JoinSet + CancellationToken + shutdown ORDER per AD0024.
+JoinSet + CancellationToken + shutdown ORDER per 0025.
 
 Module layout: <single file | submodule split> per the existing-code-
 pattern discipline. <Rationale in 1-2 sentences>.
 
-Refs: AD0008 (preserved by transcribe_and_write being the sole
-mark_succeeded caller), AD0024 (skeleton), AD0027 (skeleton)
+Refs: 0008 (preserved by transcribe_and_write being the sole
+mark_succeeded caller), 0025 (skeleton), 0027 (skeleton)
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF

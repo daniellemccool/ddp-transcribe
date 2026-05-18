@@ -1,8 +1,8 @@
 # Task 16 — `async fn fetch_worker(...)`: claim_next → fetch → decode → send
 
-**Goal:** Implement the fetch worker that runs in parallel (N=3 default per AD0027). Loop: `claim_next` → `fetcher.acquire` → `audio::decode_wav` → `sender.send((claim, samples, wav_path))`. Exits on `claim_next == None` (no polling per AD0025). On retryable error: `mark_retryable_failure` and continue. On Bug-class error or `send` failure (channel closed): return `Err`.
+**Goal:** Implement the fetch worker that runs in parallel (N=3 default per 0027). Loop: `claim_next` → `fetcher.acquire` → `audio::decode_wav` → `sender.send((claim, samples, wav_path))`. Exits on `claim_next == None` (no polling per 0026). On retryable error: `mark_retryable_failure` and continue. On Bug-class error or `send` failure (channel closed): return `Err`.
 
-**ADRs touched:** AD0024 (Bug → return Err), AD0025 (no polling), AD0027 (payload + worker count).
+**ADRs touched:** 0025 (Bug → return Err), 0026 (no polling), 0027 (payload + worker count).
 
 **Files:**
 - Modify: `src/pipeline.rs` (or `src/pipeline/pipelined.rs` per T15's split decision)
@@ -18,9 +18,9 @@ In `src/pipeline.rs`:
 
 ```rust
 /// Channel payload from fetch workers to the transcribe worker.
-/// Per AD0027: fetch workers do WAV decode in parallel so the
+/// Per 0027: fetch workers do WAV decode in parallel so the
 /// transcribe path is lean. The PathBuf rides through for cleanup
-/// after mark_succeeded per AD0008. `samples_len` is carried so the
+/// after mark_succeeded per 0008. `samples_len` is carried so the
 /// transcribe worker can compute `duration_s = samples_len as f64 /
 /// 16_000.0` without re-deriving from the moved `samples` Vec (which
 /// is consumed by the engine.transcribe() call).
@@ -114,10 +114,10 @@ use tokio_util::sync::CancellationToken;
 
 /// Phase 2 fetch worker. Claims pending rows; fetches + decodes WAVs;
 /// pushes (claim, samples, wav_path) onto the channel. Exits cleanly on
-/// claim_next == None (no polling per AD0025). On retryable error,
+/// claim_next == None (no polling per 0026). On retryable error,
 /// classifies via mark_retryable_failure and continues. On Bug-class
 /// (channel closed, store error), returns Err — the orchestrator
-/// reacts per AD0024.
+/// reacts per 0025.
 pub async fn fetch_worker(
     token: CancellationToken,
     store: SharedStore,
@@ -206,7 +206,7 @@ Notes on the design:
 
 - **Failed mutator call.** If `mark_retryable_failure` itself fails (e.g., DB corruption), surface as Bug — the orchestrator should not silently swallow store errors.
 
-- **No polling.** AD0025: drain semantics. Worker exits on `None`.
+- **No polling.** 0026: drain semantics. Worker exits on `None`.
 
 - [ ] **Step 4: Make `VideoFetcher` Arc-able for spawning across workers**
 
@@ -236,14 +236,14 @@ Expected: green; clean.
 ```bash
 git add src/pipeline.rs tests/pipeline_fakes.rs
 git commit -m "$(cat <<'EOF'
-feat(pipeline): fetch_worker — claim/fetch/decode/send loop with retryable classification (AD0024, AD0025, AD0027)
+feat(pipeline): fetch_worker — claim/fetch/decode/send loop with retryable classification (0025, 0026, 0027)
 
-N=3 of these per AD0027. Each worker:
+N=3 of these per 0027. Each worker:
 - Loops claim_next (Mutex<Store>; SQLite serializes via BEGIN IMMEDIATE)
 - Calls fetch_and_decode (T15 helper)
 - Sends (claim, samples, wav_path) on the mpsc channel
-- Exits clean on claim_next == None (no polling per AD0025)
-- Polls CancellationToken between claims (AD0024)
+- Exits clean on claim_next == None (no polling per 0026)
+- Polls CancellationToken between claims (0025)
 - Classifies retryable errors via mark_retryable_failure + continue
   (placeholder kind "Fetch"; Epic 3 swaps in typed RetryableKind)
 - Returns Err on Bug-class: channel closed (transcribe_worker exited)
@@ -258,7 +258,7 @@ deferred to follow-up if observed.
 Test: 2 pending rows + FakeFetcher::happy + drain channel → both items
 appear, worker exits Ok.
 
-Refs: AD0024, AD0025, AD0027
+Refs: 0025, 0026, 0027
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF

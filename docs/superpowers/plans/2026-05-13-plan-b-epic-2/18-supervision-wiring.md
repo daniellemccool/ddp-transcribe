@@ -1,8 +1,8 @@
 # Task 18 — Supervision wiring: JoinSet + CancellationToken + LOAD-BEARING shutdown ORDER
 
-**Goal:** Wire N fetch workers + 1 transcribe worker into a `tokio::task::JoinSet` supervised by a shared `tokio_util::sync::CancellationToken`. Main loops on `join_set.join_next()`; on first `Err`/panic, fires `token.cancel()` and drains remaining tasks. **The four-step shutdown order from AD0024 is load-bearing**: `token.cancel()` → drop fetch→transcribe sender → join workers → `engine.shutdown()` LAST. Also: remove dead `Config::whisper_use_gpu` + `Config::whisper_threads` (AD0002 cleanup).
+**Goal:** Wire N fetch workers + 1 transcribe worker into a `tokio::task::JoinSet` supervised by a shared `tokio_util::sync::CancellationToken`. Main loops on `join_set.join_next()`; on first `Err`/panic, fires `token.cancel()` and drains remaining tasks. **The four-step shutdown order from 0025 is load-bearing**: `token.cancel()` → drop fetch→transcribe sender → join workers → `engine.shutdown()` LAST. Also: remove dead `Config::whisper_use_gpu` + `Config::whisper_threads` (0002 cleanup).
 
-**ADRs touched:** AD0002 (dead-code cleanup), AD0024 (supervision + shutdown ORDER).
+**ADRs touched:** 0002 (dead-code cleanup), 0025 (supervision + shutdown ORDER).
 
 **Files:**
 - Modify: `src/main.rs` (Process arm: orchestrator wiring)
@@ -14,7 +14,7 @@
 
 ---
 
-- [ ] **Step 1: Remove dead config fields (AD0002 cleanup)**
+- [ ] **Step 1: Remove dead config fields (0002 cleanup)**
 
 In `src/config.rs`:
 
@@ -160,7 +160,7 @@ pub async fn run_pipelined(
     opts: ProcessOptions,
 ) -> Result<ProcessStats> {
     // Sweep stale claims at the top of run_pipelined, same as run_serial
-    // does at the top of its loop (AD0023).
+    // does at the top of its loop (0024).
     {
         let mut guard = store.lock().await;
         let recovered = guard
@@ -248,7 +248,7 @@ pub async fn run_pipelined(
 /// in mid-stream invocations, a richer metric (claim_count delta tracked
 /// in an Arc<Mutex<ProcessStats>> shared across workers) would be
 /// preferable — left for Epic 5's ops-hygiene work; Plan B Epic 2 ships
-/// the COUNT-by-status proxy because the test (and the AD0027 bake)
+/// the COUNT-by-status proxy because the test (and the 0027 bake)
 /// validates only per-row status.
 fn compute_process_stats(store: &Store) -> Result<ProcessStats> {
     let mut succeeded: usize = 0;
@@ -281,11 +281,11 @@ fn compute_process_stats(store: &Store) -> Result<ProcessStats> {
 }
 ```
 
-`Store::conn()` is the existing `pub(crate)` accessor in `src/state/mod.rs`; the `#[allow(dead_code)]` annotation on it comes off in this commit (AD0002 cleanup — this is the first caller).
+`Store::conn()` is the existing `pub(crate)` accessor in `src/state/mod.rs`; the `#[allow(dead_code)]` annotation on it comes off in this commit (0002 cleanup — this is the first caller).
 
 - [ ] **Step 4: Wire `run_pipelined` into `main::Process`**
 
-In `src/main.rs`'s `Process` arm, replace the `run_serial` call with `run_pipelined`. **Load-bearing shutdown ORDER per AD0024:**
+In `src/main.rs`'s `Process` arm, replace the `run_serial` call with `run_pipelined`. **Load-bearing shutdown ORDER per 0025:**
 
 ```rust
 cli::Command::Process { max_videos } => {
@@ -300,7 +300,7 @@ cli::Command::Process { max_videos } => {
     std::fs::create_dir_all(&work_dir).context("creating work dir")?;
 
     // engine stays OWNED by main so engine.shutdown() can be called LAST
-    // per AD0024. The Arc<dyn Transcriber> path that workers see is a
+    // per 0025. The Arc<dyn Transcriber> path that workers see is a
     // clone-able HANDLE (added to src/transcribe.rs in this task — see
     // Step 3a below) whose Drop closes the engine's request channel.
     let engine_config = transcribe::EngineConfig {
@@ -330,7 +330,7 @@ cli::Command::Process { max_videos } => {
         channel_capacity: cfg.channel_capacity,
     };
 
-    // AD0024 SHUTDOWN ORDER (load-bearing — sequence matters):
+    // 0025 SHUTDOWN ORDER (load-bearing — sequence matters):
     //   1. run_pipelined runs to completion (clean drain) or returns Err.
     //      Internally on Err it calls token.cancel(), drops the
     //      fetch→transcribe sender, and joins all worker tasks before
@@ -346,12 +346,12 @@ cli::Command::Process { max_videos } => {
     // a transcriber Arc) deadlocks: shutdown() drops the engine's
     // request_tx but the Arc-held handle keeps a clone alive → channel
     // stays open → worker thread parks until process exit. codex-advisor
-    // identified this during brainstorm; AD0024 records.
+    // identified this during brainstorm; 0025 records.
     let stats_result =
         pipeline::run_pipelined(shared, fetcher, transcriber.clone(), opts).await;
 
     drop(transcriber); // (step 2: drop main's last clone)
-    engine.shutdown(); // (step 3: LAST per AD0024)
+    engine.shutdown(); // (step 3: LAST per 0025)
 
     let stats = stats_result?;
     tracing::info!(
@@ -376,7 +376,7 @@ In `src/transcribe.rs`:
 /// Clone-able transcriber handle backed by the engine's request channel.
 /// Workers in the pipelined orchestrator hold one of these; the engine
 /// itself stays owned by `main` so `engine.shutdown()` can run last per
-/// AD0024.
+/// 0025.
 #[derive(Clone)]
 pub struct WhisperEngineHandle {
     request_tx: tokio::sync::mpsc::Sender<TranscribeRequest>,
@@ -443,14 +443,14 @@ Expected: green; clippy clean. Confirm the dead-code attributes on `whisper_use_
 ```bash
 git add src/main.rs src/pipeline.rs src/config.rs tests/pipeline_fakes.rs
 git commit -m "$(cat <<'EOF'
-feat(orchestrator): pipelined supervision with JoinSet + CancellationToken + LOAD-BEARING shutdown order (AD0002, AD0024)
+feat(orchestrator): pipelined supervision with JoinSet + CancellationToken + LOAD-BEARING shutdown order (0002, 0025)
 
 run_pipelined wires N fetch workers (default 3) + 1 transcribe worker
 into a tokio::task::JoinSet supervised by a shared CancellationToken.
 main.rs loops on join_set.join_next(); on first Err or panic, fires
 token.cancel() and drains remaining tasks.
 
-**Load-bearing shutdown ORDER per AD0024:**
+**Load-bearing shutdown ORDER per 0025:**
 1. token.cancel()
 2. drop fetch→transcribe sender (already done by orchestrator after
    all fetch_workers exit; tx is dropped right after spawn loop in
@@ -461,10 +461,10 @@ token.cancel() and drains remaining tasks.
    reference to the engine
 
 Without this order the engine worker parks on blocking_recv until
-process exit (codex-advisor identified during brainstorm; AD0024
+process exit (codex-advisor identified during brainstorm; 0025
 records).
 
-AD0002 cleanup: removes Config::whisper_use_gpu + Config::whisper_threads.
+0002 cleanup: removes Config::whisper_use_gpu + Config::whisper_threads.
 Both have been dead since Epic 1 (Plan A leftovers); whisper-rs picks
 n_threads itself and GPU choice is in EngineConfig. The "consume when
 state-machine work lands" placeholder is resolved by Epic 2's confirmation
@@ -475,7 +475,7 @@ Tests:
   FakeFetcher::happy + FakeTranscriber::echo + N=3 → all 6 succeed,
   claimed/succeeded/failed match.
 
-Refs: AD0002, AD0008, AD0023, AD0024, AD0025, AD0027
+Refs: 0002, 0008, 0024, 0025, 0026, 0027
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
