@@ -48,6 +48,16 @@ fn build_yt_dlp_args(video_id: &str, source_url: &str, video_dir: &Path) -> (Vec
         "--quiet".into(),
         "-f".into(),
         "download/b[vcodec=h264]/b".into(),
+        // T7 perf-tweaks: `-S` only affects format ordering within a
+        // selector match. `download` is a literal format ID, so the
+        // success path is unaffected. The fallback `b[vcodec=h264]/b`
+        // benefits — prefer smallest viable combined format, defensive
+        // against future extractor drift or larger-than-needed h264
+        // streams. T13 A10 bake reported 100% selector hit rate on
+        // news_orgs (0/20 fallback); T8 bake against the same fixture
+        // confirms this change is inert on the current data set.
+        "-S".into(),
+        "+size,+br,+res,+fps".into(),
         "-x".into(),
         "--audio-format".into(),
         "wav".into(),
@@ -137,6 +147,22 @@ mod tests {
             "selector must prefer TikTok's pre-muxed `download` static asset, \
              fall back to best h264, then best — sidesteps yt-dlp #15891 \
              bitrateInfo h265 muxing bug"
+        );
+
+        // T7 perf-tweaks: -S sort flag must be present with the agreed
+        // value. -S does not change which selector matches; it orders
+        // within a match. Since `download` is a literal format ID, the
+        // success path is unaffected; -S only sorts when the
+        // b[vcodec=h264]/b fallback runs, preferring smallest viable
+        // combined format.
+        let s_idx = args
+            .iter()
+            .position(|a| a == "-S")
+            .expect("-S sort flag must be present after T7 perf-tweaks");
+        assert_eq!(
+            args.get(s_idx + 1).map(String::as_str),
+            Some("+size,+br,+res,+fps"),
+            "fallback ordering: smallest size first, then bitrate, resolution, fps"
         );
     }
 
