@@ -53,3 +53,7 @@ name = "e2e_real_tools"
 [[test]]
 name = "whisper_engine_init"
 required-features = ["test-helpers"]
+
+[[test]]
+name = "transcribe_lang_state"
+required-features = ["test-helpers"]
