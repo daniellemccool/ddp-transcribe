@@ -88,3 +88,28 @@ Verification on the A10 (`yt-dlp -v --list-impersonate-targets`):
 | post | download × 25    |
 
 **Why we kept the change:** defensive — TikTok's `download` format depends on creator settings (some videos disable downloads) and on yt-dlp's `download`-format extractor staying functional (yt-dlp #15891 and #16622 document upstream non-determinism in adjacent paths). When the fallback runs, `-S` ensures we don't accidentally pick a needlessly-large h264 variant. The cost of the change is zero (one extra flag in the argv); the benefit is conditional but real.
+
+---
+
+## `set_no_timestamps(true)` causes content loss and repetition hallucinations across 30s window boundaries
+
+**Found in:** Perf-tweaks T10 bake on SRC A10 (commit `042f038` introduced; revert commit on same branch backs it out; this entry routes the finding).
+**Disposition:** Reverted; deferred indefinitely.
+**Trigger to revisit:** if whisper-rs or whisper.cpp ships a change to the `no_timestamps` decode-window handling, OR if a future Plan C work item makes the perf win valuable enough to design around the loss.
+
+**Hypothesis (unverified) at spec time:** Source-level inspection of `~/src/whisper.cpp/src/whisper.cpp` (logits-suppression block + the `if (single_segment || no_timestamps)` seek branch) suggested `no_timestamps=true` only suppresses timestamp tokens in the logits — content tokens would be preserved bit-for-bit, only the segment grouping would change (one segment per 30s window instead of multiple timestamp-split segments). The spec proposed an empirical bake to confirm this on real audio.
+
+**Observation:** the bake on `news_orgs` (25 URLs, `large-v3-turbo-q5_0`, A10) ran 4 sides (pre run1 + pre run2 + post run1 + post run2). Intra-side determinism is perfect — run1 vs run2 byte-equal (modulo `transcribed_at`). Cross-side `.txt` content shows material divergence on every video. Two representative examples:
+
+- **Video `08/7636791907133164808`** (GMA Regional TV, Tagalog, ~131s). Post-change `.txt` drops the sentence `"Aanihin ang mga bulaklak nito na nagsisilbi pangunahing hibla"` (replacing it with truncated `"Laklak nito na nagsisilbi pangunahing hibla"`) and loses the entire closing paragraph beginning `"Sumunan ginabuhat na ito ang efforts din na ito..."` through the speaker's final sign-off paragraph. Roughly the last ~25 seconds of audio produces no transcript.
+- **Video `14/7612056384116477214`** (Al Jazeera English, ~120s+). Post-change `.txt` exhibits classic Whisper repetition hallucinations (`"...launching multiple strikes towards Israeli cities and Israeli cities and Israeli cities and Israeli cities and Israeli cities and U.S. military assets..."` and `"...where the U.S. has key regional air defense in the heart of the U.S. has key regional air defense..."`). An entire paragraph about the Al-Adaid / Al-Dhafra / Al-Salim / Prince Sultan air bases is missing from the post transcript.
+
+Token-count summary across all 20 videos: post had fewer tokens than pre on 19/20 (range 1–185 fewer; median ~30 fewer); one video (`62/...262`) had 16 more in post — likely repetition-driven inflation.
+
+**Hypothesis (unverified) for the root cause:** the `seek_delta = 100*WHISPER_CHUNK_SIZE` branch in `whisper.cpp` (active when either `single_segment` or `no_timestamps` is true) forces a fixed 30-second window jump regardless of where speech actually ends in the current window. With timestamps enabled, whisper.cpp uses the last timestamp token to seek to the actual speech boundary, so partial-window speech at the end of a chunk continues into the next chunk cleanly. Without timestamps, content that spans a window boundary appears to either be lost (the partial trailing utterance) or duplicated (when the next-window prompt context loses alignment, triggering the entropy guard and a temperature-fallback repetition cascade). This explains both the missing-paragraphs observation and the repetition hallucinations.
+
+**Hypothesis (unverified) implication for Plan C:** the perf win from `no_timestamps=true` is real but small (sampling-cost-only, < 1% wall-clock). The transcript-quality cost is large and uneven (some videos near-unaffected, others lose entire utterances). A Plan-C-scoped re-investigation would need to either (a) constrain `news_orgs`-style audio to single-window inputs (≤ 30s), or (b) implement a custom window-stitching pre-processing step that respects natural speech boundaries before invoking inference with `no_timestamps=true`. Neither is in the scope of any current epic.
+
+**Cross-reference:** revert commit on `feat/perf-tweaks` post-merge to main; `scripts/bake-t10-no-timestamps.sh` + `scripts/bake-t10-compare.sh` are the harness; raw bake artifacts were under `/tmp/bake-t10/{pre,post}/run{1,2}/transcripts/` (ephemeral; not preserved in-repo).
+
+**Spec correctness verified.** The bake's role per spec § Bake plan #2 was precisely "confirm or refute the hypothesis empirically." It refuted. The verification-before-completion discipline worked exactly as designed — the cheap source-level hypothesis got expensive real-data validation before the change shipped to main.
