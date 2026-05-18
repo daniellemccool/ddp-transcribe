@@ -67,3 +67,24 @@ Verification on the A10 (`yt-dlp -v --list-impersonate-targets`):
 **Still open (separate question, not blocked by this resolution):** whether working impersonation actually changes anything at SURF scale. Both today's local 6-URL verification (without impersonation) and the A10 8-URL run (without impersonation) succeeded cleanly on real Dutch/English/Tagalog content. The "is impersonation needed at small scale" question is empirically leaning toward "no," but the N=20+ comparator mini-bake (impersonation on vs off on a representative URL sample) would settle it definitively. This question stands as a separate FOLLOWUPS for Plan B Epic 3 / production-grant scoping.
 
 **Bake-notes cross-reference:** `docs/SRC-BAKE-NOTES.md` § "Plan B Epic 3 findings surfaced during bake" — Finding 2 (now resolved by this entry).
+
+---
+
+## yt-dlp `-S +size,+br,+res,+fps` is inert against `news_orgs` fixture
+
+**Found in:** Perf-tweaks T8 bake (commits `9725055` T7 code + this entry T8 finding).
+**Disposition:** Change is correct and defensive; bake confirms no regression on the success path. No follow-up needed unless a future fixture exercises the `b[vcodec=h264]/b` fallback.
+**Trigger to revisit:** if a future bake or production run observes the `download`-format selector failing (e.g., creators disabling downloads at scale, TikTok deprecating the static-asset endpoint, fixture demographics shifting), confirm `-S` actually preferring smaller formats in the resulting fallback path.
+
+**Observation:** All 25 news_orgs URLs (fixture has grown from T13's 20 to 25 entries with the bbcnews/aljazeeraenglish/gmanews/cnews additions) resolved to `format_id = download` both pre- and post-T7. `-S` only orders within a selector match; since the first selector token `download` is a literal format ID, the success path bypasses sort entirely. The change therefore had no measurable effect on this fixture.
+
+**Bake environment context:** Run on the dev machine (Arch Linux + yt-dlp 2026.03.17) rather than the A10 workspace. T8's plan flagged the trade-off explicitly: yt-dlp's selector-resolution logic is environment-independent (same TikTok API responses, same selector code), so the dev machine produces the same signal at lower cost than waiting on the A10 for a bake that already-known to be unlikely to exercise the fallback. The A10 might surface operational issues (curl-cffi flakiness per the resolved `docs/bake-findings.md` entry above) that the dev machine doesn't, but those affect *network reliability*, not *format selection*.
+
+**Raw bake table:** 25 URLs × 2 invocations = 50 `yt-dlp --print` calls. Diff between pre-change (no `-S`) and post-change (with `-S +size,+br,+res,+fps`) yt-dlp output: empty. Full table at `/tmp/bake-t8/results.tsv` during the bake; not preserved in-repo because the result is "no diffs anywhere."
+
+| Side | format_id counts |
+|------|------------------|
+| pre  | download × 25    |
+| post | download × 25    |
+
+**Why we kept the change:** defensive — TikTok's `download` format depends on creator settings (some videos disable downloads) and on yt-dlp's `download`-format extractor staying functional (yt-dlp #15891 and #16622 document upstream non-determinism in adjacent paths). When the fallback runs, `-S` ensures we don't accidentally pick a needlessly-large h264 variant. The cost of the change is zero (one extra flag in the argv); the benefit is conditional but real.
