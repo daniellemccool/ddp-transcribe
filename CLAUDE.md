@@ -24,7 +24,7 @@ Feature-derived ADRs (0004, 0009–0017, plus Epic 2+ feature ADRs) live on feat
 ## Default working patterns
 
 - **Executing plans:** `superpowers:subagent-driven-development` (in-session) or `superpowers:executing-plans` (multi-session).
-- **Before claiming done:** `superpowers:verification-before-completion`. Run `cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test --features test-helpers -- --test-threads=1`. The `--features test-helpers` flag exposes library items needed by integration tests (per 0005); `--test-threads=1` is load-bearing on this workspace — the whisper-engine integration tests contend for the GPU under parallel execution and finish faster serialized, plus single-threaded gives deterministic ordering for state-machine tests.
+- **Before claiming done:** `superpowers:verification-before-completion`. Run `cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test --features test-helpers -- --test-threads=1`. The `--features test-helpers` flag exposes library items needed by integration tests (per 0005). **`--test-threads=1` is mandatory on the operator's dev workstation — multi-threaded `cargo test` overheats the machine.** Secondary benefits: deterministic ordering for state-machine tests with per-test fixture DBs, and avoiding GPU-contention noise across the whisper-engine integration tests. Do not drop `--test-threads=1` for "faster" runs.
 - **Parallel work / conflict isolation:** `superpowers:using-git-worktrees`.
 - **Code review:** `superpowers:requesting-code-review` / `superpowers:receiving-code-review`; the three-tier protocol per 0018.
 - **Debugging:** `superpowers:systematic-debugging`.
