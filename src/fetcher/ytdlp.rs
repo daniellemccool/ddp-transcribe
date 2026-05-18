@@ -52,7 +52,17 @@ fn build_yt_dlp_args(video_id: &str, source_url: &str, video_dir: &Path) -> (Vec
         "--audio-format".into(),
         "wav".into(),
         "--postprocessor-args".into(),
-        "ffmpeg:-ar 16000 -ac 1".into(),
+        // T3 perf-tweaks: make the audio-only minimum-artifact contract
+        // explicit. `-sn -dn` drop subtitle/data streams; `-map 0:a:0`
+        // selects only the first audio stream; `-c:a pcm_s16le` pins the
+        // WAV codec; `-ar 16000 -ac 1` enforces AD0014. `-vn` and
+        // `-c:a pcm_s16le` are redundant with current yt-dlp/ffmpeg
+        // defaults (yt-dlp already passes `-vn`; ffmpeg defaults WAV
+        // output to pcm_s16le) — kept for explicitness and as defense
+        // against future default changes. Validated via `yt-dlp -v`
+        // against a real TikTok URL on 2026-05-18; verbose-log snippet
+        // in the T3 commit body.
+        "ffmpeg:-vn -sn -dn -map 0:a:0 -c:a pcm_s16le -ar 16000 -ac 1".into(),
         "-o".into(),
         output_template,
         source_url.to_string(),
@@ -133,12 +143,16 @@ mod tests {
     fn build_args_enforces_audio_input_invariant() {
         // AD0014: audio input is float32 PCM 16 kHz mono. The yt-dlp
         // postprocessor enforces 16 kHz mono at the WAV-extraction boundary.
+        // T3 perf-tweaks: the postprocessor-args string also makes the
+        // stream-selection contract explicit (drop video/subtitle/data
+        // streams, map first audio stream, pin pcm_s16le).
         let video_dir = PathBuf::from("/tmp/test-dir");
         let (args, _) = build_yt_dlp_args("abc123", "https://example.com/v", &video_dir);
         assert!(
-            args.iter().any(|a| a == "ffmpeg:-ar 16000 -ac 1"),
-            "AD0014 audio invariant (16 kHz mono) must be enforced via \
-             yt-dlp's --postprocessor-args"
+            args.iter()
+                .any(|a| a == "ffmpeg:-vn -sn -dn -map 0:a:0 -c:a pcm_s16le -ar 16000 -ac 1"),
+            "T3 + AD0014: postprocessor-args must drop non-audio streams, \
+             map first audio, pin pcm_s16le + 16 kHz + mono"
         );
     }
 
