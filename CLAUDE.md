@@ -31,7 +31,7 @@ Feature-derived ADRs (AD0004, AD0009–AD0017, plus Epic 2+ feature ADRs) live o
 
 ## Project-local tools
 
-- **ADRs:** see the `using-adg` skill. Use `adg` directly (with `--model docs/decisions`); pipe multi-paragraph body content through `scripts/adr-fill <id>`.
+- **ADRs:** see the `using-adg` skill. Use `scripts/adr` (a thin wrapper around `adg` that hardcodes `--model docs/decisions` and takes bodies via stdin).
 - **codex-advisor:** see the `using-codex-advisor` skill. Per AD0018, the orchestrator never calls codex directly during task reviews — the Sonnet spec-compliance reviewer delegates and distills.
 
 ## Active state — query, don't write down
