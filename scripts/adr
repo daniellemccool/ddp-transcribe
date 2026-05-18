@@ -25,19 +25,25 @@ usage() {
 adr — wrapper around `adg` for docs/decisions/.
 
 Subcommands:
-  new <title>                       create a proposed ADR; ID is printed to stdout
-  edit <id> [--force] < body        replace body via stdin (--force for non-proposed)
-  decide <id> <option> [<reason>]   mark as accepted with the chosen option
-  supersede <new> <old> [<reason>]  bidirectional supersession
-  comment <id> <text>               append a comment; author from $ADR_AUTHOR or git
-  tag <id> <tag>...                 add one or more tags
-  link <src> <dst> <tag> [<rev>]    add a custom link, optional reverse tag
-  list [filter...]                  list ADRs; extra args pass through to `adg list`
-  view <id> [--section ...]         show one ADR or selected sections
-  validate                          run adg validate
+  new <title> [<id>]                       create a proposed ADR; ID is printed to stdout.
+                                           Optional <id> (1-9999, zero-padded to 0NNN) for
+                                           deterministic assignment; fails on collision.
+  edit <id> [--force] < body               replace body via stdin (--force for non-proposed)
+  decide <id> <option-name-or-index> [<r>] mark as accepted with the chosen option;
+                                           <option> accepts the bullet text OR a 1-based index
+  supersede <new> <old> [<reason>]         bidirectional supersession
+  comment <id> <text>                      append a comment; author from $ADR_AUTHOR or git
+  tag <id> <tag>...                        add one or more tags
+  link <src> <dst> <tag> [<rev>]           add a custom link, optional reverse tag
+  list [filter...]                         list ADRs; extra args pass through to `adg list`
+  view <id> [--section ...]                show one ADR or selected sections
+  validate                                 run adg validate
 
 The body for `edit` is a complete MADR body with `## Context and Problem
 Statement`, `## Considered Options`, and `## Decision Outcome` sections.
+The H1 (`# <title>`) is optional — if omitted, adg prepends one from the
+decision's stored title.
+
 For flag detail on any underlying command, see `adg <cmd> --help`.
 USAGE
 }
@@ -47,8 +53,13 @@ shift || true
 
 case "$cmd" in
     new)
-        title="${1:?usage: adr new <title>}"
-        adg add --title "$title" --model "$MODEL"
+        title="${1:?usage: adr new <title> [<id>]}"
+        id="${2:-}"
+        if [[ -n "$id" ]]; then
+            adg add --title "$title" --id "$id" --model "$MODEL"
+        else
+            adg add --title "$title" --model "$MODEL"
+        fi
         ;;
     edit)
         id="${1:?usage: adr edit <id> [--force] < body}"
