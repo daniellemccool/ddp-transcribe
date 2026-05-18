@@ -90,6 +90,7 @@ impl VideoFetcher for YtDlpFetcher {
             args,
             timeout: self.timeout,
             stderr_capture_bytes: 8 * 1024,
+            stdout_capture_bytes: 0, // yt-dlp writes audio to a file; stdout unused
             redact_arg_indices: &[],
         })
         .await?;

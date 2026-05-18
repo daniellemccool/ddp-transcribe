@@ -57,3 +57,7 @@ required-features = ["test-helpers"]
 [[test]]
 name = "transcribe_lang_state"
 required-features = ["test-helpers"]
+
+[[test]]
+name = "process_bounded_capture"
+required-features = ["test-helpers"]
