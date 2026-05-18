@@ -10,18 +10,18 @@ use crate::errors::TranscribeError;
 // ============================================================================
 //
 // Pass-through raw signals from whisper.cpp's C API via the whisper-rs binding.
-// See AD0010 (raw_signals schema), AD0016 (worker-thread invariants).
+// See 0010 (raw_signals schema), 0016 (worker-thread invariants).
 //
 // These types are OWNED data: no references, no whisper-rs handles. They cross
-// the worker-thread boundary safely (AD0016 #1: owned data only).
+// the worker-thread boundary safely (0016 #1: owned data only).
 
 use serde::{Deserialize, Serialize};
 
 /// Owned output from a single whisper inference. Crosses the worker-thread
-/// boundary (AD0016). T10's artifact writer maps these fields across the
+/// boundary (0016). T10's artifact writer maps these fields across the
 /// artifact JSON: `text` and `model_id` land at the top level (alongside
 /// Plan A's existing metadata), while `language`, `lang_probs`, and `segments`
-/// are placed inside the `raw_signals` sub-object (AD0010). This struct is
+/// are placed inside the `raw_signals` sub-object (0010). This struct is
 /// the worker-return type, not a 1:1 mirror of `raw_signals`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TranscribeOutput {
@@ -52,7 +52,7 @@ pub struct SegmentRaw {
 /// Per-token confidence signals from whisper.cpp.
 ///
 /// `id` and `text` carry token identity so downstream consumers can filter
-/// special tokens (`[BEG]`, `[END]`, `<|en|>`, etc.) per AD0010's pass-through
+/// special tokens (`[BEG]`, `[END]`, `<|en|>`, etc.) per 0010's pass-through
 /// rule — the prior shape (only `p`/`plog`) numerically included specials but
 /// gave consumers no way to identify them.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -73,7 +73,7 @@ pub struct TokenRaw {
 
 /// Extract per-segment and per-token raw confidence signals from whisper state.
 ///
-/// AD0003 deviation: whisper-rs 0.16.0 does not expose flat
+/// 0003 deviation: whisper-rs 0.16.0 does not expose flat
 /// `full_get_segment_no_speech_prob` / `full_n_tokens` / `full_get_token_data`
 /// methods on `WhisperState`. Everything is accessed via the wrapper types
 /// `WhisperSegment` (via `state.get_segment(i)`) and `WhisperToken`
@@ -87,7 +87,7 @@ pub struct TokenRaw {
 /// review forward-pointer: non-finite values must surface as `TranscribeError::Bug`).
 ///
 /// Special tokens (`[BEG]`, `[END]`, language tokens like `<|en|>`, etc.) are
-/// retained per AD0010's pass-through rule — downstream consumers filter them.
+/// retained per 0010's pass-through rule — downstream consumers filter them.
 fn extract_segments(state: &whisper_rs::WhisperState) -> Result<Vec<SegmentRaw>, String> {
     let n_segments = state.full_n_segments();
     if n_segments < 0 {
@@ -238,19 +238,19 @@ mod plan_b_tests {
 // Plan B Epic 1: WhisperEngine shell (T5)
 // ============================================================================
 //
-// Worker-thread architecture per AD0016:
+// Worker-thread architecture per 0016:
 // - Only owned data crosses the boundary (samples, configs, output structs)
 // - WhisperContext/WhisperState stay inside the worker thread (T6/T7)
-// - Closed oneshot reply is Bug-class during normal execution; AD0016 comment-2
+// - Closed oneshot reply is Bug-class during normal execution; 0016 comment-2
 //   carves out shutdown (relevant when Epic 2 wires shutdown signaling).
 //
-// Per-request cancellation per AD0012 (+ comment-2 refinement):
+// Per-request cancellation per 0012 (+ comment-2 refinement):
 // - Each request carries its own Arc<AtomicBool> for operator-initiated cancel
-//   (per-request, never shared across requests — AD0012's no-leak invariant).
+//   (per-request, never shared across requests — 0012's no-leak invariant).
 // - Each request carries its own `deadline: Instant` for per-call timeout.
 // - T7's abort_callback polls BOTH inside whisper.cpp's encoder/decoder loop;
 //   no separate timer task is spawned (deviates from the T5 brief's tokio::spawn
-//   sketch per AD0012 comment-2; see AD0003 deviation disclosure in commit body).
+//   sketch per 0012 comment-2; see 0003 deviation disclosure in commit body).
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -280,16 +280,16 @@ pub struct PerCallConfig {
 pub(crate) struct TranscribeRequest {
     pub samples: Vec<f32>,
     pub config: PerCallConfig,
-    /// Per-request cancel flag (AD0012). Operator-initiated cancellation flips
+    /// Per-request cancel flag (0012). Operator-initiated cancellation flips
     /// this; T7's abort_callback polls it. Never shared across requests.
     pub cancel: Arc<AtomicBool>,
-    /// Per-call deadline (AD0012 comment-2). T7's abort_callback polls
+    /// Per-call deadline (0012 comment-2). T7's abort_callback polls
     /// `Instant::now() >= deadline` directly — no separate timer task.
     pub deadline: Instant,
     pub reply: oneshot::Sender<Result<TranscribeOutput, TranscribeError>>,
 }
 
-// AD0002: BackendMismatch is constructed by T13's backend-assertion path;
+// 0002: BackendMismatch is constructed by T13's backend-assertion path;
 // suppress dead_code until then.
 #[derive(Debug, thiserror::Error)]
 pub enum WhisperInitError {
@@ -311,7 +311,7 @@ pub enum WhisperInitError {
 
 /// FFI trampoline for whisper.cpp's abort_callback. `user_data` must be the
 /// raw pointer returned by `Box::into_raw(Box::new(closure))` where `closure`
-/// is `Box<dyn FnMut() -> bool>`. See the AD0003 deviation comment inside the
+/// is `Box<dyn FnMut() -> bool>`. See the 0003 deviation comment inside the
 /// worker loop for why we hand-roll this instead of using
 /// `FullParams::set_abort_callback_safe`.
 unsafe extern "C" fn abort_trampoline(user_data: *mut std::ffi::c_void) -> bool {
@@ -322,7 +322,7 @@ unsafe extern "C" fn abort_trampoline(user_data: *mut std::ffi::c_void) -> bool 
 /// Drop guard that flips the per-request cancel flag when the caller's
 /// `transcribe()` future is dropped before the worker replies. Without this,
 /// a caller cancelling the future would leave the worker chewing on an
-/// orphaned request whose result no one will read. Per AD0012 comment-2,
+/// orphaned request whose result no one will read. Per 0012 comment-2,
 /// the cancel flag is the operator-initiated cancellation channel; future-drop
 /// is a special case of operator-initiated.
 struct CancelOnDrop(Arc<AtomicBool>);
@@ -333,7 +333,7 @@ impl Drop for CancelOnDrop {
     }
 }
 
-/// Worker-thread-owning engine handle. See AD0016 for the parallelism contract
+/// Worker-thread-owning engine handle. See 0016 for the parallelism contract
 /// (engine API stays stable across single- and multi-state worker pools).
 ///
 /// Both fields are `Option` so `shutdown()` and `Drop::drop` can share the same
@@ -341,14 +341,14 @@ impl Drop for CancelOnDrop {
 /// worker's `blocking_recv` return `None`), THEN join. If the sender were
 /// dropped after the join attempt, the worker would park forever in
 /// `blocking_recv` and the join would hang. (Brief code had this hazard;
-/// AD0003 deviation — see commit body.)
+/// 0003 deviation — see commit body.)
 pub struct WhisperEngine {
     request_tx: Option<mpsc::Sender<TranscribeRequest>>,
     handle: Option<thread::JoinHandle<()>>,
     /// Counter incremented each time the worker thread lazily allocates
     /// `lang_state` (at most once per worker lifetime). Always present so the
     /// worker capture doesn't branch on a feature flag; only **read** outside
-    /// the worker via the `test-helpers` getter below. AD0002: `dead_code`
+    /// the worker via the `test-helpers` getter below. 0002: `dead_code`
     /// is allowed because the field is constructed and written-to in the
     /// worker (via a cloned `Arc`) but only read in test-helpers builds.
     #[allow(dead_code)]
@@ -385,7 +385,7 @@ impl WhisperEngine {
         // on the first `compute_lang_probs=true` request. This Arc<AtomicUsize>
         // is the only thing about the lazy lifecycle that crosses the worker
         // boundary (read-only from outside via the test-helpers getter).
-        // AD0016 invariant preserved: WhisperState stays inside the worker.
+        // 0016 invariant preserved: WhisperState stays inside the worker.
         let lang_state_allocations = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let lang_state_allocations_worker = std::sync::Arc::clone(&lang_state_allocations);
 
@@ -394,7 +394,7 @@ impl WhisperEngine {
             .spawn(move || {
                 // whisper-rs 0.16.0: setters take &mut self and return &mut Self.
                 // use_gpu(true) is harmless on a CPU build — whisper.cpp falls back.
-                // AD0013 backend-mismatch assertion lands in T13.
+                // 0013 backend-mismatch assertion lands in T13.
                 let mut ctx_params = WhisperContextParameters::default();
                 ctx_params
                     .use_gpu(true)
@@ -402,7 +402,7 @@ impl WhisperEngine {
                     .gpu_device(gpu_device);
 
                 // whisper-rs 0.16.0 accepts P: AsRef<Path>; pass the PathBuf directly.
-                // AD0003 deviation from brief sketch (brief did .to_str().unwrap_or("")).
+                // 0003 deviation from brief sketch (brief did .to_str().unwrap_or("")).
                 let ctx_result = WhisperContext::new_with_params(&model_path, ctx_params);
                 let ctx = match ctx_result {
                     Ok(c) => {
@@ -431,10 +431,10 @@ impl WhisperEngine {
                 // efficiency goal. `whisper_full_with_state` clears `result_all`
                 // on entry (sharp-edges.md:19), so state reuse across calls is
                 // safe. Epic 1 ships single-state; Plan C may allocate N states
-                // per context for intra-GPU parallelism (AD0016 architecture).
+                // per context for intra-GPU parallelism (0016 architecture).
                 //
                 // `ctx` and `state` live until this closure exits — keep the
-                // model in memory for the worker's lifetime. AD0016:
+                // model in memory for the worker's lifetime. 0016:
                 // WhisperContext and WhisperState stay inside the worker
                 // thread; they never escape.
                 let mut state = match ctx.create_state() {
@@ -455,7 +455,7 @@ impl WhisperEngine {
                 // requests reusing the same state. See sharp-edges.md:15 —
                 // whisper_lang_auto_detect_with_state clobbers state (reuses
                 // decoders[0] and logits), so it must NOT run on the primary
-                // state used for inference. AD0016: this WhisperState stays
+                // state used for inference. 0016: this WhisperState stays
                 // inside the worker thread; the only thing crossing out is
                 // the `lang_state_allocations` counter Arc.
                 let mut lang_state: Option<whisper_rs::WhisperState> = None;
@@ -467,7 +467,7 @@ impl WhisperEngine {
                 }
 
                 // model_id is derived from the path file_name once, outside the
-                // hot loop. AD0010: this lands in the artifact's top-level
+                // hot loop. 0010: this lands in the artifact's top-level
                 // `model_id` field; T9/T10 thread it through.
                 let model_id = model_path
                     .file_name()
@@ -479,7 +479,7 @@ impl WhisperEngine {
                     // Lazy lang_state allocation per T2 perf-tweaks. The
                     // `WhisperContext::create_state` call is non-trivial (a
                     // second mel encoder + decoder context on the same
-                    // model). Defer until first opt-in request. AD0016: state
+                    // model). Defer until first opt-in request. 0016: state
                     // stays inside this thread; the counter Arc is the only
                     // thing that crosses out.
                     if req.config.compute_lang_probs && lang_state.is_none() {
@@ -520,7 +520,7 @@ impl WhisperEngine {
                     }
 
                     // FullParams configuration — embedding hygiene defaults per
-                    // AD0013 + sharp-edges.md:66 (`print_progress = true` is the
+                    // 0013 + sharp-edges.md:66 (`print_progress = true` is the
                     // upstream default).
                     // SamplingStrategy::Greedy { best_of: 1 } — memory-conservative
                     // choice for Epic 1's bake. Plan A's whisper-cli used the
@@ -542,12 +542,12 @@ impl WhisperEngine {
                     let lang = req.config.language.as_deref().unwrap_or("auto");
                     params.set_language(Some(lang));
 
-                    // Cooperative cancellation per AD0012 comment-2: the abort
+                    // Cooperative cancellation per 0012 comment-2: the abort
                     // callback polls BOTH `Instant::now() >= deadline` AND
                     // `cancel.load()` — deadline covers per-call timeout,
                     // cancel covers operator-initiated / future-drop.
                     //
-                    // AD0003 deviation: whisper-rs 0.16.0's
+                    // 0003 deviation: whisper-rs 0.16.0's
                     // `set_abort_callback_safe` has a type-mismatch bug — at
                     // whisper_params.rs:645 it registers `trampoline::<F>`
                     // while the user_data pointer is actually
@@ -609,7 +609,7 @@ impl WhisperEngine {
                     // detect "feature requested but unavailable" via
                     // `compute_lang_probs == true && lang_probs.is_none()`.
                     //
-                    // AD0003 deviation from brief pseudocode:
+                    // 0003 deviation from brief pseudocode:
                     // - `lang_state.lang_detect()` returns `(i32, Vec<f32>)` not
                     //   just `Vec<f32>`; we destructure and discard the detected
                     //   lang_id (the primary inference gives us language via
@@ -697,7 +697,7 @@ impl WhisperEngine {
                         }
                         Ok(()) => {
                             // Extract text and raw signals in one pass over
-                            // segments. AD0003 deviation note: whisper-rs 0.16.0
+                            // segments. 0003 deviation note: whisper-rs 0.16.0
                             // has no `full_get_segment_text`; use `get_segment(i)`
                             // + `WhisperSegment::to_str()` instead.
                             let n_segments = state.full_n_segments();
@@ -710,7 +710,7 @@ impl WhisperEngine {
                                 }
                             }
 
-                            // Detected language. AD0003 deviation: the method
+                            // Detected language. 0003 deviation: the method
                             // is `full_lang_id_from_state` (not `full_lang_id`)
                             // and the helper is the standalone
                             // `whisper_rs::get_lang_str`.
@@ -740,7 +740,7 @@ impl WhisperEngine {
                         }
                     }
                 }
-                // Sender dropped → channel closed → orderly exit. Per AD0016
+                // Sender dropped → channel closed → orderly exit. Per 0016
                 // comment-2, this is the shutdown-carve-out path (not Bug).
             })
             .map_err(|e| WhisperInitError::WorkerSpawn {
@@ -774,10 +774,10 @@ impl WhisperEngine {
     /// Test-only accessor: returns the number of times the worker thread has
     /// lazily allocated `lang_state`. Used by `tests/transcribe_lang_state.rs`
     /// to assert the lazy lifecycle (0 for non-opt-in workers; exactly 1 for
-    /// opt-in workers regardless of request count). AD0016: the counter is
+    /// opt-in workers regardless of request count). 0016: the counter is
     /// the only piece of the lazy lifecycle exposed outside the worker thread.
     ///
-    /// AD0002/AD0005: `dead_code` is allowed because workspace-level
+    /// 0002/0005: `dead_code` is allowed because workspace-level
     /// `--features test-helpers` activates this getter on the bin compilation
     /// path too, but only integration tests call it — matches the
     /// `Store::get_video_for_test` / `EventRow` pattern in `src/state/mod.rs`.
@@ -813,7 +813,7 @@ impl WhisperEngine {
         };
 
         // No tokio::spawn timer here: T7's abort_callback polls deadline + cancel
-        // directly inside whisper.cpp's encoder/decoder loop. AD0012 comment-2.
+        // directly inside whisper.cpp's encoder/decoder loop. 0012 comment-2.
 
         let tx = self
             .request_tx
@@ -872,7 +872,7 @@ impl Drop for WhisperEngine {
 //     fixture-decoded silence path end-to-end.
 //   - transcribe_respects_short_deadline → exercises abort_callback firing
 //     on deadline elapse.
-// See AD0003 deviation disclosure in the commit body.
+// See 0003 deviation disclosure in the commit body.
 
 // ============================================================================
 // Plan B Epic 1 (T11): Transcriber trait

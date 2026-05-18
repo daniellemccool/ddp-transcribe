@@ -12,7 +12,7 @@
 
 ## Headline outcomes
 
-1. **AD0013 gate passes on all four models.** No silent CPU fallback. `whisper_backend_init_gpu: using CUDA0 backend` confirmed in stderr for tiny.en, small, medium.en, and large-v3-turbo-q5_0. Binary linked against `libcudart.so.13`, `libcublas.so.13`, `libcuda.so.1`, `libcublasLt.so.13` from `/usr/local/cuda/targets/x86_64-linux/lib/`.
+1. **0013 gate passes on all four models.** No silent CPU fallback. `whisper_backend_init_gpu: using CUDA0 backend` confirmed in stderr for tiny.en, small, medium.en, and large-v3-turbo-q5_0. Binary linked against `libcudart.so.13`, `libcublas.so.13`, `libcuda.so.1`, `libcublasLt.so.13` from `/usr/local/cuda/targets/x86_64-linux/lib/`.
 2. **CUDA 13.2 + whisper-rs 0.16.0 (whisper.cpp v1.8.3, commit `2eeeba5`) build cleanly.** 3 minutes 17 seconds release build with `--features cuda`. No flag adjustments, no patched headers, no fallback to older CUDA needed. This is a "tested-good" combination worth pinning in the playbook.
 3. **End-to-end pipeline integration confirmed.** One video flowed through fetch → WAV decode → engine → text + JSON artifact with `raw_signals` (schema_version=`"1"`, per-segment `no_speech_prob`, per-token `{id, text, p, plog}`, language code, lang_probs slot) and provenance fields (`fetcher: "ytdlp"`, `transcript_source: "whisper-rs"`, model basename).
 4. **Production model choice clarified by quality observation: `large-v3-turbo-q5_0` is the winner.** Better transcripts than `medium.en` (multilingual where medium.en hallucinates) and faster wall-clock at one-third the model size. See per-model table.
@@ -26,7 +26,7 @@ These caused friction during the bake and should be in the eventual operator pla
 
 1. **`SRC-BAKE-CHECKLIST.md` is Plan A; Phase 1 is stale.** Lists `whisper-cli` as required (Plan B removed it) and omits Plan B's actual build prereqs: `cmake`, `clang`, `libclang-dev` / `libclang-18-dev`, CUDA toolkit. Phase 5's `cargo build --release` should be `cargo build --release --features cuda` for A10 builds. Update the checklist (or supersede it) when the playbook lands.
 2. **Ubuntu 24.04's `libclang-dev` package installs only C++ headers (`/usr/include/clang/`), NOT the C-API headers (`clang-c/Index.h`)** that bindgen needs. Need the versioned package `libclang-18-dev` explicitly. Headers land at `/usr/lib/llvm-18/include/clang-c/`, discovered by bindgen via `llvm-config-18`.
-3. **`jq` is missing from the standard apt install set** but is needed for the AD0017 done-contract check (inspect `.json` artifacts). Add to playbook's install list.
+3. **`jq` is missing from the standard apt install set** but is needed for the 0017 done-contract check (inspect `.json` artifacts). Add to playbook's install list.
 4. **`apt update` on the SRC base image emits ~60 W: warnings** about multi-configured sources (`fallback-mirrors.sources` + `ubuntu.sources` overlap). All cosmetic; "All packages are up to date" line at the top is the only success signal that matters.
 5. **SSH from a modern terminal emulator (kitty, alacritty, wezterm) breaks ncurses tools** because the workspace doesn't ship those terminfo entries. `TERM=xterm-256color <cmd>` for one-offs or `export TERM=xterm-256color` to persist.
 6. **`pipx inject yt-dlp curl-cffi` reports success but yt-dlp still shows `(unavailable)` for impersonation targets.** Diagnostic unfinished due to paste-friction; root cause likely a C-extension build / libcurl-dev gap. See FOLLOWUPS entry.
@@ -51,7 +51,7 @@ These caused friction during the bake and should be in the eventual operator pla
 
 ---
 
-## GPU verification (AD0013 gate)
+## GPU verification (0013 gate)
 
 **Outcome: PASS** — backend init logs and `ldd` of the release binary both confirm GPU is active. No silent CPU fallback at any point.
 
@@ -61,7 +61,7 @@ whisper_backend_init_gpu: found GPU device 0: CUDA0 (type: 1, cnt: 0)
 whisper_backend_init_gpu: using CUDA0 backend
 ```
 
-Appears twice per inference (once for the primary state, once for the language-detection state per AD0012's separate-state design from T8). Confirmed on every one of the four model runs.
+Appears twice per inference (once for the primary state, once for the language-detection state per 0012's separate-state design from T8). Confirmed on every one of the four model runs.
 
 `ldd target/release/uu-tiktok | grep -E "cuda|cublas"`:
 ```
@@ -77,7 +77,7 @@ libcublasLt.so.13 => /usr/local/cuda/targets/x86_64-linux/lib/libcublasLt.so.13
 
 ## Per-model wallclock — n=1 each on video `7491984376423615766` (35.6440625s of French audio, "RTL FR" helicopter-crash news clip)
 
-| Model | Size on disk | Model VRAM | State VRAM (×2 per AD0012) | Total VRAM est | Transcribe wallclock† | Realtime ratio | `time -v` total | RSS peak |
+| Model | Size on disk | Model VRAM | State VRAM (×2 per 0012) | Total VRAM est | Transcribe wallclock† | Realtime ratio | `time -v` total | RSS peak |
 |-------|--------------|------------|----------------------------|----------------|------------------------|-----------------|-----------------|----------|
 | `tiny.en` | 75 MB | 77 MB | 148 MB | ~373 MB | **0.17 s** | **213× realtime** | 4.37 s | 493 MB |
 | `small` | 466 MB | 487 MB | 242 MB | ~969 MB | **0.79 s** | **45× realtime** | 3.69 s | 514 MB |
@@ -109,17 +109,17 @@ The `lang_detect` probability (T8 on the separate `lang_state`) is a reliable co
 
 ## 1-state vs 2-state measurement
 
-**Not measured in this bake** — fetch failures (Epic 3 finding below) prevented running the multi-instance test that would have produced 5 videos through two concurrent processes. The architectural future-proofing per AD0016 is in place (Engine API is stable across single/multi-state); intra-process multi-state implementation is Plan C / production grant work regardless.
+**Not measured in this bake** — fetch failures (Epic 3 finding below) prevented running the multi-instance test that would have produced 5 videos through two concurrent processes. The architectural future-proofing per 0016 is in place (Engine API is stable across single/multi-state); intra-process multi-state implementation is Plan C / production grant work regardless.
 
 ---
 
-## Raw artifact size growth (per AD0010 schema_version="1")
+## Raw artifact size growth (per 0010 schema_version="1")
 
 Single artifact for the 35.6-second French video:
 - `.txt`: 730 bytes (transcript)
 - `.json`: 2250 bytes (metadata + `raw_signals` with per-token `id`/`text`/`p`/`plog`)
 
-**Per-token raw-signal growth roughly doubles JSON size** vs a hypothetical `{p, plog}`-only token shape. For 1M-video production at this artifact size: ~2.25 GB of metadata JSON. Acceptable at scale; gzip compression (Plan C consideration) could halve again. The `id` + `text` fields are load-bearing for downstream filtering of special tokens like `[_BEG_]`, `[_EOT_]`, `<|en|>` etc. (AD0010 pass-through rule).
+**Per-token raw-signal growth roughly doubles JSON size** vs a hypothetical `{p, plog}`-only token shape. For 1M-video production at this artifact size: ~2.25 GB of metadata JSON. Acceptable at scale; gzip compression (Plan C consideration) could halve again. The `id` + `text` fields are load-bearing for downstream filtering of special tokens like `[_BEG_]`, `[_EOT_]`, `<|en|>` etc. (0010 pass-through rule).
 
 ---
 
@@ -180,17 +180,17 @@ For completeness and to clearly delegate to future epics:
 
 - **N=5-video averaging per model.** Blocked by Epic 3 fetch-classification gap (no recovery from per-video fetch failure under Plan A's serial loop; Epic 2 introduces failure persistence).
 - **--compute-lang-probs overhead.** Carry to Epic 2's bake addendum.
-- **1-state vs 2-state throughput delta.** Multi-instance test deferred to Plan C / production grant work; architecture is future-proofed per AD0016.
+- **1-state vs 2-state throughput delta.** Multi-instance test deferred to Plan C / production grant work; architecture is future-proofed per 0016.
 - **Long-running steady-state characterization.** Each bake run was single-shot; a 100-video continuous run would reveal CUDA-graph warmup effects, RSS growth/leak signatures, and amortized model-load cost. Becomes Epic 2 bake work once the pipelined orchestrator lands.
 - **Donation-side TikTok URL reachability.** The single account-failure observed (`@rtl.nl`) reproduced consistently but no broader survey of donation-source URL fetchability was conducted.
 
 ---
 
-## Operational habits documented (per AD0011)
+## Operational habits documented (per 0011)
 
-After capturing these notes, the workspace was paused per the AD0011 spin-down practice. Grant-wallet bills $0 while paused; storage and workspace state persist for the next session.
+After capturing these notes, the workspace was paused per the 0011 spin-down practice. Grant-wallet bills $0 while paused; storage and workspace state persist for the next session.
 
-Bake-completion checklist (informal — formalize in Epic 4's `status` subcommand per AD0017):
+Bake-completion checklist (informal — formalize in Epic 4's `status` subcommand per 0017):
 
 - [x] `cargo build --release --features cuda` succeeded
 - [x] CUDA backend log line confirmed on all measured models

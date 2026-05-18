@@ -21,7 +21,7 @@ are loaded only when an epic's task expansion needs them — see the
 
 **Discipline:** entries that record unverified hypotheses must prefix the
 hypothesis with `**Hypothesis (unverified):**` so the next operator knows
-to verify before acting (per AD0020).
+to verify before acting (per 0020).
 
 ## Maintenance
 
@@ -63,7 +63,7 @@ lines 120-148.
 - Full Epic 3 entries: [followups/epic-3.md](followups/epic-3.md)
 
 **Epic 4 (operator-facing commands / timestamps)**
-- T13: `parse_watched_at` UTC assumption → Epic 4 (AD0027 resolution path)
+- T13: `parse_watched_at` UTC assumption → Epic 4 (0027 resolution path)
 - Full Epic 4 entries: [followups/epic-4.md](followups/epic-4.md)
 
 **Epic 5 (Plan A → Plan B cleanup sweep)**
@@ -81,16 +81,16 @@ lines 120-148.
 **Plan C (short-link resolution, multi-engine, storage scale)**
 - T5: `SHORT_LINK_RE` query parameters → Plan C (short-link resolution lands)
 - T8: `output::shard` ASCII-only byte slice → Plan C (when `VideoId` newtype lands)
-- T1-Epic1: Promote AD0010's pass-through rule to a meta-process ADR → Plan C (if recurring pressure)
+- T1-Epic1: Promote 0010's pass-through rule to a meta-process ADR → Plan C (if recurring pressure)
 - T3-Epic1: `decode_wav` trusts float-format WAV sample values → Plan C (if alternate fetcher introduces float WAVs)
-- T10-Epic1: Per-token text field doubles raw_signals payload → Plan C (compact JSON landed in perf-tweaks decdf6f; drop-text still deferred pending AD0010 amendment)
+- T10-Epic1: Per-token text field doubles raw_signals payload → Plan C (compact JSON landed in perf-tweaks decdf6f; drop-text still deferred pending 0010 amendment)
 - Full Plan C entries: [followups/plan-c.md](followups/plan-c.md)
 
 **Cross-epic / ADR maintenance / verify-then-archive**
-- T1-Epic1: codex code-quality review deferred ADR refinements (AD0009/AD0011/AD0013/AD0016/AD0017 + error variants) → multi-epic (Epic 4, T6/T7, Plan C)
+- T1-Epic1: codex code-quality review deferred ADR refinements (0009/0011/0013/0016/0017 + error variants) → multi-epic (Epic 4, T6/T7, Plan C)
 - T9-Epic1: integration test only exercises empty-segment path on silence fixture → unscoped (when spoken-English fixture lands)
 - T8-Epic1: `lang_probs` second `WhisperState` allocation guidance → verify Epic 1 implementation before archiving
-- T13-Epic1: AD0013 backend assertion must be `cfg(feature="cuda")`-gated → verify Epic 1 implementation before archiving
+- T13-Epic1: 0013 backend assertion must be `cfg(feature="cuda")`-gated → verify Epic 1 implementation before archiving
 - T4-Epic1: T9 extraction must reject non-finite f32 from whisper-rs → verify Epic 1 implementation before archiving
 - T7-Epic1: Revisit `SamplingStrategy::Greedy { best_of }` after T13 bake → unscoped tuning followup (see also `bake-findings.md`)
 - T8-Epic1: Diagnostic log when `lang_detect`'s top id disagrees with primary inference → unscoped diagnostic (see also `bake-findings.md`)

@@ -19,7 +19,7 @@ pub struct ProcessOptions {
     /// when constructing `PerCallConfig`.
     pub compute_lang_probs: bool,
     /// Threaded from `Config::transcribe_timeout`. Per-call deadline handed
-    /// to `Transcriber::transcribe`; AD0012's abort_callback polls it.
+    /// to `Transcriber::transcribe`; 0012's abort_callback polls it.
     pub transcribe_timeout: Duration,
 }
 
@@ -98,10 +98,10 @@ async fn process_one(
     };
     tracing::info!(video_id = claim.video_id.as_str(), wav = %wav_path.display(), "audio acquired");
 
-    // Decode WAV → owned Vec<f32> samples (AD0014: 16 kHz mono validated
+    // Decode WAV → owned Vec<f32> samples (0014: 16 kHz mono validated
     // inside decode_wav). Owned samples cross the worker-thread boundary
-    // per AD0016. Compute duration_s from sample count once (16 kHz is the
-    // AD0014 invariant); avoids a second pass via ffprobe.
+    // per 0016. Compute duration_s from sample count once (16 kHz is the
+    // 0014 invariant); avoids a second pass via ffprobe.
     let samples = audio::decode_wav(&wav_path)
         .with_context(|| format!("decoding wav {}", wav_path.display()))?;
     let duration_s = Some(samples.len() as f64 / 16_000.0);
@@ -128,7 +128,7 @@ async fn process_one(
     std::fs::create_dir_all(&shard_dir)
         .with_context(|| format!("creating shard dir {}", shard_dir.display()))?;
 
-    // AD0008: artifact write (txt + json) before mark_succeeded. Two
+    // 0008: artifact write (txt + json) before mark_succeeded. Two
     // atomic_write calls: text first, JSON second. If a crash happens
     // between the two, recovery sees a complete txt but missing json
     // metadata — preferable to the reverse (operator-facing transcript
@@ -150,14 +150,14 @@ async fn process_one(
     };
     // T4 perf-tweaks: compact JSON shrinks the raw_signals payload
     // meaningfully (per-token id+text+p+plog dominates by token count;
-    // pretty-print added ~3x whitespace bloat). AD0008 ordering preserved;
-    // AD0010 schema shape unchanged (compact and pretty are equivalent
+    // pretty-print added ~3x whitespace bloat). 0008 ordering preserved;
+    // 0010 schema shape unchanged (compact and pretty are equivalent
     // JSON values).
     let json_bytes = serde_json::to_vec(&metadata).context("serializing transcript metadata")?;
     let json_path = shard_dir.join(format!("{}.json", claim.video_id));
     artifacts::atomic_write(&json_path, &json_bytes)?;
 
-    // AD0008: artifacts durable, now mark the row succeeded.
+    // 0008: artifacts durable, now mark the row succeeded.
     store.mark_succeeded(
         &claim.video_id,
         SuccessArtifacts {

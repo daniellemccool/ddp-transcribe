@@ -9,7 +9,7 @@ comments:
       text: '(unrecoverable: legacy comment placeholder "1")'
     - author: Danielle McCool
       date: "2026-05-12 13:18:46"
-      text: '2. (2026-05-12 13:18:46) Danielle McCool: Type pin (from codex code-quality review of T1): raw_signals.schema_version is a JSON string (e.g., "1"), not an integer. T4 derives the Rust field as String (or &''static str for the writer-side constant); T10 writes the literal "1"; AD0017''s status-check compares strings via EXPECTED_RAW_SIGNALS_SCHEMA_VERSION: &str = "1". Chosen because string versioning admits additive minor revisions ("1.1") without forcing a re-parse of existing artifacts.'
+      text: '2. (2026-05-12 13:18:46) Danielle McCool: Type pin (from codex code-quality review of T1): raw_signals.schema_version is a JSON string (e.g., "1"), not an integer. T4 derives the Rust field as String (or &''static str for the writer-side constant); T10 writes the literal "1"; 0017''s status-check compares strings via EXPECTED_RAW_SIGNALS_SCHEMA_VERSION: &str = "1". Chosen because string versioning admits additive minor revisions ("1.1") without forcing a re-parse of existing artifacts.'
 legacy-outcome: true
 ---
 
@@ -36,4 +36,4 @@ We decided for [Option 1](#option-1) because: The user explicitly stated pass-th
 ## Comments
 
 * **2026-05-12 13:05:51 — @Danielle McCool:** (unrecoverable: legacy comment placeholder "1")
-* **2026-05-12 13:18:46 — @Danielle McCool:** 2. (2026-05-12 13:18:46) Danielle McCool: Type pin (from codex code-quality review of T1): raw_signals.schema_version is a JSON string (e.g., "1"), not an integer. T4 derives the Rust field as String (or &'static str for the writer-side constant); T10 writes the literal "1"; AD0017's status-check compares strings via EXPECTED_RAW_SIGNALS_SCHEMA_VERSION: &str = "1". Chosen because string versioning admits additive minor revisions ("1.1") without forcing a re-parse of existing artifacts.
+* **2026-05-12 13:18:46 — @Danielle McCool:** 2. (2026-05-12 13:18:46) Danielle McCool: Type pin (from codex code-quality review of T1): raw_signals.schema_version is a JSON string (e.g., "1"), not an integer. T4 derives the Rust field as String (or &'static str for the writer-side constant); T10 writes the literal "1"; 0017's status-check compares strings via EXPECTED_RAW_SIGNALS_SCHEMA_VERSION: &str = "1". Chosen because string versioning admits additive minor revisions ("1.1") without forcing a re-parse of existing artifacts.

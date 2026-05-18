@@ -97,7 +97,7 @@ scripts/adr decide "$ID" 1 "single-writer guarantee outweighs the lock-hold cost
 ### Plan-paper authoring with explicit IDs
 
 When a plan-paper commits to specific ADR IDs in advance (e.g. "Task T1 will land
-AD0022, AD0023, AD0024"), use the optional second positional `<id>` so the
+0022, 0023, 0024"), use the optional second positional `<id>` so the
 executor doesn't have to capture-and-verify the auto-assigned counter:
 
 ```bash

@@ -24,7 +24,7 @@ pub trait VideoFetcher: Send + Sync {
     fn name(&self) -> &'static str;
 }
 
-// Cfg-gated test fixture per AD0005; consumed by tests/pipeline_fakes.rs.
+// Cfg-gated test fixture per 0005; consumed by tests/pipeline_fakes.rs.
 // Bin compilation also gets the feature when --features test-helpers is
 // enabled, hence the dead_code suppression.
 #[cfg(any(test, feature = "test-helpers"))]

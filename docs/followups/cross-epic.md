@@ -4,7 +4,7 @@ Cross-epic and verify-then-archive review items. See `../FOLLOWUPS.md` for
 the scope index across all epics; `../cosmetic-followups.md`,
 `../bake-findings.md`, `../archive/followups-resolved.md` for sibling
 categories. The unverified-hypothesis prefix rule
-(`**Hypothesis (unverified):**`) applies here per AD0020.
+(`**Hypothesis (unverified):**`) applies here per 0020.
 
 These entries do not slot cleanly into a single Epic 2-5 task; they either
 itemize multi-epic touchpoints, or they are Epic 1 forward-pointers whose
@@ -17,16 +17,16 @@ forward-pointers; routing the remaining mid-epic items).
 ### T1 codex code-quality review — deferred ADR refinements
 
 **Found in:** T1 (ADR drafts for Plan B Epic 1) — codex-advisor code-quality review.
-**Disposition:** Deferred. Three blocking findings were resolved inline via `adg comment` (AD0010 schema_version-as-string; AD0012 cancellation-via-abort_callback; AD0016 closed-oneshot shutdown carve-out). The six items below are non-blocking for Epic 1.
+**Disposition:** Deferred. Three blocking findings were resolved inline via `adg comment` (0010 schema_version-as-string; 0012 cancellation-via-abort_callback; 0016 closed-oneshot shutdown carve-out). The six items below are non-blocking for Epic 1.
 
 **Trigger to revisit:**
 
-- **AD0009 fallback Engine API preservation:** if the CUDA build fallback is ever invoked, the superseding ADR must preserve the public `WhisperEngine` API (samples in, `TranscribeOutput` out, `Arc<AtomicBool>` cancel) so T2–T12 implementations don't have to rewrite. Re-surface when the fallback ADR is drafted.
-- **AD0011 pause-safe checklist references AD0017:** AD0011's "before pause" checklist mentions only "no in_progress rows," but AD0017 defines a stricter pause-safe contract (counts by status + artifact existence + schema-version check). Tighten AD0011 to point at AD0017's contract once Epic 4's `status` subcommand exists. Re-surface in Epic 4 task expansion.
-- **AD0017 splits pause-safe vs batch-complete:** AD0017 currently conflates "every row terminal" with pause-safety. `failed_retryable` rows are pause-safe (no active work) but not batch-complete. Split into two semantics: `idle/pause-safe` = no in_progress + artifacts consistent for `succeeded`; `batch complete` = no `pending` or `failed_retryable` unless operator-accepted. Re-surface in Epic 4 task expansion.
-- **AD0013 global log callback invariant:** whisper.cpp's `whisper_log_set` is process-global, not per-engine. The invariant should be: install the callback once before any context init; route all whisper.cpp logs through one global bridge; do not replace per engine; backend capture must be scoped by init phase or protected by synchronization. Address in T6 implementation or amend AD0013 when Plan C multi-engine surfaces.
-- **AD0016 multi-engine GPU memory caution:** the "wraps `WhisperPool` of N Engines" alternative in AD0016 risks duplicating model loads on a single GPU (each Engine owns its own `WhisperContext`). Prefer multi-state on one context for same-GPU parallelism; keep the wrapper option only for multi-GPU or process isolation. Amend AD0016 when Plan C multi-state/multi-GPU work begins.
-- **Error variants enumeration:** AD0012/AD0013/AD0014/AD0016 reference typed error variants (`WhisperInitError::BackendMismatch`, `AudioDecodeError::*`, `TranscribeError::Cancelled`, worker-panic, closed-reply) but no ADR enumerates the canonical variant set. Add to T6/T7 implementation tasks (or write a small implementation-constraint ADR if the variants drift across files). Re-surface during T6 dispatch.
+- **0009 fallback Engine API preservation:** if the CUDA build fallback is ever invoked, the superseding ADR must preserve the public `WhisperEngine` API (samples in, `TranscribeOutput` out, `Arc<AtomicBool>` cancel) so T2–T12 implementations don't have to rewrite. Re-surface when the fallback ADR is drafted.
+- **0011 pause-safe checklist references 0017:** 0011's "before pause" checklist mentions only "no in_progress rows," but 0017 defines a stricter pause-safe contract (counts by status + artifact existence + schema-version check). Tighten 0011 to point at 0017's contract once Epic 4's `status` subcommand exists. Re-surface in Epic 4 task expansion.
+- **0017 splits pause-safe vs batch-complete:** 0017 currently conflates "every row terminal" with pause-safety. `failed_retryable` rows are pause-safe (no active work) but not batch-complete. Split into two semantics: `idle/pause-safe` = no in_progress + artifacts consistent for `succeeded`; `batch complete` = no `pending` or `failed_retryable` unless operator-accepted. Re-surface in Epic 4 task expansion.
+- **0013 global log callback invariant:** whisper.cpp's `whisper_log_set` is process-global, not per-engine. The invariant should be: install the callback once before any context init; route all whisper.cpp logs through one global bridge; do not replace per engine; backend capture must be scoped by init phase or protected by synchronization. Address in T6 implementation or amend 0013 when Plan C multi-engine surfaces.
+- **0016 multi-engine GPU memory caution:** the "wraps `WhisperPool` of N Engines" alternative in 0016 risks duplicating model loads on a single GPU (each Engine owns its own `WhisperContext`). Prefer multi-state on one context for same-GPU parallelism; keep the wrapper option only for multi-GPU or process isolation. Amend 0016 when Plan C multi-state/multi-GPU work begins.
+- **Error variants enumeration:** 0012/0013/0014/0016 reference typed error variants (`WhisperInitError::BackendMismatch`, `AudioDecodeError::*`, `TranscribeError::Cancelled`, worker-panic, closed-reply) but no ADR enumerates the canonical variant set. Add to T6/T7 implementation tasks (or write a small implementation-constraint ADR if the variants drift across files). Re-surface during T6 dispatch.
 
 ---
 
@@ -55,7 +55,7 @@ A10 bake against real TikTok audio is the integration check.
 **Disposition:** Forward-pointer for T8 dispatch. **Status unverified against shipped Epic 1 code** — confirm before archiving.
 **Trigger to revisit:** During T8 implementer dispatch.
 
-T8 implements `--compute-lang-probs` (per AD0010 + PerCallConfig). Per
+T8 implements `--compute-lang-probs` (per 0010 + PerCallConfig). Per
 sharp-edges.md:13-15: `whisper_lang_auto_detect_with_state` re-encodes
 the audio AND clobbers `state->decoders[0]` + `state->logits`. So it
 MUST run on a separate WhisperState from the primary inference state —
@@ -78,7 +78,7 @@ this is fine; on dev machine it doubles the working set during testing.
 
 ---
 
-### AD0013 backend assertion must be cfg(feature = "cuda")-gated
+### 0013 backend assertion must be cfg(feature = "cuda")-gated
 
 **Found in:** T6 (engine init) — codex-advisor code-quality review.
 **Disposition:** Forward-pointer for T13's bake-runbook implementer. **Status unverified against shipped Epic 1 code** — confirm before archiving.
@@ -119,7 +119,7 @@ the inference for an unhelpful reason. Reject non-finite values at the
 extraction boundary with a typed `TranscribeError` variant (likely
 `TranscribeError::Bug` since whisper-rs returning NaN/inf would itself
 indicate a model-loading or audio-input pathology that shouldn't happen
-with the AD0014 input invariant). Include the offending value, segment
+with the 0014 input invariant). Include the offending value, segment
 index, and token index in the error for operator-readable diagnostics.
 
 ---

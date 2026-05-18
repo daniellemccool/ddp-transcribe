@@ -1,7 +1,7 @@
 //! Tier 2 test for T2 perf-tweaks: lazy lang_state allocation.
 //!
 //! Requires ./models/ggml-tiny.en.bin on disk; gated by test-helpers feature
-//! per AD0005 because it depends on a non-trivial fixture and uses the
+//! per 0005 because it depends on a non-trivial fixture and uses the
 //! test-only `WhisperEngine::lang_state_allocations()` accessor.
 
 #![cfg(feature = "test-helpers")]

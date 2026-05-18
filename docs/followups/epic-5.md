@@ -4,7 +4,7 @@ Active-scope review items targeted for Plan B Epic 5. See `../FOLLOWUPS.md`
 for the scope index across all epics; `../cosmetic-followups.md`,
 `../bake-findings.md`, `../archive/followups-resolved.md` for sibling
 categories. The unverified-hypothesis prefix rule
-(`**Hypothesis (unverified):**`) applies here per AD0020.
+(`**Hypothesis (unverified):**`) applies here per 0020.
 
 ---
 
@@ -29,7 +29,7 @@ Two reasonable fixes when this is revisited:
 - Switch the implementation to `rusqlite::Connection::pragma_query_value`,
   which validates the pragma name internally.
 
-Coupled to AD0002's deferred bin/lib structural decision because the
+Coupled to 0002's deferred bin/lib structural decision because the
 "is this part of the public library API?" question depends on whether the
 project ends up thin-binary, fat-library or stays with the dual-`mod`
 pattern.
@@ -140,7 +140,7 @@ will care.
 ### `Store::conn` / `Store::conn_mut` accessor hygiene after T10
 
 **Found in:** T9 code quality review, re-confirmed in T10 review (opus).
-**Disposition:** Cleanup commit, or fold into AD0002's bin/lib
+**Disposition:** Cleanup commit, or fold into 0002's bin/lib
 reassessment.
 **Trigger to revisit:** Plan A reassessment point, or any task that
 genuinely needs `&Connection` / `&mut Connection` outside `Store`'s
@@ -163,11 +163,11 @@ Resolution options:
 - Lowest-cost: delete `conn_mut` outright; rewrite the `conn()` comment
   to say "used by cfg(test) schema invariant tests; keep until lib API
   stabilizes."
-- Structural: defer to AD0002's reassessment — under Option 4
+- Structural: defer to 0002's reassessment — under Option 4
   (thin-binary fat-library) the `pub(crate)` accessors may go away
   entirely.
 
-Per AD0002's cleanup discipline, the `rg "allow\(dead_code\)" src/`
+Per 0002's cleanup discipline, the `rg "allow\(dead_code\)" src/`
 audit catches this on every pass.
 
 ---
@@ -201,7 +201,7 @@ this code next gets touched.
 
 ### `output::shard_dir` is unused; allow comment falsely names T13/T14 as consumers
 
-**Found in:** T15 code quality review (opus) — Plan A close-out AD0002 audit.
+**Found in:** T15 code quality review (opus) — Plan A close-out 0002 audit.
 **Disposition:** Dead helper; delete or find a real caller.
 **Trigger to revisit:** Plan A → Plan B reassessment, or next edit to
 `src/output/mod.rs`.
@@ -212,7 +212,7 @@ this code next gets touched.
 `opts.transcripts_root.join(shard(&claim.video_id))` directly. The function
 has no real caller outside its own unit test. Either delete it, or have
 `pipeline.rs` call it instead of re-doing the join inline. Bundles naturally
-with the `VideoId` newtype refactor that AD0004 anticipates.
+with the `VideoId` newtype refactor that 0004 anticipates.
 
 ---
 

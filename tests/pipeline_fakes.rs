@@ -170,13 +170,13 @@ async fn pipeline_writes_raw_signals_to_json_artifact() {
         serde_json::from_str(&std::fs::read_to_string(&json_path).expect("read artifact"))
             .expect("parse json");
 
-    // Plan B Epic 1 (AD0010): raw_signals lands as a sub-object on the
+    // Plan B Epic 1 (0010): raw_signals lands as a sub-object on the
     // metadata wire format, with schema_version="1".
     let rs = &parsed["raw_signals"];
     assert_eq!(rs["schema_version"], "1");
     assert_eq!(rs["language"], "en");
 
-    // AD0010: lang_probs is null (not absent) when not opted in — the
+    // 0010: lang_probs is null (not absent) when not opted in — the
     // RawSignals struct has no skip_serializing_if on this field.
     assert!(
         rs.get("lang_probs").is_some(),

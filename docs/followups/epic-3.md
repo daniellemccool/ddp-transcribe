@@ -4,7 +4,7 @@ Active-scope review items targeted for Plan B Epic 3. See `../FOLLOWUPS.md`
 for the scope index across all epics; `../cosmetic-followups.md`,
 `../bake-findings.md`, `../archive/followups-resolved.md` for sibling
 categories. The unverified-hypothesis prefix rule
-(`**Hypothesis (unverified):**`) applies here per AD0020.
+(`**Hypothesis (unverified):**`) applies here per 0020.
 
 ---
 

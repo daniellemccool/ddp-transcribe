@@ -84,7 +84,7 @@ impl Store {
 
     // No bin consumer; only the cfg(test) `pragma_journal_mode_is_wal`
     // integration test calls this. Visibility/API decision deferred per
-    // FOLLOWUPS (`Store::pragma_string` visibility) and AD0002.
+    // FOLLOWUPS (`Store::pragma_string` visibility) and 0002.
     #[allow(dead_code)]
     pub fn pragma_string(&self, name: &str) -> Result<String> {
         let value: String = self
@@ -230,7 +230,7 @@ impl Store {
     }
 
     /// Mark a video as succeeded and record a `succeeded` event, atomically.
-    /// Returns the row-change count from the videos UPDATE per AD0006. Without
+    /// Returns the row-change count from the videos UPDATE per 0006. Without
     /// a `WHERE status = 'in_progress'` predicate (FOLLOWUPS-tracked, deferred
     /// to Plan B's state-machine work), this count is symbolic — always 1 for
     /// any matching video_id. Once Plan B adds the predicate, callers can
@@ -305,7 +305,7 @@ impl Store {
 }
 
 /// A row from `video_events`, returned by `get_events_for_test`.
-// Cfg-gated test helper per AD0005; fires dead_code in bin compilation when --features test-helpers is enabled.
+// Cfg-gated test helper per 0005; fires dead_code in bin compilation when --features test-helpers is enabled.
 #[cfg(any(test, feature = "test-helpers"))]
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -317,7 +317,7 @@ pub struct EventRow {
 #[cfg(any(test, feature = "test-helpers"))]
 impl Store {
     /// Retrieve all `video_events` rows for a given video_id, ordered by id.
-    // Cfg-gated test helper per AD0005; same bin-firing dynamic as EventRow above.
+    // Cfg-gated test helper per 0005; same bin-firing dynamic as EventRow above.
     #[allow(dead_code)]
     pub fn get_events_for_test(&self, video_id: &str) -> Result<Vec<EventRow>> {
         let mut stmt = self.conn.prepare(

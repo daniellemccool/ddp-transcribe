@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
 
             // Construct WhisperEngine once at the top of Process. Loads the
             // model on the worker thread and blocks until init succeeds or
-            // fails (AD0016: model/state never leave the worker; the engine
+            // fails (0016: model/state never leave the worker; the engine
             // handle owns the worker JoinHandle). For Epic 1's single-GPU
             // path, `gpu_device = 0`; `flash_attn` follows the cuda feature
             // flag (on for CUDA builds, off for local CPU dev).

@@ -1,4 +1,4 @@
-//! Tier 2 tests for bounded subprocess capture (T5 perf-tweaks; AD0021).
+//! Tier 2 tests for bounded subprocess capture (T5 perf-tweaks; 0021).
 //!
 //! Exercise the bounded streaming reader via real subprocesses (echo, sleep,
 //! a stderr-spammer) and via direct calls to `process::read_bounded` for the

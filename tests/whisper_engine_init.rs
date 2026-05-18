@@ -1,7 +1,7 @@
 //! WhisperEngine init smoke test.
 //!
 //! Requires ./models/ggml-tiny.en.bin on disk; gated by test-helpers feature
-//! per AD0005 because it depends on a non-trivial fixture.
+//! per 0005 because it depends on a non-trivial fixture.
 
 #![cfg(feature = "test-helpers")]
 

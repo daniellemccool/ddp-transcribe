@@ -1,6 +1,6 @@
 //! WAV → Vec<f32> decoder for whisper.cpp's float32 PCM 16kHz mono audio input.
 //!
-//! See AD0014 (audio-input invariant) for the contract this module enforces.
+//! See 0014 (audio-input invariant) for the contract this module enforces.
 
 use std::path::Path;
 
