@@ -535,6 +535,18 @@ impl WhisperEngine {
                     params.set_print_realtime(false);
                     params.set_print_special(false);
                     params.set_print_timestamps(false);
+                    // T9 perf-tweaks: skip timestamp-token generation. Per
+                    // whisper.cpp source inspection (single_segment couples
+                    // to no_timestamps at ~/src/whisper.cpp/src/whisper.cpp;
+                    // see spec § "#2 set_no_timestamps(true)"), each 30s
+                    // decode window emits exactly one segment instead of
+                    // multiple. Per-token id/text/p/plog unchanged; per-
+                    // segment no_speech_prob unchanged (was per-window
+                    // already in whisper.cpp's `state->no_speech_prob`).
+                    // Small wall-clock win from skipping timestamp-token
+                    // sampling. T10 bake validates byte-for-byte transcript
+                    // text equality + per-token equality within 1e-6.
+                    params.set_no_timestamps(true);
 
                     // Language pin (auto-detect when None). For monolingual
                     // checkpoints (e.g., tiny.en) whisper.cpp accepts "auto"
