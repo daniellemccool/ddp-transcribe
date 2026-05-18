@@ -61,3 +61,7 @@ required-features = ["test-helpers"]
 [[test]]
 name = "process_bounded_capture"
 required-features = ["test-helpers"]
+
+[[test]]
+name = "state_schema_version"
+required-features = ["test-helpers"]

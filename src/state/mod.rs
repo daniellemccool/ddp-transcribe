@@ -32,6 +32,21 @@ pub struct VideoRow {
     pub attempt_count: i64,
 }
 
+/// Typed errors surfaced by `state::Store` mutators and accessors.
+///
+/// Per 0022, `Store::open` returns `SchemaVersionMismatch` when the on-disk
+/// `meta.schema_version` doesn't match the binary's `SCHEMA_VERSION`. The
+/// `Display` impl carries the operator-readable instruction directing them
+/// to `uu-tiktok migrate`.
+#[derive(Debug, thiserror::Error)]
+pub enum StateError {
+    #[error(
+        "schema version mismatch: state.sqlite is at v{found}, this binary requires v{expected}. \
+         Run `uu-tiktok migrate` to upgrade the database, then retry."
+    )]
+    SchemaVersionMismatch { expected: String, found: String },
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -50,16 +65,43 @@ impl Store {
         )
         .context("setting connection pragmas")?;
 
-        // Schema (idempotent — uses CREATE IF NOT EXISTS).
+        // Schema (idempotent — uses CREATE IF NOT EXISTS). The column set
+        // declared here is the CURRENT schema version; older DBs miss the
+        // newer columns and must run `uu-tiktok migrate` (0022) before
+        // they can be opened.
         conn.execute_batch(schema::SCHEMA_SQL)
             .context("applying schema")?;
 
-        // Record schema version (only on first run).
-        conn.execute(
-            "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?1)",
-            params![SCHEMA_VERSION],
-        )
-        .context("recording schema_version")?;
+        // Schema-version check (0022). Three cases:
+        //   - fresh DB (no meta row): record the current version.
+        //   - existing DB at current version: continue.
+        //   - mismatch: return typed StateError::SchemaVersionMismatch.
+        let found: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .context("reading schema_version from meta")?;
+
+        match found {
+            None => {
+                conn.execute(
+                    "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)",
+                    params![SCHEMA_VERSION],
+                )
+                .context("recording schema_version on fresh DB")?;
+            }
+            Some(v) if v == SCHEMA_VERSION => {}
+            Some(v) => {
+                return Err(StateError::SchemaVersionMismatch {
+                    expected: SCHEMA_VERSION.to_string(),
+                    found: v,
+                }
+                .into());
+            }
+        }
 
         Ok(Self { conn })
     }
