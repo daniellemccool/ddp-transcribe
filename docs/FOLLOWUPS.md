@@ -44,8 +44,6 @@ Routing is authoritative per `docs/superpowers/plans/2026-05-12-plan-b/EPIC-5-SK
 lines 120-148.
 
 **Epic 2 (concurrent fetch + state-machine)**
-- T6: `process::run` unbounded stdout/stderr → Epic 2 (bounded streaming capture)
-- T6: `ring_buffer_tail` misnamed → Epic 2 (rename alongside bounded-buffer work)
 - T7: `Store::open` schema-version not read → Epic 2 first task (read-and-check policy)
 - T10: `concurrent_claim_serializes_via_begin_immediate` doesn't race → Epic 2 (rewrite with Barrier)
 - T10: `mark_succeeded` doesn't require `status='in_progress'` → Epic 2 (WHERE predicate)
@@ -84,9 +82,8 @@ lines 120-148.
 - T5: `SHORT_LINK_RE` query parameters → Plan C (short-link resolution lands)
 - T8: `output::shard` ASCII-only byte slice → Plan C (when `VideoId` newtype lands)
 - T1-Epic1: Promote AD0010's pass-through rule to a meta-process ADR → Plan C (if recurring pressure)
-- T8-Epic1: Lazy-allocate `lang_state` on first opt-in request → Plan C (multi-state / memory pressure)
 - T3-Epic1: `decode_wav` trusts float-format WAV sample values → Plan C (if alternate fetcher introduces float WAVs)
-- T10-Epic1: Per-token `id`+`text` ~2× JSON artifact size → Plan C (when storage cost pinches)
+- T10-Epic1: Per-token text field doubles raw_signals payload → Plan C (compact JSON landed in perf-tweaks decdf6f; drop-text still deferred pending AD0010 amendment)
 - Full Plan C entries: [followups/plan-c.md](followups/plan-c.md)
 
 **Cross-epic / ADR maintenance / verify-then-archive**

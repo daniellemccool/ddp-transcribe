@@ -95,3 +95,35 @@ inline comments — not a regression to revert.
 Epic 2's state-machine work may revisit this when adding stale-claim
 recovery or retry: at that point, a typed "wav still on disk" signal
 might become useful for re-claiming a row.
+
+---
+
+## Resolved by perf-tweaks worktree (2026-05-18)
+
+Three entries resolved by the perf-tweaks worktree commits that merged before Plan B Epic 2's T11 began. Coordinated cross-session with the Epic 2 author — see `docs/superpowers/specs/2026-05-13-perf-tweaks-design.md` § Cross-session coordination.
+
+### `process::run` buffers full stderr/stdout in memory before truncation
+
+**Found in:** T6 code quality review (opus).
+**Originally:** FOLLOWUPS L47, routed to Epic 2.
+**Resolved by:** commit `9e84b54` (`feat(process): bounded streaming subprocess capture`) on `feat/perf-tweaks`. AD0021 records the design.
+
+`src/process.rs` previously read entire stdout AND stderr streams into `Vec<u8>` via `read_to_end` before slicing the tail; the `*_capture_bytes` field only bounded the retained excerpt, not peak memory. The perf-tweaks worktree replaced this with a streaming reader filling a `VecDeque<u8>` of size `cap`; peak retained memory is now bounded by construction. `stdout` capture got a symmetric opt-in via `stdout_capture_bytes`; `CommandOutcome::stdout` is now `Option<Vec<u8>>` (`None` = intentionally discarded). Cross-session coordination: Plan B Epic 2's T13 inherits the design and may add per-tool stdout defaults on top of AD0021 without authoring a new ADR.
+
+---
+
+### `ring_buffer_tail` is misnamed (it's not a ring buffer)
+
+**Found in:** T6 code quality review (opus).
+**Originally:** FOLLOWUPS L48, routed to Epic 2.
+**Resolved by:** same commit `9e84b54`. The helper is removed; capture is bounded by construction rather than by post-hoc tail-slicing. No rename needed.
+
+---
+
+### Lazy-allocate lang_state on first opt-in request
+
+**Found in:** T8-Epic1 (lang_probs opt-in) — codex-advisor code-quality review.
+**Originally:** FOLLOWUPS L87, routed to Plan C.
+**Resolved by:** commit `17716ef` (`refactor(transcribe): lazy-allocate lang_state on first opt-in request`) on `feat/perf-tweaks`. Brought forward from Plan C scope.
+
+`WhisperEngine` worker thread previously allocated `lang_state` unconditionally at startup; non-opt-in workers paid ~500MB-1GB VRAM/host overhead for an unused state. Replaced with `Option<WhisperState>` lazily allocated on the first request with `compute_lang_probs=true`. AD0016 invariant preserved (state stays inside the worker thread). New `tests/transcribe_lang_state.rs` asserts via an `Arc<AtomicUsize>` counter that non-opt-in workers never allocate and that opt-in workers allocate exactly once.

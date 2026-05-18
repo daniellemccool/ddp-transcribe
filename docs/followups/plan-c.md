@@ -82,46 +82,6 @@ ADR.
 
 ---
 
-### Lazy-allocate lang_state on first opt-in request
-
-**Found in:** T8 (lang_probs opt-in) — codex-advisor code-quality review.
-**Disposition:** Defer; eager allocation is acceptable for Epic 1 but the lazy pattern is the efficient default.
-**Trigger to revisit:** Memory pressure becomes a binding constraint (multi-state per Plan C, or smaller dev VMs), OR Epic 4's `--compute-lang-probs` use becomes commonplace enough that the eager-allocation cost feels unjustified for non-opt-in workloads.
-
-T8 currently allocates `lang_state` unconditionally in `WhisperEngine::new`'s
-init phase. Since `compute_lang_probs` defaults false, every engine pays
-~500MB-1GB of unused WhisperState memory until the feature is opted in.
-
-Refactor target:
-
-```rust
-// In init phase: no lang_state allocation.
-// In worker request loop:
-let mut lang_state: Option<WhisperState> = None;
-// ...
-while let Some(req) = request_rx.blocking_recv() {
-    if req.config.compute_lang_probs {
-        if lang_state.is_none() {
-            // Lazy allocation on first opt-in. If it fails, surface as
-            // tracing::warn! + lang_probs: None (consistent with best-effort).
-            match ctx.create_state() {
-                Ok(s) => lang_state = Some(s),
-                Err(e) => { tracing::warn!(...); /* no lang_probs this call */ }
-            }
-        }
-        if let Some(ls) = lang_state.as_mut() {
-            // run lang_detect on ls
-        }
-    }
-    // ... rest of inference ...
-}
-```
-
-Trade-off: lazy saves ~500MB-1GB when feature is unused; costs a one-time
-allocation latency on first opt-in (~10-50ms on CPU; faster on GPU).
-
----
-
 ### `decode_wav` trusts float-format WAV sample values
 
 **Found in:** T3 (WAV decoder) — codex-advisor code-quality review.
@@ -133,12 +93,11 @@ allocation latency on first opt-in (~10-50ms on CPU; faster on GPU).
 ### Per-token `id` + `text` roughly doubles JSON artifact size vs `{p, plog}` only
 
 **Found in:** T10 (artifact schema freeze) — implementer note.
-**Disposition:** Accepted for Plan B Epic 1; revisit when storage cost becomes
-load-bearing.
+**Disposition:** Pretty→compact JSON component landed in perf-tweaks `decdf6f`; drop-text-field component remains deferred pending AD0010 amendment + bake validation that downstream filtering still works on `id`-only tokens.
 **Trigger to revisit:** Plan C reviews artifact storage layout, OR observed
-shard-disk pressure during the A10 bake (T13), OR the artifact-storage cost
-becomes a discussion topic in any capacity (donor count > pilot scale,
-retention policy debate, etc.).
+shard-disk pressure during a bake.
+
+**Partial resolution by perf-tweaks `decdf6f`:** the `to_vec_pretty` → `to_vec` swap removed ~3× pretty-print indentation bloat from the per-token raw_signals payload. The dropping-`text`-field half of the original finding is unchanged: per AD0010's pass-through rule, downstream consumers need both `id` and `text` to filter special tokens (`[BEG]`, `[END]`, `<|en|>`, etc.) which numerically include but lexically distinguish themselves from content tokens. Dropping `text` requires either (a) an AD0010 amendment that relaxes the pass-through rule for tokens, OR (b) a sparse-token mode that keeps `text` only for special tokens. Neither is in scope for the perf-tweaks worktree.
 
 T10's `RawToken` carries `id: i32` and `text: String` in addition to
 `p`/`plog`, matching T9's `TokenRaw` shape exactly. This is intentional per
