@@ -251,3 +251,15 @@ decisions:
             - author: Danielle McCool
               date: "2026-05-13 16:06:27"
               comment: "1"
+    "0021":
+        adr_id: "0021"
+        title: Bounded subprocess output capture via streaming VecDeque<u8>
+        status: decided
+        tags: []
+        links:
+            precedes: []
+            succeeds: []
+        comments:
+            - author: Danielle McCool
+              date: "2026-05-18 13:26:27"
+              comment: "1"
