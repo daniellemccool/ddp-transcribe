@@ -89,9 +89,7 @@ lines 120-148.
 **Cross-epic / ADR maintenance / verify-then-archive**
 - T1-Epic1: codex code-quality review deferred ADR refinements (0009/0011/0013/0016/0017 + error variants) → multi-epic (Epic 4, T6/T7, Plan C)
 - T9-Epic1: integration test only exercises empty-segment path on silence fixture → unscoped (when spoken-English fixture lands)
-- T8-Epic1: `lang_probs` second `WhisperState` allocation guidance → verify Epic 1 implementation before archiving
-- T13-Epic1: 0013 backend assertion must be `cfg(feature="cuda")`-gated → verify Epic 1 implementation before archiving
-- T4-Epic1: T9 extraction must reject non-finite f32 from whisper-rs → verify Epic 1 implementation before archiving
+- T13-Epic1: 0013 backend assertion must be `cfg(feature="cuda")`-gated → audited 2026-05-18, NOT confirmed; deferred to Epic 5 cleanup
 - T7-Epic1: Revisit `SamplingStrategy::Greedy { best_of }` after T13 bake → unscoped tuning followup (see also `bake-findings.md`)
 - T8-Epic1: Diagnostic log when `lang_detect`'s top id disagrees with primary inference → unscoped diagnostic (see also `bake-findings.md`)
 - Full cross-epic entries: [followups/cross-epic.md](followups/cross-epic.md)

@@ -127,3 +127,33 @@ Three entries resolved by the perf-tweaks worktree commits that merged before Pl
 **Resolved by:** commit `17716ef` (`refactor(transcribe): lazy-allocate lang_state on first opt-in request`) on `feat/perf-tweaks`. Brought forward from Plan C scope.
 
 `WhisperEngine` worker thread previously allocated `lang_state` unconditionally at startup; non-opt-in workers paid ~500MB-1GB VRAM/host overhead for an unused state. Replaced with `Option<WhisperState>` lazily allocated on the first request with `compute_lang_probs=true`. AD0016 invariant preserved (state stays inside the worker thread). New `tests/transcribe_lang_state.rs` asserts via an `Arc<AtomicUsize>` counter that non-opt-in workers never allocate and that opt-in workers allocate exactly once.
+
+---
+
+## Resolved by Plan B Epic 2 — T1 audit (2026-05-18)
+
+Two `verify-then-archive` forward-pointers from Plan B Epic 1's codex-advisor reviews were audited against shipped Epic 1 `src/transcribe.rs` during Plan B Epic 2 T1 (commit landing alongside this archive update). Both confirmed shipped and archived here. The third audit candidate (`0013` backend assertion) was NOT confirmed and remains in `docs/followups/cross-epic.md` with an audit note (see commit message).
+
+### T8 lang_probs needs a SECOND WhisperState allocated in init phase
+
+**Found in:** T7 (engine transcribe) — codex-advisor code-quality review.
+**Originally:** `docs/followups/cross-epic.md` (Plan B Epic 1 forward-pointer for T8 dispatch).
+**Resolved by:** commit `a3b7261` (`feat(transcribe): wire --compute-lang-probs opt-in for lang_probs`) on `main` — initial second-state allocation alongside the primary inference state. Refined in `17716ef` (perf-tweaks: `refactor(transcribe): lazy-allocate lang_state on first opt-in request`) to lazy-on-first-opt-in.
+
+**Resolution:** confirmed against shipped Epic 1 code. `src/transcribe.rs:461` declares `let mut lang_state: Option<whisper_rs::WhisperState> = None`; lines 485–491 lazily allocate it on the first `req.config.compute_lang_probs == true` request via `ctx.create_state()`; lines 619–628 use it for `pcm_to_mel` + `lang_detect` to populate `lang_probs`. The shipped behavior is a refinement of the original guidance (lazy instead of eager init-phase allocation), preserving the architectural goal (separate state for lang_probs avoids clobbering the primary state's decoders/logits) and improving the memory profile for non-opt-in workers.
+
+---
+
+### T9 extraction must reject non-finite f32 values from whisper-rs
+
+**Found in:** T4 (TranscribeOutput types) — codex-advisor code-quality review.
+**Originally:** `docs/followups/cross-epic.md` (Plan B Epic 1 forward-pointer for T9's implementer brief).
+**Resolved by:** commit `ce55d9b` (`feat(transcribe): extract per-segment + per-token raw signals from whisper-rs`) on `main`.
+
+**Resolution:** confirmed against shipped Epic 1 code. `src/transcribe.rs::extract_segments` validates finite values when constructing `SegmentRaw` and `TokenRaw`:
+
+- line 109: `if !no_speech_prob.is_finite() || !(0.0..=1.0).contains(&no_speech_prob) { return Err(...) }`
+- line 131: `if !td.p.is_finite() || !(0.0..=1.0).contains(&td.p) { return Err(...) }`
+- line 138: `if !td.plog.is_finite() || td.plog > 0.0001 { return Err(...) }`
+
+`extract_segments` returns `Result<Vec<SegmentRaw>, String>`; the worker maps this to `TranscribeError::Bug` at line 725. Behavior matches the guidance: reject non-finite at the extraction boundary so `serde_json::to_string` never sees `NaN`/`inf`.

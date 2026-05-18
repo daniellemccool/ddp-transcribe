@@ -49,40 +49,13 @@ A10 bake against real TikTok audio is the integration check.
 
 ---
 
-### T8 lang_probs needs a SECOND WhisperState allocated in init phase
-
-**Found in:** T7 (engine transcribe) — codex-advisor code-quality review.
-**Disposition:** Forward-pointer for T8 dispatch. **Status unverified against shipped Epic 1 code** — confirm before archiving.
-**Trigger to revisit:** During T8 implementer dispatch.
-
-T8 implements `--compute-lang-probs` (per 0010 + PerCallConfig). Per
-sharp-edges.md:13-15: `whisper_lang_auto_detect_with_state` re-encodes
-the audio AND clobbers `state->decoders[0]` + `state->logits`. So it
-MUST run on a separate WhisperState from the primary inference state —
-otherwise concurrent state corruption.
-
-T7's worker currently allocates ONE state in the init phase. T8 should:
-1. Allocate a SECOND state (e.g., `lang_state`) in the same init phase,
-   alongside the primary `state`. Surface allocation failure via
-   `WhisperInitError::StateCreate` (same variant as T7).
-2. When `req.config.compute_lang_probs` is true, call `lang_state.lang_detect(&samples)`
-   (or equivalent whisper-rs API) BEFORE the primary `state.full(...)` —
-   the lang_detect call populates `state.full_lang_probs()` (or whichever
-   getter returns the full distribution).
-3. Reuse `lang_state` across requests — like the primary state.
-4. If `compute_lang_probs` is false (default), skip the lang_detect call
-   entirely so the unused state is just held in memory (no extra encoder pass).
-
-Memory cost: ~500MB-1GB for the second state (per concurrency.md). On A10
-this is fine; on dev machine it doubles the working set during testing.
-
----
-
 ### 0013 backend assertion must be cfg(feature = "cuda")-gated
 
 **Found in:** T6 (engine init) — codex-advisor code-quality review.
 **Disposition:** Forward-pointer for T13's bake-runbook implementer. **Status unverified against shipped Epic 1 code** — confirm before archiving.
 **Trigger to revisit:** During T13 dispatch.
+
+**Audit (2026-05-18): NOT confirmed against shipped Epic 1 code. Re-investigate during Epic 5 cleanup sweep (dead-code reassessment per 0002).** The `WhisperInitError::BackendMismatch` enum variant exists in `src/transcribe.rs:303` with `#[allow(dead_code)]` and a forward-pointing comment at line 292 ("BackendMismatch is constructed by T13's backend-assertion path; suppress dead_code until then"). No `whisper_log_set` callback bridge, no construction site, no backend check are present in shipped Epic 1. Plan B Epic 1's T13 (bake runbook) shipped without the assertion. Either wire it during Epic 5 cleanup or remove the dead variant — both defensible.
 
 T6 currently calls `ctx_params.use_gpu(true)` unconditionally. On non-CUDA
 builds, whisper.cpp's CUDA backend is not compiled in and the load silently
@@ -102,25 +75,6 @@ const EXPECTED_BACKEND: &str = "CPU";
 Then the log-callback bridge compares the captured backend string against
 `EXPECTED_BACKEND` and returns `WhisperInitError::BackendMismatch` only on
 mismatch.
-
----
-
-### T9 extraction must reject non-finite f32 values from whisper-rs
-
-**Found in:** T4 (TranscribeOutput types) — codex-advisor code-quality review.
-**Disposition:** Forward-pointer for T9's implementer brief. **Status unverified against shipped Epic 1 code** — confirm before archiving.
-**Trigger to revisit:** During T9 dispatch.
-
-When T9 extracts `p`, `plog`, and `no_speech_prob` from whisper-rs into
-`TokenRaw` / `SegmentRaw`, validate that the values are finite before
-constructing the output. `serde_json` will refuse to serialize `NaN`/`inf`,
-so a bad value would surface only at T10's artifact-write step and abort
-the inference for an unhelpful reason. Reject non-finite values at the
-extraction boundary with a typed `TranscribeError` variant (likely
-`TranscribeError::Bug` since whisper-rs returning NaN/inf would itself
-indicate a model-loading or audio-input pathology that shouldn't happen
-with the 0014 input invariant). Include the offending value, segment
-index, and token index in the error for operator-readable diagnostics.
 
 ---
 
