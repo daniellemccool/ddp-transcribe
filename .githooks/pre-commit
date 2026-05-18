@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# pre-commit — fail-fast on adg validate. Per AD0020, ADR consistency is
-# enforced at commit time; this is the backstop in case post-mutation validate
-# (run by scripts/adr-fill and the AD0018 review protocol) was bypassed.
+# pre-commit — fail-fast on `adg validate`. Per AD0020, ADR consistency
+# is enforced at commit time; this is the backstop in case post-mutation
+# validate (run by scripts/adr or the AD0018 review protocol) was
+# bypassed. `adg validate` exits non-zero on any issue, which aborts
+# the commit.
 set -e
 if [[ -d docs/decisions ]]; then
-    adg --model docs/decisions validate
+    adg validate --model docs/decisions
 fi
