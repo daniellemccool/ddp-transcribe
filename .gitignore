@@ -24,6 +24,12 @@ process.log
 # Operator-local notes (each developer keeps their own)
 testnotes.txt
 
+# Operator-local archive (personal drafts, grant applications, etc.)
+# Tracked exception: followups-resolved.md is the AD0020 append-only
+# resolved-FOLLOWUPS history and stays committed.
+docs/archive/*
+!docs/archive/followups-resolved.md
+
 # Real-looking test fixtures kept on disk for ad-hoc development but
 # never committed. Synthetic-only fixtures are tracked under their own
 # subdirectories.

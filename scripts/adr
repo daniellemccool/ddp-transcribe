@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# adr — repo-local wrapper around `adg` for docs/decisions/.
+#
+# Hardcodes --model docs/decisions and exposes shorter, positional-arg
+# subcommands so callers (humans or agents) don't have to remember flag
+# names. Body content for `new` flows through `adg edit --from-stdin`,
+# which accepts a complete MADR body (Context, Considered Options,
+# Decision Outcome all required).
+#
+# This wrapper replaces the older scripts/adr-fill, which existed only
+# to paper over the per-section append flags. The fork's `adg edit
+# --from-stdin` handles whole-body input directly, so the section-marker
+# DSL is gone.
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[[ -n "$REPO_ROOT" ]] || { echo "adr: not in a git repo" >&2; exit 1; }
+cd "$REPO_ROOT"
+
+MODEL=docs/decisions
+AUTHOR="${ADR_AUTHOR:-$(git config user.name 2>/dev/null || echo "unknown")}"
+
+usage() {
+    cat >&2 <<'USAGE'
+adr — wrapper around `adg` for docs/decisions/.
+
+Subcommands:
+  new <title>                       create a proposed ADR; ID is printed to stdout
+  edit <id> [--force] < body        replace body via stdin (--force for non-proposed)
+  decide <id> <option> [<reason>]   mark as accepted with the chosen option
+  supersede <new> <old> [<reason>]  bidirectional supersession
+  comment <id> <text>               append a comment; author from $ADR_AUTHOR or git
+  tag <id> <tag>...                 add one or more tags
+  link <src> <dst> <tag> [<rev>]    add a custom link, optional reverse tag
+  list [filter...]                  list ADRs; extra args pass through to `adg list`
+  view <id> [--section ...]         show one ADR or selected sections
+  validate                          run adg validate
+
+The body for `edit` is a complete MADR body with `## Context and Problem
+Statement`, `## Considered Options`, and `## Decision Outcome` sections.
+For flag detail on any underlying command, see `adg <cmd> --help`.
+USAGE
+}
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+    new)
+        title="${1:?usage: adr new <title>}"
+        adg add --title "$title" --model "$MODEL"
+        ;;
+    edit)
+        id="${1:?usage: adr edit <id> [--force] < body}"
+        shift
+        adg edit --id "$id" --from-stdin --model "$MODEL" "$@"
+        ;;
+    decide)
+        id="${1:?usage: adr decide <id> <option> [<rationale>]}"
+        option="${2:?usage: adr decide <id> <option> [<rationale>]}"
+        rationale="${3:-}"
+        if [[ -n "$rationale" ]]; then
+            adg decide --id "$id" --option "$option" --rationale "$rationale" --model "$MODEL"
+        else
+            adg decide --id "$id" --option "$option" --model "$MODEL"
+        fi
+        ;;
+    supersede)
+        new_id="${1:?usage: adr supersede <new> <old> [<rationale>]}"
+        old_id="${2:?usage: adr supersede <new> <old> [<rationale>]}"
+        rationale="${3:-}"
+        if [[ -n "$rationale" ]]; then
+            adg supersede --new "$new_id" --old "$old_id" --rationale "$rationale" --model "$MODEL"
+        else
+            adg supersede --new "$new_id" --old "$old_id" --model "$MODEL"
+        fi
+        ;;
+    comment)
+        id="${1:?usage: adr comment <id> <text>}"
+        text="${2:?usage: adr comment <id> <text>}"
+        adg comment --id "$id" --text "$text" --author "$AUTHOR" --model "$MODEL"
+        ;;
+    tag)
+        id="${1:?usage: adr tag <id> <tag>...}"
+        shift
+        [[ $# -gt 0 ]] || { echo "usage: adr tag <id> <tag>..." >&2; exit 1; }
+        for tag in "$@"; do
+            adg tag --id "$id" --tag "$tag" --model "$MODEL"
+        done
+        ;;
+    link)
+        src="${1:?usage: adr link <src> <dst> <tag> [<reverse-tag>]}"
+        dst="${2:?usage: adr link <src> <dst> <tag> [<reverse-tag>]}"
+        tag="${3:?usage: adr link <src> <dst> <tag> [<reverse-tag>]}"
+        reverse="${4:-}"
+        if [[ -n "$reverse" ]]; then
+            adg link --source "$src" --target "$dst" --tag "$tag" --reverse-tag "$reverse" --model "$MODEL"
+        else
+            adg link --source "$src" --target "$dst" --tag "$tag" --model "$MODEL"
+        fi
+        ;;
+    list)
+        adg list --model "$MODEL" "$@"
+        ;;
+    view)
+        id="${1:?usage: adr view <id> [--section ...]}"
+        shift
+        adg view --id "$id" --model "$MODEL" "$@"
+        ;;
+    validate)
+        adg validate --model "$MODEL"
+        ;;
+    -h|--help|help|"")
+        usage
+        ;;
+    *)
+        echo "adr: unknown subcommand $cmd" >&2
+        usage
+        exit 1
+        ;;
+esac
