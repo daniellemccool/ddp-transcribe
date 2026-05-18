@@ -15,6 +15,19 @@
 
 set -euo pipefail
 
+# Self-stage to /tmp before doing any `git checkout` — the script itself
+# was added on `feat/perf-tweaks` and does not exist on `$PRE_REF` (the
+# pre-T9 commit). Checking out that ref unlinks `$0` from the working
+# tree, and bash's read-buffering behavior across that unlink isn't
+# guaranteed across versions. Re-exec'ing from `/tmp/` makes us
+# location-independent of the worktree state during the bake.
+if [[ "${BAKE_T10_STAGED:-}" != "1" ]]; then
+    staged="${TMPDIR:-/tmp}/bake-t10-no-timestamps-staged.sh"
+    cp "$0" "$staged"
+    export BAKE_T10_STAGED=1
+    exec bash "$staged" "$@"
+fi
+
 REPO="$(git rev-parse --show-toplevel)"
 FIXTURE="$REPO/tests/fixtures/ddp/news_orgs/participant=newsorg-fixture_source=tiktok.json"
 MODEL="${MODEL:-$REPO/models/ggml-large-v3-turbo-q5_0.bin}"
