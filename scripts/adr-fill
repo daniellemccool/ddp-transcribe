@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# adr-fill — pipe stdin section markers into `adg edit` for an existing ADR.
+# Solves the one ergonomic gap: adg's --question/--option/--criteria flags
+# can't accept multi-paragraph CLI args cleanly. Pipe a body block instead.
+#
+# Usage:
+#   cat <<BODY | scripts/adr-fill <id>
+#   QUESTION:
+#   multi-paragraph context...
+#
+#   OPTION:
+#   first option (one or many lines)
+#
+#   OPTION:
+#   second option
+#
+#   CRITERIA:
+#   decision drivers
+#   BODY
+#
+# Each OPTION marker appends an option in order. QUESTION/CRITERIA appear
+# at most once. Trailing blank lines per section are trimmed.
+set -euo pipefail
+
+id="${1:-}"
+[[ -n "$id" ]] || { echo "usage: $0 <id> < body" >&2; exit 1; }
+
+MODEL_DIR="docs/decisions"
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[[ -n "$REPO_ROOT" ]] || { echo "adr-fill: not in a git repo" >&2; exit 1; }
+cd "$REPO_ROOT"
+
+args=()
+section=""
+content=""
+
+flush() {
+    if [[ -n "$section" ]]; then
+        content="${content%$'\n'}"
+        local lower
+        lower="$(printf '%s' "$section" | tr '[:upper:]' '[:lower:]')"
+        case "$lower" in
+            question|option|criteria) args+=("--$lower" "$content") ;;
+            *) echo "adr-fill: unrecognized section marker '${section}:' (expected QUESTION, OPTION, or CRITERIA)" >&2; exit 1 ;;
+        esac
+    fi
+}
+
+while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ ^([A-Z]+):[[:space:]]*$ ]]; then
+        flush
+        section="${BASH_REMATCH[1]}"
+        content=""
+    elif [[ -n "$section" ]]; then
+        content+="$line"$'\n'
+    fi
+done
+flush
+
+[[ ${#args[@]} -gt 0 ]] || { echo "adr-fill: no section content read from stdin" >&2; exit 1; }
+
+adg --model "$MODEL_DIR" edit --id "$id" "${args[@]}"
+adg --model "$MODEL_DIR" validate

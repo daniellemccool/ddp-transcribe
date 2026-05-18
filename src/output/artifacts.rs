@@ -344,4 +344,46 @@ mod tests {
         assert!(!shard_dir.join("video.txt.tmp").exists());
         assert!(shard_dir.join("video.txt").exists());
     }
+
+    // ------------------------------------------------------------------
+    // T4 perf-tweaks — compact JSON encoder structural assertions
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn compact_json_round_trips_metadata() {
+        // T4 perf-tweaks: pipeline.rs uses `serde_json::to_vec` (compact)
+        // instead of `to_vec_pretty`. Assert the compact bytes round-trip
+        // back into a structurally-equal TranscriptMetadata.
+        let metadata = sample_metadata_with_raw_signals();
+        let bytes = serde_json::to_vec(&metadata).expect("compact serialize");
+        let parsed: TranscriptMetadata =
+            serde_json::from_slice(&bytes).expect("parse compact bytes");
+
+        assert_eq!(parsed.video_id, metadata.video_id);
+        assert_eq!(parsed.duration_s, metadata.duration_s);
+        assert_eq!(
+            parsed.raw_signals.as_ref().map(|r| &r.schema_version),
+            metadata.raw_signals.as_ref().map(|r| &r.schema_version),
+        );
+    }
+
+    #[test]
+    fn compact_json_has_no_indent_whitespace() {
+        // Structural test that compact differs from pretty form: no
+        // newline-followed-by-spaces patterns indicating pretty-print indent.
+        // Size reduction is informational on this one-token fixture (too
+        // small to make a non-brittle relative-size claim per spec) and is
+        // not asserted; the structural absence of indent is the contract.
+        let metadata = sample_metadata_with_raw_signals();
+        let bytes = serde_json::to_vec(&metadata).expect("compact serialize");
+        let s = std::str::from_utf8(&bytes).expect("utf8");
+        assert!(
+            !s.contains("\n  "),
+            "compact JSON must not contain newline+spaces indent"
+        );
+        assert!(
+            !s.contains("\n    "),
+            "compact JSON must not contain newline+4-spaces indent"
+        );
+    }
 }

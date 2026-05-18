@@ -148,8 +148,12 @@ async fn process_one(
         model: transcribe_output.model_id.clone(),
         raw_signals: Some(RawSignals::from_transcribe_output(&transcribe_output)),
     };
-    let json_bytes =
-        serde_json::to_vec_pretty(&metadata).context("serializing transcript metadata")?;
+    // T4 perf-tweaks: compact JSON shrinks the raw_signals payload
+    // meaningfully (per-token id+text+p+plog dominates by token count;
+    // pretty-print added ~3x whitespace bloat). AD0008 ordering preserved;
+    // AD0010 schema shape unchanged (compact and pretty are equivalent
+    // JSON values).
+    let json_bytes = serde_json::to_vec(&metadata).context("serializing transcript metadata")?;
     let json_path = shard_dir.join(format!("{}.json", claim.video_id));
     artifacts::atomic_write(&json_path, &json_bytes)?;
 

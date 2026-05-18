@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use thiserror::Error;
-use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -12,13 +11,19 @@ pub struct CommandSpec<'a> {
     pub program: &'static str,
     pub args: Vec<String>,
     pub timeout: Duration,
-    /// Last-N bytes of stderr to retain in `CommandOutcome.stderr_excerpt`.
-    /// Does NOT bound peak memory: the full stderr stream is buffered in
-    /// memory before truncation. Acceptable for Plan A's curated tools
-    /// (yt-dlp, ffmpeg, whisper.cpp on a single video). See
-    /// `docs/FOLLOWUPS.md` for the bounded-buffering improvement Plan B
-    /// should make if many fetches run concurrently.
+    /// Last-N bytes of stderr retained in `CommandOutcome.stderr_excerpt`.
+    /// Bounded by construction (AD0021): the streaming reader maintains a
+    /// `VecDeque<u8>` of size `stderr_capture_bytes` and drops leading bytes
+    /// when full. Setting to 0 still drains stderr (so the child doesn't
+    /// block on a full pipe) but discards bytes as they arrive; the excerpt
+    /// is then an empty string.
     pub stderr_capture_bytes: usize,
+    /// Last-N bytes of stdout retained in `CommandOutcome.stdout`. Same
+    /// bounded-by-construction semantics as `stderr_capture_bytes`. Setting
+    /// to 0 yields `CommandOutcome.stdout == None` (intentional discard);
+    /// nonzero yields `Some(bounded Vec)` (capture requested, may still be
+    /// empty if the child emitted no stdout).
+    pub stdout_capture_bytes: usize,
     /// Argument indices to redact in the structured log (e.g., cookie file paths).
     pub redact_arg_indices: &'a [usize],
 }
@@ -26,13 +31,14 @@ pub struct CommandSpec<'a> {
 #[derive(Debug, Clone)]
 pub struct CommandOutcome {
     pub exit_code: i32,
-    // Plan A's bin consumers (YtDlpFetcher, transcribe) read `exit_code` and
-    // `stderr_excerpt` only. yt-dlp writes audio to a file (stdout unused);
-    // whisper.cpp parses stderr for language. Plan B may surface `stdout` and
-    // `elapsed` for richer logging / metrics; until then they fire dead_code in
-    // the bin compilation since they're public lib fields not exercised by main.
+    /// `None` when the caller set `stdout_capture_bytes == 0` (intentional
+    /// discard); `Some(bounded Vec)` otherwise. The vec length is bounded
+    /// by `stdout_capture_bytes`. Per AD0002, `#[allow(dead_code)]` retained
+    /// because the bin currently sets `stdout_capture_bytes: 0` at every
+    /// call site (yt-dlp); the field is part of the lib API surface,
+    /// exercised by the integration tests.
     #[allow(dead_code)]
-    pub stdout: Vec<u8>,
+    pub stdout: Option<Vec<u8>>,
     pub stderr_excerpt: String,
     #[allow(dead_code)]
     pub elapsed: Duration,
@@ -79,6 +85,57 @@ impl From<RunError> for FetchError {
     }
 }
 
+/// Bounded streaming reader. Drains the input fully, keeping at most `cap`
+/// trailing bytes in memory at any moment. Returns `Some(bounded Vec)` when
+/// `cap > 0` (capture requested) and `None` when `cap == 0` (intentional
+/// discard — bytes are still drained to prevent the child blocking on a
+/// full pipe, but not retained).
+///
+/// AD0021 invariant: peak retained memory is bounded by `cap` regardless of
+/// how much the child emits. The optional `peak_buffer_len` counter is for
+/// test instrumentation; production callers pass `None`.
+pub async fn read_bounded<R>(
+    reader: &mut R,
+    cap: usize,
+    peak_buffer_len: Option<&std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+) -> Result<Option<Vec<u8>>, std::io::Error>
+where
+    R: tokio::io::AsyncRead + Unpin + ?Sized,
+{
+    use tokio::io::AsyncReadExt;
+
+    const CHUNK: usize = 8 * 1024;
+    let mut chunk = [0u8; CHUNK];
+
+    if cap == 0 {
+        // Discard mode: drain but don't retain.
+        loop {
+            match reader.read(&mut chunk).await? {
+                0 => return Ok(None),
+                _ => continue,
+            }
+        }
+    }
+
+    let mut deque: std::collections::VecDeque<u8> = std::collections::VecDeque::with_capacity(cap);
+    loop {
+        let n = reader.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        for &b in &chunk[..n] {
+            if deque.len() == cap {
+                deque.pop_front();
+            }
+            deque.push_back(b);
+        }
+        if let Some(p) = peak_buffer_len {
+            p.fetch_max(deque.len(), std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    Ok(Some(Vec::from(deque)))
+}
+
 #[tracing::instrument(level = "debug", skip(spec), fields(tool = spec.program))]
 pub async fn run(spec: CommandSpec<'_>) -> Result<CommandOutcome, RunError> {
     let started = std::time::Instant::now();
@@ -109,21 +166,23 @@ pub async fn run(spec: CommandSpec<'_>) -> Result<CommandOutcome, RunError> {
             source,
         })?;
 
-    let mut stdout = child.stdout.take().expect("piped stdout");
-    let mut stderr = child.stderr.take().expect("piped stderr");
+    let mut stdout_pipe = child.stdout.take().expect("piped stdout");
+    let mut stderr_pipe = child.stderr.take().expect("piped stderr");
 
+    // Bounded streaming reads (AD0021). Peak memory is bounded by
+    // `stdout_capture_bytes + stderr_capture_bytes` retention; transient
+    // chunk-read buffers add O(8 KiB × 2) on top, plus tokio task overhead.
+    let stdout_cap = spec.stdout_capture_bytes;
+    let stderr_cap = spec.stderr_capture_bytes;
     let read_outputs = async {
-        let mut stdout_buf = Vec::new();
-        let mut stderr_buf = Vec::new();
         tokio::try_join!(
-            stdout.read_to_end(&mut stdout_buf),
-            stderr.read_to_end(&mut stderr_buf),
-        )?;
-        Ok::<_, std::io::Error>((stdout_buf, stderr_buf))
+            read_bounded(&mut stdout_pipe, stdout_cap, None),
+            read_bounded(&mut stderr_pipe, stderr_cap, None),
+        )
     };
 
     let result = timeout(spec.timeout, async {
-        let (stdout_buf, stderr_buf) = read_outputs.await.map_err(|source| RunError::Io {
+        let (stdout, stderr_bytes) = read_outputs.await.map_err(|source| RunError::Io {
             tool: spec.program,
             source,
         })?;
@@ -131,18 +190,20 @@ pub async fn run(spec: CommandSpec<'_>) -> Result<CommandOutcome, RunError> {
             tool: spec.program,
             source,
         })?;
-        Ok::<_, RunError>((stdout_buf, stderr_buf, status))
+        Ok::<_, RunError>((stdout, stderr_bytes, status))
     })
     .await;
 
     match result {
-        Ok(Ok((stdout_buf, stderr_buf, status))) => {
+        Ok(Ok((stdout, stderr_bytes, status))) => {
             let exit_code = status.code().unwrap_or(-1);
-            let stderr_excerpt = ring_buffer_tail(&stderr_buf, spec.stderr_capture_bytes);
+            let stderr_excerpt = stderr_bytes
+                .map(|v| String::from_utf8_lossy(&v).into_owned())
+                .unwrap_or_default();
             let elapsed = started.elapsed();
             Ok(CommandOutcome {
                 exit_code,
-                stdout: stdout_buf,
+                stdout,
                 stderr_excerpt,
                 elapsed,
             })
@@ -165,14 +226,6 @@ pub async fn run(spec: CommandSpec<'_>) -> Result<CommandOutcome, RunError> {
     }
 }
 
-fn ring_buffer_tail(buf: &[u8], cap: usize) -> String {
-    if cap == 0 || buf.is_empty() {
-        return String::new();
-    }
-    let start = buf.len().saturating_sub(cap);
-    String::from_utf8_lossy(&buf[start..]).into_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,14 +237,13 @@ mod tests {
             args: vec!["hello".into(), "world".into()],
             timeout: Duration::from_secs(5),
             stderr_capture_bytes: 1024,
+            stdout_capture_bytes: 1024,
             redact_arg_indices: &[],
         };
         let outcome = run(spec).await.expect("echo runs");
         assert_eq!(outcome.exit_code, 0);
-        assert_eq!(
-            String::from_utf8_lossy(&outcome.stdout).trim(),
-            "hello world"
-        );
+        let stdout = outcome.stdout.expect("stdout requested");
+        assert_eq!(String::from_utf8_lossy(&stdout).trim(), "hello world");
     }
 
     #[tokio::test]
@@ -201,6 +253,7 @@ mod tests {
             args: vec![],
             timeout: Duration::from_secs(5),
             stderr_capture_bytes: 1024,
+            stdout_capture_bytes: 0,
             redact_arg_indices: &[],
         };
         let outcome = run(spec).await.expect("false runs");
@@ -214,6 +267,7 @@ mod tests {
             args: vec!["10".into()],
             timeout: Duration::from_millis(200),
             stderr_capture_bytes: 1024,
+            stdout_capture_bytes: 0,
             redact_arg_indices: &[],
         };
         let result = run(spec).await;
@@ -230,6 +284,7 @@ mod tests {
             args: vec![],
             timeout: Duration::from_secs(5),
             stderr_capture_bytes: 1024,
+            stdout_capture_bytes: 0,
             redact_arg_indices: &[],
         };
         let result = run(spec).await;

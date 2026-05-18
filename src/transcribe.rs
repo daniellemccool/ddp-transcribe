@@ -345,6 +345,14 @@ impl Drop for CancelOnDrop {
 pub struct WhisperEngine {
     request_tx: Option<mpsc::Sender<TranscribeRequest>>,
     handle: Option<thread::JoinHandle<()>>,
+    /// Counter incremented each time the worker thread lazily allocates
+    /// `lang_state` (at most once per worker lifetime). Always present so the
+    /// worker capture doesn't branch on a feature flag; only **read** outside
+    /// the worker via the `test-helpers` getter below. AD0002: `dead_code`
+    /// is allowed because the field is constructed and written-to in the
+    /// worker (via a cloned `Arc`) but only read in test-helpers builds.
+    #[allow(dead_code)]
+    lang_state_allocations: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl WhisperEngine {
@@ -372,6 +380,14 @@ impl WhisperEngine {
         // the worker enters its request loop. std::sync::mpsc since the worker
         // is a std::thread and the caller (this fn) is synchronous.
         let (init_tx, init_rx) = std::sync::mpsc::sync_channel::<Result<(), WhisperInitError>>(0);
+
+        // T2 perf-tweaks: lang_state is now lazily allocated inside the worker
+        // on the first `compute_lang_probs=true` request. This Arc<AtomicUsize>
+        // is the only thing about the lazy lifecycle that crosses the worker
+        // boundary (read-only from outside via the test-helpers getter).
+        // AD0016 invariant preserved: WhisperState stays inside the worker.
+        let lang_state_allocations = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let lang_state_allocations_worker = std::sync::Arc::clone(&lang_state_allocations);
 
         let handle = thread::Builder::new()
             .name("uu-tiktok-whisper-worker".to_string())
@@ -431,23 +447,21 @@ impl WhisperEngine {
                     }
                 };
 
-                // T8 NEW: secondary state used only for opt-in lang_detect.
-                // Lives for the worker's lifetime (always allocated; only used when
-                // req.config.compute_lang_probs is true). See sharp-edges.md:15 —
+                // T2 perf-tweaks: secondary state used only for opt-in
+                // lang_detect is now **lazily allocated** on the first
+                // `compute_lang_probs=true` request. Non-opt-in workers pay
+                // zero VRAM/host overhead for lang_state; opt-in workers pay
+                // exactly once (on first use), with subsequent opt-in
+                // requests reusing the same state. See sharp-edges.md:15 —
                 // whisper_lang_auto_detect_with_state clobbers state (reuses
-                // decoders[0] and logits), so it must NOT run on the primary state
-                // used for inference.
-                let mut lang_state = match ctx.create_state() {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let _ = init_tx.send(Err(WhisperInitError::StateCreate {
-                            detail: format!("lang_state: {e}"),
-                        }));
-                        return;
-                    }
-                };
+                // decoders[0] and logits), so it must NOT run on the primary
+                // state used for inference. AD0016: this WhisperState stays
+                // inside the worker thread; the only thing crossing out is
+                // the `lang_state_allocations` counter Arc.
+                let mut lang_state: Option<whisper_rs::WhisperState> = None;
+                let lang_state_allocations = lang_state_allocations_worker;
 
-                // Init success: model AND both states loaded.
+                // Init success: model loaded and primary state allocated.
                 if init_tx.send(Ok(())).is_err() {
                     return; // caller went away
                 }
@@ -462,6 +476,37 @@ impl WhisperEngine {
                     .to_string();
 
                 while let Some(req) = request_rx.blocking_recv() {
+                    // Lazy lang_state allocation per T2 perf-tweaks. The
+                    // `WhisperContext::create_state` call is non-trivial (a
+                    // second mel encoder + decoder context on the same
+                    // model). Defer until first opt-in request. AD0016: state
+                    // stays inside this thread; the counter Arc is the only
+                    // thing that crosses out.
+                    if req.config.compute_lang_probs && lang_state.is_none() {
+                        match ctx.create_state() {
+                            Ok(s) => {
+                                lang_state = Some(s);
+                                lang_state_allocations
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            Err(e) => {
+                                // Failure on the lazy path: surface as
+                                // TranscribeError::Bug (matches the existing
+                                // AudioDecodeError -> Bug convention at
+                                // src/errors.rs; Epic 3's failure-classification
+                                // taxonomy will reclassify). Worker continues
+                                // so subsequent non-opt-in requests still work.
+                                let _ = req.reply.send(Err(TranscribeError::Bug {
+                                    detail: format!(
+                                        "lazy lang_state create_state failure \
+                                         (should be classified, not Bug, in Epic 3): {e}"
+                                    ),
+                                }));
+                                continue;
+                            }
+                        }
+                    }
+
                     // Early cancellation check: if the caller already dropped
                     // the future (CancelOnDrop fired) or the deadline elapsed
                     // before we even dequeued the request, return Cancelled
@@ -572,6 +617,13 @@ impl WhisperEngine {
                     // - The probs Vec is pre-sized to get_lang_max_id()+1 by
                     //   whisper-rs; no `.take(max_id+1)` needed.
                     let lang_probs = if req.config.compute_lang_probs {
+                        // The lazy-alloc branch above guarantees Some(_) here
+                        // when we reach this point. `expect` documents the
+                        // invariant; if this panics, the lazy branch's
+                        // continue-on-error didn't fire.
+                        let lang_state = lang_state
+                            .as_mut()
+                            .expect("lazy alloc branch above guarantees Some(_)");
                         match lang_state.pcm_to_mel(&req.samples, 4) {
                             Ok(()) => match lang_state.lang_detect(0, 4) {
                                 Ok((_lang_id, probs_vec)) => {
@@ -715,7 +767,25 @@ impl WhisperEngine {
         Ok(Self {
             request_tx: Some(request_tx),
             handle: Some(handle),
+            lang_state_allocations,
         })
+    }
+
+    /// Test-only accessor: returns the number of times the worker thread has
+    /// lazily allocated `lang_state`. Used by `tests/transcribe_lang_state.rs`
+    /// to assert the lazy lifecycle (0 for non-opt-in workers; exactly 1 for
+    /// opt-in workers regardless of request count). AD0016: the counter is
+    /// the only piece of the lazy lifecycle exposed outside the worker thread.
+    ///
+    /// AD0002/AD0005: `dead_code` is allowed because workspace-level
+    /// `--features test-helpers` activates this getter on the bin compilation
+    /// path too, but only integration tests call it — matches the
+    /// `Store::get_video_for_test` / `EventRow` pattern in `src/state/mod.rs`.
+    #[cfg(feature = "test-helpers")]
+    #[allow(dead_code)]
+    pub fn lang_state_allocations(&self) -> usize {
+        self.lang_state_allocations
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub async fn transcribe(
