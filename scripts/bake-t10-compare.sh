@@ -47,7 +47,7 @@ for label in pre post; do
             intra_failures=$((intra_failures + 1))
             continue
         fi
-        if ! diff -q <(jq -S . "$f") <(jq -S . "$other") > /dev/null; then
+        if ! diff -q <(jq -S 'del(.transcribed_at)' "$f") <(jq -S 'del(.transcribed_at)' "$other") > /dev/null; then
             echo "[$label] NON-DETERMINISTIC: $rel"
             intra_failures=$((intra_failures + 1))
         fi
