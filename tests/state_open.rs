@@ -1,5 +1,5 @@
 use tempfile::TempDir;
-use uu_tiktok::state::Store;
+use uu_tiktok::state::{Store, SCHEMA_VERSION};
 
 #[test]
 fn open_creates_schema_on_fresh_db() {
@@ -31,7 +31,7 @@ fn schema_version_is_recorded() {
         .read_meta("schema_version")
         .expect("read_meta succeeds")
         .expect("schema_version present");
-    assert_eq!(version, "1");
+    assert_eq!(version, SCHEMA_VERSION);
 }
 
 // Coverage-fill test (per ADR 0003): the behavior already works; this test

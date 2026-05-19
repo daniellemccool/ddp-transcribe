@@ -65,3 +65,7 @@ required-features = ["test-helpers"]
 [[test]]
 name = "state_schema_version"
 required-features = ["test-helpers"]
+
+[[test]]
+name = "state_schema_v2"
+required-features = ["test-helpers"]
