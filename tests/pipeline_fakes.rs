@@ -392,6 +392,12 @@ async fn fetch_worker_drains_pending_rows_and_exits() -> anyhow::Result<()> {
             ["vid_a", "vid_b"].contains(&item.claim.video_id.as_str()),
             "claim.video_id matches the upsert set"
         );
+        // T18 Decision B: fetcher_name rides through FetchedItem from
+        // VideoFetcher::name(); FakeFetcher reports "fake-fetcher".
+        assert_eq!(
+            item.fetcher_name, "fake-fetcher",
+            "FetchedItem.fetcher_name reflects the actual fetcher name"
+        );
     }
 
     let worker_result = worker_handle.await.expect("join");
@@ -560,16 +566,19 @@ async fn transcribe_worker_processes_one_item_then_exits_on_channel_close() -> a
         samples,
         samples_len,
         wav_path: wav_path.clone(),
+        fetcher_name: "fake-fetcher",
     };
     tx.send(item).await.unwrap();
     drop(tx); // close channel after first item → worker exits after processing
 
+    let stats_stale_after_success = Arc::new(AtomicUsize::new(0));
     let worker_handle = tokio::spawn(transcribe_worker(
         token.clone(),
         rx,
         Arc::new(transcriber),
         Arc::clone(&shared),
         Arc::clone(&stats_stale_after_failure),
+        Arc::clone(&stats_stale_after_success),
         Arc::new(opts),
     ));
 
@@ -600,6 +609,12 @@ async fn transcribe_worker_processes_one_item_then_exits_on_channel_close() -> a
         stats_stale_after_failure.load(std::sync::atomic::Ordering::Relaxed),
         0,
         "happy path must not increment the stale-after-failure counter"
+    );
+    // Happy path: stale-after-success counter must stay at zero too.
+    assert_eq!(
+        stats_stale_after_success.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "happy path must not increment the stale-after-success counter"
     );
 
     Ok(())
@@ -637,12 +652,14 @@ async fn transcribe_worker_exits_on_cancellation() -> anyhow::Result<()> {
     };
 
     let (_tx, rx) = mpsc::channel::<FetchedItem>(2);
+    let stats_stale_after_success = Arc::new(AtomicUsize::new(0));
     let worker_handle = tokio::spawn(transcribe_worker(
         token.clone(),
         rx,
         Arc::new(transcriber),
         Arc::clone(&shared),
         Arc::clone(&stats_stale_after_failure),
+        Arc::clone(&stats_stale_after_success),
         Arc::new(opts),
     ));
 
@@ -725,17 +742,20 @@ async fn transcribe_worker_increments_stale_after_failure_on_swept_claim() -> an
         samples,
         samples_len,
         wav_path,
+        fetcher_name: "fake-fetcher",
     })
     .await
     .unwrap();
     drop(tx); // close after item → worker exits after processing
 
+    let stats_stale_after_success = Arc::new(AtomicUsize::new(0));
     let worker_handle = tokio::spawn(transcribe_worker(
         token.clone(),
         rx,
         Arc::new(transcriber),
         Arc::clone(&shared),
         Arc::clone(&stats_stale_after_failure),
+        Arc::clone(&stats_stale_after_success),
         Arc::new(opts),
     ));
 
@@ -749,6 +769,13 @@ async fn transcribe_worker_increments_stale_after_failure_on_swept_claim() -> an
         1,
         "exactly one Ok(0) → counter incremented once"
     );
+    // Failure path: stale-after-success counter must stay at zero
+    // (the worker hit the retryable arm, not the success arm).
+    assert_eq!(
+        stats_stale_after_success.load(Ordering::Relaxed),
+        0,
+        "failure path must not increment the stale-after-success counter"
+    );
 
     // Row sits in pending (the sweep left it there; the swept-claim
     // mark_retryable_failure UPDATE updated 0 rows so the status stays
@@ -758,5 +785,72 @@ async fn transcribe_worker_increments_stale_after_failure_on_swept_claim() -> an
     assert_eq!(row.status, "pending");
     drop(guard);
 
+    Ok(())
+}
+
+/// T18: end-to-end `run_pipelined` happy-path drain. 6 pending rows +
+/// FakeFetcher::happy + FakeTranscriber::echo + N=3 fetch workers → all
+/// 6 rows reach `succeeded`; `ProcessStats { claimed: 6, succeeded: 6,
+/// failed: 0, stale_after_success: 0, stale_after_failure: 0 }`.
+///
+/// This is the supervision wiring smoke test: spawns the full
+/// `JoinSet` + `CancellationToken` topology per 0025 and asserts clean
+/// drain on `claim_next == None` for every worker (0026).
+#[tokio::test]
+async fn run_pipelined_drains_all_rows_and_returns_stats() -> anyhow::Result<()> {
+    use std::sync::Arc;
+    use tokio::sync::Mutex as TokioMutex;
+
+    use uu_tiktok::pipeline::{run_pipelined, ProcessOptions, SharedStore};
+
+    let tmp = TempDir::new()?;
+    std::fs::create_dir_all(tmp.path().join("transcripts"))?;
+
+    let mut store = Store::open(&tmp.path().join("state.sqlite"))?;
+    // Stage WAV fixtures + upsert 6 pending rows. FakeFetcher needs a
+    // canned WAV per video_id (the helper's HashMap lookup); decode_wav
+    // needs a real 16 kHz mono WAV.
+    let mut map = HashMap::new();
+    for i in 0..6 {
+        let vid = format!("vid_{i}");
+        store.upsert_video(&vid, &format!("https://example/{i}"), false)?;
+        let wav = tmp.path().join(format!("{vid}.wav"));
+        std::fs::copy(silence_fixture(), &wav)?;
+        map.insert(vid, wav);
+    }
+    drop(store);
+
+    let store = Store::open(&tmp.path().join("state.sqlite"))?;
+    let shared: SharedStore = Arc::new(TokioMutex::new(store));
+    let fetcher = Arc::new(FakeFetcher {
+        canned: Mutex::new(map),
+        always_fails: false,
+        first_call_gate: tokio::sync::Mutex::new(None),
+    });
+    let transcriber: Arc<dyn Transcriber> = Arc::new(FakeTranscriber::echo());
+
+    let opts = ProcessOptions {
+        worker_id: "orchestrator".into(),
+        transcripts_root: tmp.path().join("transcripts"),
+        max_videos: None,
+        compute_lang_probs: false,
+        transcribe_timeout: Duration::from_secs(5),
+        stale_claim_threshold: Duration::from_secs(60),
+        download_workers: 3,
+        channel_capacity: 2,
+    };
+
+    let stats = run_pipelined(Arc::clone(&shared), fetcher, transcriber, opts).await?;
+    assert_eq!(stats.claimed, 6);
+    assert_eq!(stats.succeeded, 6);
+    assert_eq!(stats.failed, 0);
+    assert_eq!(stats.stale_after_success, 0);
+    assert_eq!(stats.stale_after_failure, 0);
+
+    let guard = shared.lock().await;
+    for i in 0..6 {
+        let row = guard.get_video_for_test(&format!("vid_{i}"))?.expect("row");
+        assert_eq!(row.status, "succeeded", "video vid_{i} reached succeeded");
+    }
     Ok(())
 }

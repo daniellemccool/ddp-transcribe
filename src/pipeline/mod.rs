@@ -34,20 +34,42 @@ use crate::transcribe::{PerCallConfig, TranscribeOutput, Transcriber};
 mod pipelined;
 mod serial;
 
-// `run_pipelined`, `SharedStore`, `fetch_worker`, `transcribe_worker`, and
-// `FetchedItem` are exposed for T18 — the bin target (`main.rs`) doesn't
-// reach for them yet, so the bin compilation marks these re-exports as
-// unused. Suppressed per 0002 until T18 wires `--pipelined`. The
-// integration tests in `tests/pipeline_fakes.rs` consume `fetch_worker` /
-// `transcribe_worker` / `FetchedItem` directly, so they must be `pub`
-// (not `pub(crate)`).
+// T18: `run_pipelined` + `SharedStore` are now consumed by `main.rs`'s
+// Process arm; the other three (`fetch_worker`, `transcribe_worker`,
+// `FetchedItem`) are reached transitively via `run_pipelined` inside
+// the bin and DIRECTLY from `tests/pipeline_fakes.rs`. The direct test
+// reach is the reason these stay `pub` re-exports — bin compilation
+// doesn't see the direct reach, hence the `#[allow(unused_imports)]`
+// stays per 0002 (suppressed-at-re-export, not at definition).
 #[allow(unused_imports)]
 pub use pipelined::{fetch_worker, run_pipelined, transcribe_worker, FetchedItem, SharedStore};
+// `run_serial` is no longer on the bin's hot path after T18 (the
+// Process arm calls `run_pipelined`). It stays compiled for the
+// integration tests in `tests/pipeline_fakes.rs` which exercise the
+// serial helper's behavioral contract (retryable failure
+// classification, stale-after-success). 0002 placeholder until a
+// follow-up either retires `run_serial` or restores a behind-a-flag
+// bin caller.
+#[allow(unused_imports)]
 pub use serial::run_serial;
 
 pub struct ProcessOptions {
     pub worker_id: String,
     pub transcripts_root: PathBuf,
+    /// Honored by `run_serial` (caps `claimed`). `run_pipelined` does
+    /// NOT honor this in Epic 2 — bounding across N concurrent fetch
+    /// workers would require either a shared counter or a take-N
+    /// adapter on the claim stream. The CLI flag stays plumbed so a
+    /// future iteration can implement it without re-touching the
+    /// argument shape; `main.rs` warns at startup when the operator
+    /// supplies a value. Tracked in `docs/followups/epic-2.md` for
+    /// resolution before Phase 2 close.
+    ///
+    /// 0002: serial still reads this; pipelined doesn't. The bin path
+    /// no longer reaches `run_serial` after T18, so the field appears
+    /// dead in bin compilation — suppress with the placeholder until
+    /// pipelined honors it or `run_serial` is retired.
+    #[allow(dead_code)]
     pub max_videos: Option<usize>,
     /// Threaded from `Config::compute_lang_probs`. Consumed in `process_one`
     /// when constructing `PerCallConfig`.
@@ -88,6 +110,18 @@ pub struct ProcessStats {
     /// counter should stay at 0 in practice. It's surfaced for Phase 2's
     /// concurrent workers where stale-after-success is reachable.
     pub stale_after_success: usize,
+    /// T18: symmetric counter for the failure path. Rows where
+    /// `mark_retryable_failure` returned `Ok(0)` — predicate
+    /// `status='in_progress' AND claimed_by=?` missed because a concurrent
+    /// sweep cleared the claim between `claim_next` and the failure-flip.
+    /// Both `fetch_worker` and `transcribe_worker` increment this on the
+    /// retryable-error path. The row stays where the sweep left it
+    /// (`pending`) and will be re-claimed on the next iteration.
+    ///
+    /// In Phase 1 (serial loop) this counter doesn't exist on the path
+    /// because `run_serial` doesn't run a mid-loop sweep. Phase 2's
+    /// concurrent workers reach it via the swept-claim race.
+    pub stale_after_failure: usize,
 }
 
 /// Outcome of a single `process_one` call. `StaleAfterSuccess` is the
@@ -156,8 +190,15 @@ pub(crate) async fn fetch_and_decode(
 /// caller's existing `fetcher.name()` source-of-truth, avoids touching
 /// `Config::from_args` and three test fixture constructions.
 ///
-/// Used by `run_serial`'s `process_one` AND (in Phase 2) by the transcribe
-/// worker in `pipelined::transcribe_worker`.
+/// Used by `run_serial`'s `process_one`. The pipelined path
+/// (`transcribe_worker`) delegates directly to the inner
+/// [`write_artifacts_and_mark`] helper (which is the 0008 single source
+/// of truth); after T18 the pipelined worker no longer routes through
+/// this outer wrapper. Kept for `run_serial` (integration tests).
+///
+/// 0002: paired with `run_serial`'s suppression; bin doesn't reach
+/// this after T18.
+#[allow(dead_code)]
 pub(crate) async fn transcribe_and_write(
     store: &mut Store,
     transcriber: &dyn Transcriber,

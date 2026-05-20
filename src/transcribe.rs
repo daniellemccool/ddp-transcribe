@@ -794,47 +794,47 @@ impl WhisperEngine {
         config: PerCallConfig,
         timeout: Duration,
     ) -> Result<TranscribeOutput, TranscribeError> {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let deadline = Instant::now() + timeout;
-        let (reply_tx, reply_rx) = oneshot::channel();
-
-        // CancelOnDrop fires `cancel = true` if this future is dropped before
-        // the worker replies (caller-initiated future cancellation). The worker
-        // owns its own Arc clone via the request and polls it in T7's
-        // abort_callback. Post-reply firing is a no-op (worker has already moved on).
-        let _cancel_guard = CancelOnDrop(Arc::clone(&cancel));
-
-        let req = TranscribeRequest {
-            samples,
-            config,
-            cancel,
-            deadline,
-            reply: reply_tx,
-        };
-
-        // No tokio::spawn timer here: T7's abort_callback polls deadline + cancel
-        // directly inside whisper.cpp's encoder/decoder loop. 0012 comment-2.
-
         let tx = self
             .request_tx
             .as_ref()
             .ok_or_else(|| TranscribeError::Bug {
                 detail: "engine already shut down (request_tx taken)".to_string(),
             })?;
+        transcribe_via_tx(tx, samples, config, timeout).await
+    }
 
-        tx.send(req).await.map_err(|_| TranscribeError::Bug {
-            detail: "worker thread channel closed (engine shut down mid-flight)".to_string(),
-        })?;
-
-        reply_rx.await.unwrap_or_else(|_| {
-            Err(TranscribeError::Bug {
-                detail: "worker dropped reply oneshot (worker panicked or restarted)".to_string(),
-            })
-        })
+    /// Construct a clone-able `Arc<dyn Transcriber>` backed by this engine's
+    /// request channel. Workers in the pipelined orchestrator hold one of
+    /// these; the engine itself stays owned by `main` so `engine.shutdown()`
+    /// can run last per 0025.
+    ///
+    /// Cloning the returned `Arc` is cheap; each clone holds an additional
+    /// reference to the engine's `mpsc::Sender<TranscribeRequest>`. The
+    /// engine's worker thread exits its `blocking_recv` loop only when the
+    /// last `Sender` clone is dropped — which means `engine.shutdown()`
+    /// MUST run AFTER all handle clones are dropped, or the worker
+    /// thread parks until process exit (0025 shutdown ORDER step 4 is
+    /// load-bearing).
+    ///
+    /// T18: consumed by `main.rs`'s Process arm (pipelined orchestrator
+    /// wiring) and by integration tests. No `dead_code` suppression
+    /// needed.
+    pub fn transcriber_handle(&self) -> std::sync::Arc<dyn Transcriber> {
+        let request_tx = self
+            .request_tx
+            .as_ref()
+            .expect("transcriber_handle called after engine shutdown")
+            .clone();
+        std::sync::Arc::new(WhisperEngineHandle { request_tx })
     }
 
     /// Drop the sender (closing the channel and letting the worker exit), then
     /// join the worker thread. Idempotent with `Drop::drop`.
+    ///
+    /// 0025 shutdown ORDER step 4 (LAST). Callers in `main.rs` must ensure
+    /// every `WhisperEngineHandle` clone has been dropped before calling
+    /// this; otherwise the engine's request channel stays open and the
+    /// worker thread parks in `blocking_recv` until process exit.
     pub fn shutdown(mut self) {
         self.teardown();
     }
@@ -908,6 +908,95 @@ impl Transcriber for WhisperEngine {
     }
 
     fn name(&self) -> &'static str {
+        "whisper-rs"
+    }
+}
+
+/// Shared engine-call body. Both `WhisperEngine::transcribe` and
+/// [`WhisperEngineHandle::transcribe`] delegate here so the
+/// `CancelOnDrop` guard + oneshot dance lives in exactly one place.
+///
+/// T18 factor-out: the original body lived inline on
+/// `WhisperEngine::transcribe`. Lifting it lets the new clone-able
+/// handle (needed by 0025's shutdown ORDER) share the same code path
+/// without duplicating the cancel/deadline plumbing.
+async fn transcribe_via_tx(
+    tx: &mpsc::Sender<TranscribeRequest>,
+    samples: Vec<f32>,
+    config: PerCallConfig,
+    timeout: Duration,
+) -> Result<TranscribeOutput, TranscribeError> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let deadline = Instant::now() + timeout;
+    let (reply_tx, reply_rx) = oneshot::channel();
+
+    // CancelOnDrop fires `cancel = true` if this future is dropped before
+    // the worker replies (caller-initiated future cancellation). The worker
+    // owns its own Arc clone via the request and polls it in T7's
+    // abort_callback. Post-reply firing is a no-op (worker has already moved on).
+    let _cancel_guard = CancelOnDrop(Arc::clone(&cancel));
+
+    let req = TranscribeRequest {
+        samples,
+        config,
+        cancel,
+        deadline,
+        reply: reply_tx,
+    };
+
+    // No tokio::spawn timer here: T7's abort_callback polls deadline + cancel
+    // directly inside whisper.cpp's encoder/decoder loop. 0012 comment-2.
+
+    tx.send(req).await.map_err(|_| TranscribeError::Bug {
+        detail: "worker thread channel closed (engine shut down mid-flight)".to_string(),
+    })?;
+
+    reply_rx.await.unwrap_or_else(|_| {
+        Err(TranscribeError::Bug {
+            detail: "worker dropped reply oneshot (worker panicked or restarted)".to_string(),
+        })
+    })
+}
+
+/// Clone-able transcriber handle backed by the engine's request channel
+/// (T18, 0025).
+///
+/// `WhisperEngine::shutdown(self)` consumes `self`, which means handing
+/// the engine to spawned worker tasks as `Arc<dyn Transcriber>` would
+/// prevent the orchestrator's main from ever shutting it down. This
+/// handle wraps the engine's existing `mpsc::Sender<TranscribeRequest>`
+/// instead — workers hold cheap clones; `WhisperEngine` itself stays
+/// owned in `main`.
+///
+/// **Shutdown coupling (load-bearing, 0025 step 4).** The engine's
+/// worker thread exits `blocking_recv` only when the LAST clone of the
+/// request sender is dropped. `engine.shutdown()` MUST run after every
+/// `WhisperEngineHandle` clone has been dropped — typically by dropping
+/// main's own clone of the `Arc<dyn Transcriber>` after
+/// `run_pipelined` has joined every worker.
+///
+/// T18: constructed by `WhisperEngine::transcriber_handle` (called by
+/// `main.rs`'s Process arm); its `request_tx` field is read on every
+/// trait `transcribe` call. No `dead_code` suppression needed.
+pub struct WhisperEngineHandle {
+    request_tx: mpsc::Sender<TranscribeRequest>,
+}
+
+#[async_trait]
+impl Transcriber for WhisperEngineHandle {
+    async fn transcribe(
+        &self,
+        samples: Vec<f32>,
+        config: PerCallConfig,
+        timeout: Duration,
+    ) -> Result<TranscribeOutput, TranscribeError> {
+        transcribe_via_tx(&self.request_tx, samples, config, timeout).await
+    }
+
+    fn name(&self) -> &'static str {
+        // Same provenance as the owned engine — the wire format's
+        // `transcript_source` field doesn't distinguish "engine vs
+        // handle-to-engine"; both routes hit the same worker thread.
         "whisper-rs"
     }
 }

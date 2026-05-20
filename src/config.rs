@@ -14,18 +14,12 @@ pub struct Config {
     /// that the operator places at this path before running `process`.
     pub whisper_model_path: PathBuf,
 
-    // Plan A leftovers — Plan B's `WhisperEngine` does not consume these
-    // (whisper-rs picks `n_threads = min(4, hw_concurrency)` itself, and the
-    // GPU choice is an `i32` device index passed via `EngineConfig`). They
-    // still have CLI/env plumbing and per-field tests in `config.rs::tests`;
-    // deletion is a separate cleanup sweep (likely Epic 2 alongside the
-    // state-machine work). Suppressing dead_code while they're plumbed but
-    // unread keeps the diff minimal.
-    #[allow(dead_code)]
-    pub whisper_use_gpu: bool,
-    #[allow(dead_code)]
-    pub whisper_threads: usize,
-
+    // 0002 cleanup (T18): `whisper_use_gpu` and `whisper_threads` are
+    // removed. Plan B's `WhisperEngine` doesn't consume either — whisper-rs
+    // picks `n_threads = min(4, hw_concurrency)` itself, and the GPU
+    // choice is an `i32` device index passed via `EngineConfig`. The
+    // Epic 1 "consume when state-machine work lands" placeholder is
+    // resolved by Epic 2's confirmation that no consumer materialized.
     pub ytdlp_timeout: Duration,
     pub transcribe_timeout: Duration,
     pub compute_lang_probs: bool,
@@ -50,8 +44,6 @@ impl Config {
                     .whisper_model
                     .clone()
                     .unwrap_or_else(|| PathBuf::from("./models/ggml-tiny.en.bin")),
-                whisper_use_gpu: false,
-                whisper_threads: num_cpus_safe(),
                 ytdlp_timeout: Duration::from_secs(300),
                 transcribe_timeout: Duration::from_secs(600),
                 compute_lang_probs: args.compute_lang_probs,
@@ -63,12 +55,6 @@ impl Config {
             },
         }
     }
-}
-
-fn num_cpus_safe() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
 }
 
 #[cfg(test)]
@@ -94,8 +80,8 @@ mod tests {
     fn dev_profile_uses_tiny_en_cpu() {
         let cfg = Config::from_args(&dev_args());
         assert!(cfg.whisper_model_path.to_string_lossy().contains("tiny.en"));
-        assert!(!cfg.whisper_use_gpu);
-        assert!(cfg.whisper_threads >= 1);
+        // 0002 cleanup (T18): `whisper_use_gpu` / `whisper_threads`
+        // are removed; nothing to assert on them.
         assert_eq!(cfg.ytdlp_timeout, Duration::from_secs(300));
     }
 

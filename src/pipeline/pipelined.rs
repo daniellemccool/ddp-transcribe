@@ -12,13 +12,16 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use super::{fetch_and_decode, write_artifacts_and_mark, ProcessOptions, ProcessStats};
+use super::{
+    fetch_and_decode, write_artifacts_and_mark, ProcessOptions, ProcessOutcome, ProcessStats,
+};
 use crate::errors::TranscribeError;
 use crate::fetcher::VideoFetcher;
 use crate::state::{Claim, Store};
-use crate::transcribe::{PerCallConfig, Transcriber, WhisperEngine};
+use crate::transcribe::{PerCallConfig, Transcriber};
 
 /// Shared mutable access to the `Store` across N fetch workers + 1
 /// transcribe worker.
@@ -47,17 +50,24 @@ pub type SharedStore = std::sync::Arc<tokio::sync::Mutex<Store>>;
 /// without re-deriving from the moved `samples` Vec (which is consumed
 /// by the engine.transcribe() call).
 ///
+/// `fetcher_name` carries `VideoFetcher::name()` from the fetch worker
+/// that produced this item, so the transcribe worker can populate the
+/// artifact JSON's `fetcher` field without a hardcoded literal (T18
+/// Decision B). The 'static lifetime mirrors the trait method's
+/// signature; every fetcher's name is a string literal.
+///
 /// `pub` (not `pub(crate)`) so the integration tests in
-/// `tests/pipeline_fakes.rs` can construct/inspect items. 0002
-/// suppression on bin-compilation dead-code lives on the re-export in
-/// `mod.rs`; the per-field reads are exercised by the tests.
+/// `tests/pipeline_fakes.rs` can construct/inspect items. After T18
+/// `run_pipelined` is wired in `main.rs`, every field is read on the
+/// bin path (via destructuring inside `transcribe_worker`) — no
+/// `dead_code` suppression needed.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct FetchedItem {
     pub claim: Claim,
     pub samples: Vec<f32>,
     pub samples_len: usize,
     pub wav_path: PathBuf,
+    pub fetcher_name: &'static str,
 }
 
 /// Phase 2 fetch worker. Claims pending rows; fetches + decodes WAVs;
@@ -90,10 +100,10 @@ pub struct FetchedItem {
 /// `stats_stale_after_failure` and continue, do NOT return Err. T18
 /// merges this counter into `ProcessStats` after worker drain.
 ///
-/// 0002 suppression: T17 (transcribe_worker) and T18 (orchestrator
-/// wiring) are the in-bin callers; until then bin compilation flags
-/// this as dead. Tests in `tests/pipeline_fakes.rs` exercise it now.
-#[allow(dead_code)]
+/// T18: `run_pipelined` is the in-bin caller; the prior
+/// `#[allow(dead_code)]` placeholder is lifted as part of this wiring
+/// per 0002. Integration tests in `tests/pipeline_fakes.rs` continue
+/// to exercise it directly.
 pub async fn fetch_worker(
     token: CancellationToken,
     store: SharedStore,
@@ -137,6 +147,11 @@ pub async fn fetch_worker(
                     samples,
                     samples_len,
                     wav_path,
+                    // T18 Decision B: stamp the fetcher's identifier onto
+                    // the item so the transcribe worker can pass it to
+                    // `write_artifacts_and_mark` (instead of a hardcoded
+                    // "ytdlp" literal).
+                    fetcher_name: fetcher.name(),
                 };
                 if sender.send(item).await.is_err() {
                     // Channel closed — transcribe_worker exited (panic or
@@ -248,16 +263,25 @@ pub async fn fetch_worker(
 ///   `stats_stale_after_failure` and continue (symmetric to T16's
 ///   amendment for the fetch side).
 ///
-/// 0002 suppression: T18 wires this into `run_pipelined`; until then bin
-/// compilation marks it dead. Tests in `tests/pipeline_fakes.rs`
-/// exercise it now.
-#[allow(dead_code)]
+/// **Success-side stale-claim routing (T18 Decision A).** When
+/// `write_artifacts_and_mark` returns `Ok(StaleAfterSuccess)`,
+/// `mark_succeeded` updated 0 rows: artifacts are durable per 0008,
+/// but the predicate `status='in_progress' AND claimed_by=?` missed
+/// (a concurrent sweep cleared the claim mid-transcription). The
+/// worker increments `stats_stale_after_success` and continues — this
+/// is the success-side counterpart to `stats_stale_after_failure`.
+///
+/// T18: `run_pipelined` is the in-bin caller; the prior
+/// `#[allow(dead_code)]` placeholder is lifted as part of this wiring
+/// per 0002. Integration tests in `tests/pipeline_fakes.rs` continue
+/// to exercise it directly.
 pub async fn transcribe_worker(
     token: CancellationToken,
     mut receiver: mpsc::Receiver<FetchedItem>,
     transcriber: Arc<dyn Transcriber>,
     store: SharedStore,
     stats_stale_after_failure: Arc<AtomicUsize>,
+    stats_stale_after_success: Arc<AtomicUsize>,
     opts: Arc<ProcessOptions>,
 ) -> Result<()> {
     let worker_id = opts.worker_id.clone();
@@ -286,6 +310,7 @@ pub async fn transcribe_worker(
             samples,
             samples_len,
             wav_path,
+            fetcher_name,
         } = item;
 
         tracing::info!(
@@ -327,18 +352,21 @@ pub async fn transcribe_worker(
                     &claim,
                     samples_len,
                     wav_path,
-                    "ytdlp",
+                    fetcher_name,
                     transcriber.name(),
                     &opts,
                 )
                 .with_context(|| format!("write_artifacts_and_mark for {}", claim.video_id))?;
                 drop(guard);
 
-                // `StaleAfterSuccess`: the helper already logged the warn;
-                // T18 will route this into a counter on `ProcessStats`.
-                // For now just continue — artifacts are durable per 0008
-                // and the row sits in pending.
-                let _ = outcome;
+                // T18 Decision A: route `StaleAfterSuccess` into a counter
+                // symmetric to `stats_stale_after_failure`. Artifacts are
+                // durable per 0008; the row sits in pending and will be
+                // re-claimed. Counter is monotonic telemetry — Relaxed is
+                // fine.
+                if outcome == ProcessOutcome::StaleAfterSuccess {
+                    stats_stale_after_success.fetch_add(1, Ordering::Relaxed);
+                }
             }
             Err(TranscribeError::Cancelled) => {
                 // Coordinated shutdown, not a row failure. Row stays
@@ -412,24 +440,197 @@ pub async fn transcribe_worker(
 
 /// Phase 2 entry point: pipelined orchestrator.
 ///
-/// **SKELETON ONLY in T15** — returns `Ok(ProcessStats::default())`
-/// without doing real work. T16 fills in `fetch_worker`; T17 fills in
-/// `transcribe_worker`; T18 wires `JoinSet` + `CancellationToken` +
-/// shutdown ordering per 0025 and changes `main.rs`'s `--pipelined`
-/// branch to call this.
+/// Spawns N `fetch_worker` tasks + 1 `transcribe_worker` task into a
+/// shared `tokio::task::JoinSet`, supervised by a shared
+/// `tokio_util::sync::CancellationToken`. On first `Err`/panic from any
+/// worker, fires `token.cancel()` and drains the remaining tasks. On
+/// clean drain (every worker exits `Ok(())` after `claim_next == None`
+/// or channel close), computes a `ProcessStats` from the DB and merges
+/// the two stale-claim counters in.
 ///
-/// Signature note: the `&WhisperEngine` parameter matches the T15 brief.
-/// T18 may amend to `Arc<dyn Transcriber>` (the `WhisperEngineHandle`
-/// pattern) if the worker structure needs an owned shared handle for
-/// `tokio::spawn`.
-#[allow(clippy::needless_pass_by_value, dead_code)]
+/// **0025 shutdown ORDER — steps 1-3 happen inside this function:**
+/// 1. `token.cancel()` is fired on the first `Err` from any worker.
+/// 2. Original `tx` is dropped after the spawn loop, so the
+///    fetch→transcribe channel closes when all fetch workers exit.
+/// 3. `JoinSet::join_next()` is awaited to completion; every worker
+///    has returned (Ok, Err, or panic) before this function returns.
+///
+/// **Step 4 (`engine.shutdown()`) is the caller's responsibility** —
+/// must run after this future resolves AND after the caller has dropped
+/// its own `Arc<dyn Transcriber>` clone. See `main.rs::Process` arm.
+///
+/// **Abort lever (T18 Consideration D).** The supervision loop uses
+/// `token.cancel()` only — not `join_set.abort_all()`. Cancellation
+/// latency is bounded by the largest single `await` in each worker
+/// (fetch ~`ytdlp_timeout` worst case; transcribe ~1s on
+/// large-v3-turbo-q5_0). `abort_all()` would drop futures immediately
+/// (yt-dlp's `kill_on_drop` would fire), at the cost of losing graceful
+/// cleanup. Tracked as a deferred choice; an operator can cap fetch
+/// latency at the CLI via `--ytdlp-timeout`.
+///
+/// Sweeps stale claims at the top (0024), same as `run_serial`. The
+/// inner workers also tolerate stale claims via the two
+/// `stats_stale_after_*` counters; the top-of-run sweep is for
+/// process-crash recovery only.
 pub async fn run_pipelined(
-    _store: SharedStore,
-    _fetcher: &dyn VideoFetcher,
-    _engine: &WhisperEngine,
-    _opts: ProcessOptions,
+    store: SharedStore,
+    fetcher: Arc<dyn VideoFetcher>,
+    transcriber: Arc<dyn Transcriber>,
+    opts: ProcessOptions,
 ) -> Result<ProcessStats> {
-    // T16/T17/T18 fill this in. Returning empty stats keeps the type
-    // signature stable so callers compile.
-    Ok(ProcessStats::default())
+    // 0024: recover rows left in_progress by a crashed earlier run.
+    // Same gesture as `run_serial`; happens once per orchestrator
+    // invocation before any worker starts claiming.
+    {
+        let mut guard = store.lock().await;
+        let recovered = guard
+            .sweep_stale_claims(opts.stale_claim_threshold)
+            .context("sweep_stale_claims at run_pipelined start")?;
+        if recovered > 0 {
+            tracing::info!(recovered, "sweep_stale_claims at orchestrator start");
+        }
+    }
+
+    let token = CancellationToken::new();
+    let (tx, rx) = mpsc::channel::<FetchedItem>(opts.channel_capacity);
+    let opts_arc = Arc::new(opts);
+    let stats_stale_after_failure = Arc::new(AtomicUsize::new(0));
+    let stats_stale_after_success = Arc::new(AtomicUsize::new(0));
+    let mut join_set: JoinSet<Result<()>> = JoinSet::new();
+
+    // Spawn the transcribe worker FIRST so the channel has a consumer
+    // by the time the first fetch worker tries to send.
+    join_set.spawn(transcribe_worker(
+        token.clone(),
+        rx,
+        Arc::clone(&transcriber),
+        Arc::clone(&store),
+        Arc::clone(&stats_stale_after_failure),
+        Arc::clone(&stats_stale_after_success),
+        Arc::clone(&opts_arc),
+    ));
+
+    // Spawn N fetch workers. Each gets its own `tx.clone()`; the
+    // original `tx` is dropped below so the channel closes when every
+    // fetch_worker exits (drain semantics per 0026).
+    for _ in 0..opts_arc.download_workers {
+        join_set.spawn(fetch_worker(
+            token.clone(),
+            Arc::clone(&store),
+            Arc::clone(&fetcher),
+            tx.clone(),
+            Arc::clone(&stats_stale_after_failure),
+            Arc::clone(&opts_arc),
+        ));
+    }
+    // 0025 step 2: drop the orchestrator's own tx so the channel closes
+    // as soon as every fetch_worker drops its clone. Without this drop
+    // the transcribe_worker would park on recv() forever even after all
+    // fetch workers exit.
+    drop(tx);
+
+    // Supervise: on first Err or panic, cancel the token and drain.
+    // Bug-class signals propagate via the `Err` join arm; non-Bug
+    // outcomes from individual rows are absorbed inside the workers
+    // (via `mark_retryable_failure` + the two counters).
+    let mut first_error: Option<anyhow::Error> = None;
+    while let Some(joined) = join_set.join_next().await {
+        match joined {
+            Ok(Ok(())) => { /* worker exited clean */ }
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "worker returned Err; initiating shutdown");
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+                // 0025 step 1: cancel the token. Workers observe at next
+                // loop-top poll (fetch) or at the biased select arm
+                // (transcribe). The 0008 invariant lives inside
+                // `write_artifacts_and_mark`; even a cancellation
+                // mid-write leaves artifacts durable.
+                token.cancel();
+            }
+            Err(join_err) if join_err.is_panic() => {
+                let msg = format!("worker panicked: {join_err}");
+                tracing::error!(error = %msg, "worker panic; initiating shutdown");
+                if first_error.is_none() {
+                    first_error = Some(anyhow!(msg));
+                }
+                token.cancel();
+            }
+            Err(join_err) => {
+                // Cancelled JoinError — only possible if a future caller
+                // adds `join_set.abort_all()`. Not used today; left as a
+                // defensive arm so a later abort-lever upgrade
+                // (Consideration D) doesn't surprise the orchestrator.
+                tracing::warn!(error = %join_err, "JoinError (cancelled)");
+            }
+        }
+    }
+    // 0025 step 3 complete: every worker has joined. Compute the final
+    // stats by summing per-status DB row counts + merging the two
+    // counters.
+
+    let mut stats = {
+        let guard = store.lock().await;
+        compute_process_stats(&guard)?
+    };
+    stats.stale_after_failure = stats_stale_after_failure.load(Ordering::Relaxed);
+    stats.stale_after_success = stats_stale_after_success.load(Ordering::Relaxed);
+
+    if let Some(e) = first_error {
+        return Err(e);
+    }
+    Ok(stats)
+}
+
+/// Compute `ProcessStats` from the DB after `run_pipelined` drains.
+/// Counts rows by status (succeeded / failed_retryable / failed_terminal)
+/// under the assumption that the run started on a clean state or that
+/// the operator interprets `claimed` as "rows in a terminal status by
+/// the end of this run". Pending/in_progress rows are not counted —
+/// `claimed = succeeded + failed_retryable + failed_terminal`.
+///
+/// Stale-claim counters (`stale_after_success`, `stale_after_failure`)
+/// are written by the caller after this returns; both are workers' own
+/// telemetry rather than DB-derivable.
+///
+/// For run-to-run accuracy in mid-stream invocations, a richer metric
+/// (claim-count delta tracked in an `Arc<Mutex<ProcessStats>>` shared
+/// across workers) would be preferable — left for Epic 5's ops-hygiene
+/// work; Plan B Epic 2 ships this COUNT-by-status proxy because the
+/// happy-path test and the 0027 bake validate only per-row status.
+fn compute_process_stats(store: &Store) -> Result<ProcessStats> {
+    let mut succeeded: usize = 0;
+    let mut failed_retryable: usize = 0;
+    let mut failed_terminal: usize = 0;
+
+    let mut stmt = store
+        .conn()
+        .prepare("SELECT status, COUNT(*) FROM videos GROUP BY status")
+        .context("preparing status-count query")?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize))
+        })
+        .context("executing status-count query")?;
+    for row in rows {
+        let (status, count) = row?;
+        match status.as_str() {
+            "succeeded" => succeeded = count,
+            "failed_retryable" => failed_retryable = count,
+            "failed_terminal" => failed_terminal = count,
+            _ => { /* pending / in_progress not counted */ }
+        }
+    }
+
+    let failed = failed_retryable + failed_terminal;
+    Ok(ProcessStats {
+        claimed: succeeded + failed,
+        succeeded,
+        failed,
+        // Counter-derived fields are filled by the caller after this
+        // function returns; leave them at default here.
+        stale_after_success: 0,
+        stale_after_failure: 0,
+    })
 }

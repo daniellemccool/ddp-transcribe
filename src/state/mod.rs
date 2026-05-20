@@ -139,8 +139,10 @@ impl Store {
 
     /// Borrow the underlying connection for advanced operations. Internal use
     /// for now; the public API will grow as Tasks 9+ add methods.
-    // T9 (store-ingest) and T10 (store-claims) are the first consumers.
-    #[allow(dead_code)]
+    ///
+    /// T18 (pipelined orchestrator's `compute_process_stats`) is the first
+    /// in-bin consumer; the `#[allow(dead_code)]` placeholder is lifted as
+    /// part of that wiring per 0002.
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
     }

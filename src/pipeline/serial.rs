@@ -12,6 +12,14 @@ use crate::fetcher::VideoFetcher;
 use crate::state::{Claim, Store};
 use crate::transcribe::Transcriber;
 
+// 0002: T18 swapped main.rs's Process arm to `run_pipelined`, so this
+// helper is no longer reached from the bin. It stays exercised by the
+// integration tests in `tests/pipeline_fakes.rs` (serial's behavioral
+// contract — retryable classification + StaleAfterSuccess — is part of
+// the helper-shared invariants documented in `mod.rs`). Suppress
+// dead_code until a follow-up either retires the helper or restores a
+// bin caller.
+#[allow(dead_code)]
 pub async fn run_serial(
     store: &mut Store,
     fetcher: &dyn VideoFetcher,
@@ -78,6 +86,8 @@ pub async fn run_serial(
 /// helpers (T15): `fetch_and_decode` runs phases 1+2; `transcribe_and_write`
 /// runs phases 3+4 and owns the 0008 artifact-before-mark_succeeded
 /// invariant (plus the StaleAfterSuccess branch).
+// 0002 paired with `run_serial`: same lift-on-restore conditions apply.
+#[allow(dead_code)]
 async fn process_one(
     store: &mut Store,
     fetcher: &dyn VideoFetcher,
