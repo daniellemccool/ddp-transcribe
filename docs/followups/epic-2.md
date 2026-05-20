@@ -272,3 +272,59 @@ against the brief; all approved as-is):
 All three are pure tightening — they don't change any current
 behavior; they document and test what the existing code already
 does correctly.
+
+---
+
+### `mark_retryable_failure` Ok(0) silently swallowed in `run_serial` (symmetric to T5 carry-forward)
+
+**Found in:** T9 spec-compliance review (Sonnet + codex-advisor delegation per 0018).
+**Disposition:** Defense-in-depth, Phase 2 scope. Unreachable in the Phase 1 serial loop today.
+**Trigger to revisit:** T17 (transcribe-worker) / T18 (supervision wiring) — anywhere concurrent sweeps + workers exist.
+
+T9 added `ProcessOutcome::StaleAfterSuccess` to handle `mark_succeeded`
+returning `Ok(0)` (the row was no longer claimed by this worker; the
+T5-carry-forward fix). The symmetric case on the failure path is NOT
+handled: if a concurrent sweep clears the claim after `process_one`
+returns `Err`, `mark_retryable_failure` also returns `Ok(0)`, but
+`run_serial` increments `stats.failed`, logs nothing about the
+predicate rejection, and the row stays in `pending` (the sweep moved
+it there) — not in `failed_retryable` as the stats imply.
+
+Phase 1 serial single-worker makes this unreachable in practice
+(sweep is at the top of `run_serial`, claim_next runs next, then
+process_one runs through to completion; no other thread can sweep
+mid-iteration). Phase 2 (concurrent fetch workers + transcribe
+worker) makes this race reachable.
+
+Defense-in-depth fix when Phase 2's concurrent workers land: check
+the count returned by `mark_retryable_failure`. On `Ok(0)`, log a
+warn (symmetric to the StaleAfterSuccess warn in `process_one`) and
+don't increment `stats.failed` — count via a new `stats.stale_after_failure`
+counter (symmetric to `stats.stale_after_success`).
+
+---
+
+### T9 failure-classification test enrichment
+
+**Found in:** T9 spec-compliance review (codex-advisor delegation).
+**Disposition:** Epic 2 cleanup; resolve before Phase 2 close.
+**Trigger to revisit:** Phase 2 close cleanup; OR if the
+`tests/pipeline_fakes.rs::run_serial_classifies_fetch_failure_as_retryable_and_continues`
+test is otherwise edited.
+
+The T9 happy-path failure test asserts `row.status == "failed_retryable"`
+but does NOT assert:
+
+- `last_retryable_kind == "FetchOrTranscribe"` (the placeholder string-kind
+  that Epic 3 replaces with classifier dispatch).
+- `last_retryable_message` contains the formatted error chain
+  (`format!("{e:#}")`).
+- `claimed_by IS NULL` and `claimed_at IS NULL` after the flip (the
+  retry-safety invariant on `mark_retryable_failure`, already asserted
+  in `tests/state_claims.rs::mark_retryable_failure_flips_status_and_records_columns`
+  at the Store layer but not at the pipeline layer).
+
+There's also no transcribe-failure variant of the test (only fetch-failure
+is exercised). Both arms route through the same Err branch in `run_serial`
+so it's not load-bearing, but a second test exercising
+`FakeTranscriber::always_fails()` would lock down the symmetry.
