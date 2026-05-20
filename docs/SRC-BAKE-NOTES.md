@@ -201,3 +201,87 @@ Bake-completion checklist (informal — formalize in Epic 4's `status` subcomman
 - [ ] 1-state vs 2-state measurement (deferred to production grant)
 - [x] Bake notes written + committed
 - [x] Workspace paused
+
+---
+
+# SRC A10 Bake Notes — Plan B Epic 2
+
+**Date:** 2026-05-20
+**Workspace:** `transcription.develop-data-do.src.surf-hosted.nl`
+**Hardware:** 1× NVIDIA A10 (same workspace as Epic 1)
+**Operator:** Danielle McCool
+**Branch:** `feat/plan-b-epic-2` @ `d928905` (Phase 2 + cleanup commits + bootstrap UX fixes)
+**Build:** `cargo build --release --features cuda`
+**Bake scope:** N=1/N=3/N=5 throughput comparison + coordinated-shutdown drill.
+
+---
+
+## Headline outcomes
+
+1. **N=3 is the empirically validated default** per ADR 0027. N=5 adds essentially nothing (1.007× over N=3); the curve-flattening point is confirmed.
+2. **1.44× absolute speedup at N=3 vs N=1** — below ADR 0027's ~3.5× prediction because this fixture's fetch is much faster than the modeled ratio (avg 1.5s/clip vs the 5.5s the prediction assumed). When fetch is fast, transcribe becomes the bottleneck sooner; the design ceiling depends on the avg_fetch / avg_transcribe ratio.
+3. **User CPU constant at ~56s across all three topologies** — CPU work is fixed; wallclock varies via overlap. Design intent confirmed.
+4. **Coordinated-shutdown drill validates ADR 0024 end-to-end.** Pre-kill `in_progress` count matched post-restart `recovered` count exactly; no half-written transcripts surfaced.
+5. **Fixture:** `news_orgs` (20 pending videos after ingest). **Model:** `ggml-large-v3-turbo-q5_0.bin` (~573 MB, GPU/CUDA).
+
+---
+
+## Throughput comparison
+
+| Topology | Wallclock | Per-clip | Speedup vs N=1 | User CPU | Sys |
+|---|---|---|---|---|---|
+| N=1 (serial) | 41.7s | 2.09s | 1.00× | 56.1s | 4.2s |
+| **N=3 (default)** | **29.0s** | **1.45s** | **1.44×** | 56.3s | 4.1s |
+| N=5 | 28.8s | 1.44s | 1.45× | 56.4s | 4.3s |
+
+---
+
+## Coordinated-shutdown drill
+
+- N=3 default, started in background, `sleep 5`, `kill -KILL` the process tree.
+- Pre-restart DB: 6 rows in `in_progress` with non-NULL `claimed_at` (5-second spread: timestamps 1779312832–1779312837).
+- Restart with `--stale-claim-threshold 1s`: log line `sweep_stale_claims recovered=6 threshold_secs=1`. All 6 swept rows re-claimed and processed to `succeeded`.
+- Final state: `claimed=20 succeeded=20 failed=0 stale_after_success=0 stale_after_failure=0`. No half-states.
+
+---
+
+## Findings
+
+1. **N=3 is empirically validated as the right default** per ADR 0027. N=5 adds essentially zero (1.007× over N=3) — the curve-flattening point is confirmed.
+2. **Absolute speedup (1.44×) is below ADR 0027's ~3.5× prediction** because this fixture's fetch is much faster than Epic 1's measurements (avg 1.5s/clip vs Epic 1's modeled 5.5s). When fetch is fast, transcribe becomes the bottleneck sooner — the design ceiling depends on the avg_fetch / avg_transcribe ratio. For fixtures with slower fetches (network-bound or pathological yt-dlp paths), the speedup would approach the predicted 3.5×.
+3. **User CPU is constant at ~56s across all three topologies.** CPU work is fixed; wallclock varies via overlap. Design intent confirmed.
+4. **All Phase 2 stale counters (`stale_after_success`, `stale_after_failure`) stayed at 0** across all happy-path runs. The symmetric race-detection design is in place but the happy path doesn't exercise it — expected.
+5. **Coordinated-shutdown drill validates ADR 0024 (sweep semantics) end-to-end.** Pre-kill `in_progress` count matched post-restart `recovered` count exactly. No half-written transcripts surfaced because ADR 0008's artifact-before-`mark_succeeded` order prevented them.
+6. **`attempt_count` accumulates across bake sweeps** (rows showed attempt=7-8 on the drill recovery). Expected behavior; the reset-between-runs SQL deliberately doesn't reset `attempt_count` per ADR 0024.
+
+---
+
+## Language detection (multilingual model exercised)
+
+French ×1, Dutch ×8, English ×9, Tagalog ×2 — all detected with confidence > 0.987.
+
+---
+
+## What this bake did NOT do
+
+- **Long-running steady-state characterization (>20 videos).** Each bake run was bounded to the 20-video `news_orgs` fixture.
+- **Multi-fixture comparison.** e.g., longer videos to verify the 3.5× ceiling under network-bound fetch conditions.
+- **Real-world concurrent claim contention.** The multi-process scenario `stale_after_failure` is designed to surface was not exercised.
+- **`--compute-lang-probs` overhead measurement.** Carry to Epic 3 bake addendum (deferred since Epic 1).
+- **ADR 0025's `engine.transcribe()` cancellation latency under in-flight load.** The T18 fixup at `a66d38b` wrapped the `select!` but cancel-mid-transcribe latency was not measured under load.
+
+---
+
+## Operational habits documented (per 0011)
+
+Workspace paused per the 0011 spin-down practice after capturing these notes.
+
+Bake-completion checklist (Epic 2 scope):
+
+- [x] `cargo build --release --features cuda` succeeded
+- [x] CUDA backend log line confirmed (inherited from Epic 1 baseline; `ggml-large-v3-turbo-q5_0.bin` confirmed GPU on A10)
+- [x] N=1 / N=3 / N=5 throughput captured (20-video fixture)
+- [x] Coordinated-shutdown drill completed (6-row recovery, final state clean)
+- [x] Language detection confirmed on multilingual fixture (fr/nl/en/tl)
+- [ ] --compute-lang-probs measurement (deferred to Epic 3)
+- [ ] Multi-fixture speedup ceiling verification (deferred)

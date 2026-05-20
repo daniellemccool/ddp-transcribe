@@ -44,11 +44,6 @@ Routing is authoritative per `docs/superpowers/plans/2026-05-12-plan-b/EPIC-5-SK
 lines 120-148.
 
 **Epic 2 (concurrent fetch + state-machine)**
-- T7: `Store::open` schema-version not read → Epic 2 first task (read-and-check policy)
-- T10: `concurrent_claim_serializes_via_begin_immediate` doesn't race → Epic 2 (rewrite with Barrier)
-- T10: `mark_succeeded` doesn't require `status='in_progress'` → Epic 2 (WHERE predicate)
-- T10: `claim_next` polling semantics → Epic 2 (explicit sleep/backoff policy)
-- T10: Missing round-trip test — succeeded not re-claimable → Epic 2 (add to state_claims tests)
 - T5-Epic1: Worker-side closed-reply path silently swallows error → Epic 2 (tracing context)
 - T18: `--max-videos` ignored by `run_pipelined` (silent regression from `run_serial`) → Epic 2 cleanup (before Phase 2 close)
 - T16: `fetch_worker` cancellation latency bounded by largest await, not by `token.cancel()` → Epic 2 close OR Epic 3 graceful-shutdown
