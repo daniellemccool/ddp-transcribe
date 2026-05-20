@@ -456,6 +456,43 @@ impl Store {
         tx.commit().context("commit mark_terminal_failure")?;
         Ok(changed)
     }
+
+    /// Recover rows abandoned by a crashed process. Flips rows with
+    /// `status='in_progress' AND claimed_at < (now - threshold)` back to
+    /// `status='pending'`, clearing claimed_by/claimed_at. Returns the
+    /// row-change count (per 0006).
+    ///
+    /// Per 0024: no artifact validation, no attempt_count bump. The
+    /// sweep is operator-recovery semantics; application-retry semantics
+    /// (and the `attempt_count` ladder) belong to Epic 3's classifier.
+    // T9 wires this into run_serial; no bin consumer until then.
+    #[allow(dead_code)]
+    pub fn sweep_stale_claims(&mut self, threshold: std::time::Duration) -> Result<usize> {
+        let now = unix_now();
+        let threshold_secs = threshold.as_secs() as i64;
+        let cutoff = now - threshold_secs;
+
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE videos
+                 SET status = 'pending',
+                     claimed_by = NULL,
+                     claimed_at = NULL,
+                     updated_at = ?1
+                 WHERE status = 'in_progress'
+                   AND claimed_at IS NOT NULL
+                   AND claimed_at < ?2",
+                params![now, cutoff],
+            )
+            .context("UPDATE videos for sweep_stale_claims")?;
+
+        if changed > 0 {
+            tracing::info!(recovered = changed, threshold_secs, "sweep_stale_claims");
+        }
+
+        Ok(changed)
+    }
 }
 
 impl Store {

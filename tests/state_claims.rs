@@ -353,3 +353,118 @@ fn mark_terminal_failure_with_stale_claim_returns_zero() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn sweep_stale_claims_recovers_stale_row() -> anyhow::Result<()> {
+    use rusqlite::Connection;
+    use std::time::Duration;
+    use uu_tiktok::state::Store;
+
+    let tmp = tempfile::TempDir::new()?;
+    let path = tmp.path().join("state.sqlite");
+    let mut store = Store::open(&path)?;
+    store.upsert_video("vid_a", "https://example/a", false)?;
+    let _claim = store.claim_next("worker-crashed")?.expect("claim");
+
+    // Backdate claimed_at via a raw UPDATE so the row appears stale.
+    {
+        let raw = Connection::open(&path)?;
+        raw.execute(
+            "UPDATE videos SET claimed_at = ?1 WHERE video_id = 'vid_a'",
+            [0_i64], // 1970 — definitely stale
+        )?;
+    }
+
+    let recovered = store.sweep_stale_claims(Duration::from_secs(60))?;
+    assert_eq!(recovered, 1);
+
+    // Confirm row is back to pending with cleared claim metadata.
+    let row = store.get_video_for_test("vid_a")?.expect("row present");
+    assert_eq!(row.status, "pending");
+
+    let raw = Connection::open(&path)?;
+    let (cb, ca): (Option<String>, Option<i64>) = raw.query_row(
+        "SELECT claimed_by, claimed_at FROM videos WHERE video_id = 'vid_a'",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    assert_eq!(cb, None);
+    assert_eq!(ca, None);
+
+    // attempt_count is NOT bumped by sweep (0024).
+    assert_eq!(row.attempt_count, 1, "attempt_count unchanged by sweep");
+
+    // Carry-forward from T6/T7 review: sweep MUST NOT emit a
+    // video_events row (0024: sweep is operator-recovery, not an
+    // application event; tracing::info! is the only record).
+    let event_count: i64 = raw.query_row(
+        "SELECT COUNT(*) FROM video_events WHERE video_id = 'vid_a'",
+        [],
+        |r| r.get(0),
+    )?;
+    // claim_next emits a 'claimed' event — that's the only event we
+    // expect for this row. The sweep itself must add zero.
+    let sweep_event_count: i64 = raw.query_row(
+        "SELECT COUNT(*) FROM video_events
+         WHERE video_id = 'vid_a' AND event_type LIKE '%sweep%'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(
+        sweep_event_count, 0,
+        "sweep must not emit a video_events row"
+    );
+    // Sanity check that the underlying total is reasonable (just the
+    // claim_next 'claimed' event, no more).
+    assert_eq!(
+        event_count, 1,
+        "only the claim_next 'claimed' event should be present"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn sweep_stale_claims_leaves_fresh_claim_alone() -> anyhow::Result<()> {
+    use std::time::Duration;
+    use uu_tiktok::state::Store;
+
+    let tmp = tempfile::TempDir::new()?;
+    let path = tmp.path().join("state.sqlite");
+    let mut store = Store::open(&path)?;
+    store.upsert_video("vid_a", "https://example/a", false)?;
+    let _claim = store.claim_next("worker-1")?.expect("claim");
+
+    // No backdating — claimed_at is `unix_now()`, well within any sane
+    // threshold.
+    let recovered = store.sweep_stale_claims(Duration::from_secs(60 * 60 * 24))?;
+    assert_eq!(recovered, 0, "fresh claim should not be swept");
+
+    let row = store.get_video_for_test("vid_a")?.expect("row present");
+    assert_eq!(row.status, "in_progress");
+    Ok(())
+}
+
+#[test]
+fn sweep_stale_claims_is_idempotent() -> anyhow::Result<()> {
+    use std::time::Duration;
+    use uu_tiktok::state::Store;
+
+    let tmp = tempfile::TempDir::new()?;
+    let path = tmp.path().join("state.sqlite");
+    let mut store = Store::open(&path)?;
+    store.upsert_video("vid_a", "https://example/a", false)?;
+    store.claim_next("w1")?;
+
+    // First sweep on no-stale: 0.
+    assert_eq!(
+        store.sweep_stale_claims(Duration::from_secs(60 * 60 * 24))?,
+        0
+    );
+    // Second sweep on no-stale: still 0.
+    assert_eq!(
+        store.sweep_stale_claims(Duration::from_secs(60 * 60 * 24))?,
+        0
+    );
+    Ok(())
+}
