@@ -343,6 +343,11 @@ impl Store {
     /// Epic 3's typed RetryableKind serializes via tag()/message() into the
     /// same columns; no schema change at that point — just the caller switching
     /// from string literals to enum projections.
+    ///
+    /// The `terminal_reason`/`terminal_message` columns are NOT cleared on
+    /// this flip — they're retained as diagnostic history if the row was
+    /// previously terminal (e.g., operator manually requeued). Symmetric:
+    /// `mark_terminal_failure` likewise preserves prior `last_retryable_*`.
     // T9 wires this into pipeline.rs; no bin consumer until then.
     #[allow(dead_code)]
     pub fn mark_retryable_failure(
@@ -402,6 +407,13 @@ impl Store {
     /// 0002 cleanup discipline: `#[allow(dead_code)]` lives on this method
     /// until Epic 3's first caller wires it. The closing task of Epic 3's
     /// classifier work removes the attribute.
+    ///
+    /// The `last_retryable_kind`/`last_retryable_message` columns are NOT
+    /// cleared on this flip — they're retained as diagnostic history so an
+    /// operator inspecting a terminal row can see what retryable failures
+    /// preceded it (e.g., "retried 3× as FetchTimeout, then gave up as
+    /// VideoUnavailable"). Symmetric: `mark_retryable_failure` likewise
+    /// preserves prior `terminal_*`.
     #[allow(dead_code)]
     pub fn mark_terminal_failure(
         &mut self,

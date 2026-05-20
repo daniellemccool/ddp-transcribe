@@ -285,6 +285,27 @@ fn mark_terminal_failure_flips_status_and_records_columns() -> anyhow::Result<()
         "claimed_at must be NULL after terminal flip"
     );
 
+    // Verify the gated video_events INSERT fired with the expected shape.
+    let (event_type, evt_worker, detail): (String, Option<String>, Option<String>) = raw
+        .query_row(
+            "SELECT event_type, worker_id, detail_json
+         FROM video_events
+         WHERE video_id = ?1 AND event_type = 'failed_terminal'",
+            ["vid_a"],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+    assert_eq!(event_type, "failed_terminal");
+    assert_eq!(evt_worker.as_deref(), Some("worker-1"));
+    let detail = detail.expect("detail_json populated");
+    assert!(
+        detail.contains("VideoUnavailable"),
+        "detail JSON includes reason: {detail}"
+    );
+    assert!(
+        detail.contains("yt-dlp returned 410 Gone"),
+        "detail JSON includes message: {detail}"
+    );
+
     Ok(())
 }
 
