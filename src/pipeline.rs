@@ -21,6 +21,12 @@ pub struct ProcessOptions {
     /// Threaded from `Config::transcribe_timeout`. Per-call deadline handed
     /// to `Transcriber::transcribe`; 0012's abort_callback polls it.
     pub transcribe_timeout: Duration,
+    /// Threshold for `sweep_stale_claims` at the top of `run_serial`.
+    /// Default 30 min per 0024; constructed from `Config::stale_claim_threshold`
+    /// in main.rs. T9 (next task) reads this in `run_serial`; suppress
+    /// dead_code until that task lands.
+    #[allow(dead_code)]
+    pub stale_claim_threshold: Duration,
 }
 
 #[derive(Debug, Default)]

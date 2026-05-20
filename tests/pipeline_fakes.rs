@@ -77,6 +77,7 @@ async fn pipeline_processes_one_video_to_succeeded_with_fake_fetcher() {
         max_videos: Some(1),
         compute_lang_probs: false,
         transcribe_timeout: Duration::from_secs(60),
+        stale_claim_threshold: Duration::from_secs(30 * 60),
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts)
@@ -157,6 +158,7 @@ async fn pipeline_writes_raw_signals_to_json_artifact() {
         max_videos: Some(1),
         compute_lang_probs: false,
         transcribe_timeout: Duration::from_secs(60),
+        stale_claim_threshold: Duration::from_secs(30 * 60),
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts)

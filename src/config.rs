@@ -29,6 +29,9 @@ pub struct Config {
     pub ytdlp_timeout: Duration,
     pub transcribe_timeout: Duration,
     pub compute_lang_probs: bool,
+    /// Stale-claim sweep threshold (0024). Default 30 min if CLI/env
+    /// did not supply a value.
+    pub stale_claim_threshold: Duration,
 }
 
 impl Config {
@@ -48,6 +51,9 @@ impl Config {
                 ytdlp_timeout: Duration::from_secs(300),
                 transcribe_timeout: Duration::from_secs(600),
                 compute_lang_probs: args.compute_lang_probs,
+                stale_claim_threshold: args
+                    .stale_claim_threshold
+                    .unwrap_or_else(|| Duration::from_secs(30 * 60)),
             },
         }
     }
@@ -72,6 +78,7 @@ mod tests {
             log_format: crate::cli::LogFormat::Human,
             whisper_model: None,
             compute_lang_probs: false,
+            stale_claim_threshold: None,
         }
     }
 
@@ -101,5 +108,20 @@ mod tests {
             cfg.whisper_model_path,
             PathBuf::from("/custom/ggml-small.bin")
         );
+    }
+
+    #[test]
+    fn default_stale_claim_threshold_is_30_min() {
+        let cfg = Config::from_args(&dev_args());
+        assert_eq!(cfg.stale_claim_threshold, Duration::from_secs(30 * 60));
+    }
+
+    #[test]
+    fn stale_claim_threshold_parsed_from_args() {
+        use std::str::FromStr;
+        let mut args = dev_args();
+        args.stale_claim_threshold = Some(humantime::Duration::from_str("5m").unwrap().into());
+        let cfg = Config::from_args(&args);
+        assert_eq!(cfg.stale_claim_threshold, Duration::from_secs(5 * 60));
     }
 }

@@ -41,6 +41,16 @@ pub struct GlobalArgs {
     /// Costs one extra encoder pass per video; default false.
     #[arg(long, env = "UU_TIKTOK_COMPUTE_LANG_PROBS", global = true)]
     pub compute_lang_probs: bool,
+
+    /// Threshold for sweeping stale (process-crashed) claims back to pending.
+    /// Accepts humantime strings: "30m" (default), "1h", "45s".
+    /// 0024: 30-min default is well above bake worst-case (~25s).
+    #[arg(
+        long,
+        env = "UU_TIKTOK_STALE_CLAIM_THRESHOLD",
+        value_parser = humantime::parse_duration
+    )]
+    pub stale_claim_threshold: Option<std::time::Duration>,
 }
 
 #[derive(Subcommand, Debug)]

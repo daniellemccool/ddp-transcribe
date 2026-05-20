@@ -101,6 +101,7 @@ async fn main() -> Result<()> {
                 max_videos,
                 compute_lang_probs: cfg.compute_lang_probs,
                 transcribe_timeout: cfg.transcribe_timeout,
+                stale_claim_threshold: cfg.stale_claim_threshold,
             };
 
             // Shut the engine down whether the serial loop succeeded or
