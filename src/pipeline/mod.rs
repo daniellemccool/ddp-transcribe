@@ -1,3 +1,23 @@
+//! Pipeline orchestration: shared types + helpers used by both the serial
+//! loop ([`run_serial`]) and the Phase 2 pipelined orchestrator
+//! ([`run_pipelined`]).
+//!
+//! Module layout (T15): split into `mod.rs` (this file) + `serial.rs` +
+//! `pipelined.rs`. The single-file `pipeline.rs` crossed the 250-line
+//! production-code threshold from the T15 brief once Phase 1 review
+//! carry-forward (StaleAfterSuccess) landed, and `run_pipelined` will grow
+//! substantially across T16/T17/T18 (worker tasks + JoinSet +
+//! CancellationToken). Splitting now keeps each downstream task's diff
+//! scoped to one file.
+//!
+//! Shared items live here so both submodules can call them without crossing
+//! a `pub(crate)` boundary twice:
+//! - [`ProcessOptions`], [`ProcessStats`], [`ProcessOutcome`], [`SharedStore`]
+//! - [`fetch_and_decode`] — phases 1+2 (acquire + decode WAV)
+//! - [`transcribe_and_write`] — phases 3+4 (transcribe + write artifacts +
+//!   mark_succeeded + cleanup). 0008 invariant lives here: artifacts are
+//!   durable on disk BEFORE `mark_succeeded`.
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -10,6 +30,17 @@ use crate::output::artifacts::{RawSignals, TranscriptMetadata};
 use crate::output::{artifacts, shard};
 use crate::state::{Claim, Store, SuccessArtifacts};
 use crate::transcribe::{PerCallConfig, Transcriber};
+
+mod pipelined;
+mod serial;
+
+// `run_pipelined` and `SharedStore` are exposed for T18 — the bin target
+// (`main.rs`) doesn't reach for them yet, so the bin compilation marks
+// these re-exports as unused. Suppressed per 0002 until T18 wires
+// `--pipelined`.
+#[allow(unused_imports)]
+pub use pipelined::{run_pipelined, SharedStore};
+pub use serial::run_serial;
 
 pub struct ProcessOptions {
     pub worker_id: String,
@@ -68,81 +99,17 @@ pub enum ProcessOutcome {
     StaleAfterSuccess,
 }
 
-pub async fn run_serial(
-    store: &mut Store,
+/// Phase 1+2: acquire the audio and decode it to f32 PCM samples.
+///
+/// Returns the owned samples + the WAV path on disk (needed downstream so
+/// `transcribe_and_write` can remove the WAV after the DB commit).
+///
+/// Used by `run_serial`'s `process_one` AND (in Phase 2) by the fetch
+/// workers in `pipelined::fetch_worker`.
+pub(crate) async fn fetch_and_decode(
     fetcher: &dyn VideoFetcher,
-    transcriber: &dyn Transcriber,
-    opts: ProcessOptions,
-) -> Result<ProcessStats> {
-    let mut stats = ProcessStats::default();
-    let max = opts.max_videos.unwrap_or(usize::MAX);
-
-    // 0024: recover any rows left in_progress by a crashed earlier run.
-    let recovered = store
-        .sweep_stale_claims(opts.stale_claim_threshold)
-        .context("sweep_stale_claims at run_serial start")?;
-    if recovered > 0 {
-        tracing::info!(recovered, "sweep_stale_claims recovered abandoned rows");
-    }
-
-    // Loop guard: count claimed rows against `max`, not `claimed + failed`.
-    // The old form was correct only under Plan A's fail-fast (failed was
-    // always 0 inside the live loop). With continue-on-failure each failure
-    // would double-count, exiting early. `claimed = succeeded +
-    // stale_after_success + failed` post-loop.
-    while stats.claimed < max {
-        let claim = match store.claim_next(&opts.worker_id)? {
-            Some(c) => c,
-            None => break,
-        };
-        stats.claimed += 1;
-
-        match process_one(store, fetcher, transcriber, &claim, &opts).await {
-            Ok(ProcessOutcome::Succeeded) => stats.succeeded += 1,
-            Ok(ProcessOutcome::StaleAfterSuccess) => {
-                // Artifacts durable per 0008; row sits in pending and will
-                // be re-claimed. Not counted as success or failure.
-                stats.stale_after_success += 1;
-            }
-            Err(e) => {
-                stats.failed += 1;
-                let msg = format!("{e:#}"); // chain-aware via anyhow
-                tracing::error!(
-                    video_id = claim.video_id.as_str(),
-                    error = %e,
-                    "video failed; classifying as failed_retryable"
-                );
-                // Epic 2 MVP: single placeholder kind "FetchOrTranscribe"
-                // per 0023. Epic 3 replaces this with typed classifier
-                // dispatch (RetryableKind enum projection).
-                store
-                    .mark_retryable_failure(
-                        &claim.video_id,
-                        &opts.worker_id,
-                        "FetchOrTranscribe",
-                        &msg,
-                    )
-                    .with_context(|| format!("mark_retryable_failure for {}", claim.video_id))?;
-            }
-        }
-    }
-
-    Ok(stats)
-}
-
-async fn process_one(
-    store: &mut Store,
-    fetcher: &dyn VideoFetcher,
-    transcriber: &dyn Transcriber,
     claim: &Claim,
-    opts: &ProcessOptions,
-) -> Result<ProcessOutcome> {
-    tracing::info!(
-        video_id = claim.video_id.as_str(),
-        attempt = claim.attempt_count,
-        "claimed"
-    );
-
+) -> Result<(Vec<f32>, PathBuf)> {
     let acquisition = fetcher
         .acquire(&claim.video_id, &claim.source_url)
         .await
@@ -159,10 +126,46 @@ async fn process_one(
 
     // Decode WAV → owned Vec<f32> samples (0014: 16 kHz mono validated
     // inside decode_wav). Owned samples cross the worker-thread boundary
-    // per 0016. Compute duration_s from sample count once (16 kHz is the
-    // 0014 invariant); avoids a second pass via ffprobe.
+    // per 0016.
     let samples = audio::decode_wav(&wav_path)
         .with_context(|| format!("decoding wav {}", wav_path.display()))?;
+
+    Ok((samples, wav_path))
+}
+
+/// Phase 3+4: transcribe → write artifacts → mark_succeeded → cleanup wav.
+///
+/// **0008 invariant** lives here: txt + json are durable on disk BEFORE
+/// `store.mark_succeeded` is called. A crash between artifact writes and
+/// `mark_succeeded` leaves the row in `in_progress`, which the next run's
+/// `sweep_stale_claims` reclaims (per 0024); the artifacts on disk are
+/// re-written on the next attempt (atomic_write is idempotent).
+///
+/// Returns [`ProcessOutcome::StaleAfterSuccess`] when `mark_succeeded`
+/// updates 0 rows — i.e., a concurrent sweep (or other worker) cleared
+/// the claim during transcription. Artifacts are durable per 0008; the
+/// row sits in `pending` and will be re-claimed. Deviates from the T15
+/// brief's `Result<()>` signature (per 0003) because that brief snippet
+/// predates the T5-review carry-forward.
+///
+/// `fetcher_name` is passed as an argument rather than added to
+/// `ProcessOptions::fetcher_name` (per 0003 brief deviation) — keeps the
+/// caller's existing `fetcher.name()` source-of-truth, avoids touching
+/// `Config::from_args` and three test fixture constructions.
+///
+/// Used by `run_serial`'s `process_one` AND (in Phase 2) by the transcribe
+/// worker in `pipelined::transcribe_worker`.
+pub(crate) async fn transcribe_and_write(
+    store: &mut Store,
+    transcriber: &dyn Transcriber,
+    claim: &Claim,
+    samples: Vec<f32>,
+    wav_path: PathBuf,
+    fetcher_name: &'static str,
+    opts: &ProcessOptions,
+) -> Result<ProcessOutcome> {
+    // Compute duration_s from sample count once (16 kHz is the 0014
+    // invariant); avoids a second pass via ffprobe.
     let duration_s = Some(samples.len() as f64 / 16_000.0);
 
     // Epic 1 stays auto-detect-only (PerCallConfig::default().language == None).
@@ -202,7 +205,7 @@ async fn process_one(
         duration_s,
         language_detected: Some(transcribe_output.language.clone()),
         transcribed_at: Utc::now().to_rfc3339(),
-        fetcher: fetcher.name().to_string(),
+        fetcher: fetcher_name.to_string(),
         transcript_source: transcriber.name().to_string(),
         model: transcribe_output.model_id.clone(),
         raw_signals: Some(RawSignals::from_transcribe_output(&transcribe_output)),
@@ -223,7 +226,7 @@ async fn process_one(
         SuccessArtifacts {
             duration_s,
             language_detected: Some(transcribe_output.language.clone()),
-            fetcher: fetcher.name(),
+            fetcher: fetcher_name,
             transcript_source: transcriber.name(),
         },
     )?;
@@ -259,129 +262,4 @@ async fn process_one(
 
     tracing::info!(video_id = claim.video_id.as_str(), "succeeded");
     Ok(ProcessOutcome::Succeeded)
-}
-
-#[cfg(test)]
-mod tests {
-    //! Unit tests for `process_one` — placed in-module so the private
-    //! function is reachable without a public re-export. The integration
-    //! tests in `tests/pipeline_fakes.rs` exercise `run_serial`.
-    use super::*;
-    use crate::errors::TranscribeError;
-    use crate::fetcher::{Acquisition, FakeFetcher, VideoFetcher};
-    use crate::state::Store;
-    use crate::transcribe::{PerCallConfig, TranscribeOutput, Transcriber};
-    use async_trait::async_trait;
-    use std::collections::HashMap;
-    use std::path::PathBuf;
-    use std::sync::Mutex;
-    use tempfile::TempDir;
-
-    struct ScriptedTranscriber {
-        output: TranscribeOutput,
-    }
-
-    #[async_trait]
-    impl Transcriber for ScriptedTranscriber {
-        async fn transcribe(
-            &self,
-            _samples: Vec<f32>,
-            _config: PerCallConfig,
-            _timeout: Duration,
-        ) -> Result<TranscribeOutput, TranscribeError> {
-            Ok(self.output.clone())
-        }
-        fn name(&self) -> &'static str {
-            "scripted"
-        }
-    }
-
-    fn silence_wav() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/audio/silence_16khz_mono.wav")
-    }
-
-    /// T5-review carry-forward: `process_one` MUST surface a 0-row
-    /// `mark_succeeded` return as `ProcessOutcome::StaleAfterSuccess`,
-    /// not as silent success. Synthesize the path by sweeping the row
-    /// back to pending (with `Duration::ZERO`) between `claim_next`
-    /// and `process_one`'s `mark_succeeded`.
-    #[tokio::test]
-    async fn process_one_returns_stale_after_success_on_mark_succeeded_zero() -> anyhow::Result<()>
-    {
-        let tmp = TempDir::new()?;
-        let mut store = Store::open(&tmp.path().join("state.sqlite"))?;
-        store.upsert_video("vid_a", "https://example/a", false)?;
-
-        // Stage a real WAV fixture for the FakeFetcher.
-        let fake_wav = tmp.path().join("fake.wav");
-        std::fs::copy(silence_wav(), &fake_wav)?;
-        let map = HashMap::from([("vid_a".to_string(), fake_wav.clone())]);
-        let fetcher = FakeFetcher {
-            canned: Mutex::new(map),
-            always_fails: false,
-        };
-        let transcriber = ScriptedTranscriber {
-            output: TranscribeOutput {
-                text: "hello".into(),
-                language: "en".into(),
-                lang_probs: None,
-                segments: vec![],
-                model_id: "test.bin".into(),
-            },
-        };
-
-        // Claim the row, then sweep with Duration::ZERO so claimed_at < now
-        // and the row flips back to pending. mark_succeeded inside
-        // process_one will then return 0 (predicate fails: status != 'in_progress').
-        let claim = store.claim_next("worker-1")?.expect("first claim");
-        // Sleep 1s so `claimed_at < now` after the sweep cutoff (sweep uses
-        // unix_now() - threshold.as_secs() in seconds resolution; zero
-        // threshold means claimed_at < now, but timestamps share the same
-        // second on a fast claim. Bump to ensure inequality.)
-        std::thread::sleep(Duration::from_secs(1));
-        let swept = store.sweep_stale_claims(Duration::ZERO)?;
-        assert_eq!(swept, 1, "row must sweep back to pending");
-
-        // Sanity check the fetcher returns the canned audio (defensive —
-        // the `Acquisition` variant could change).
-        let acq = fetcher.acquire("vid_a", "https://example/a").await?;
-        assert!(matches!(acq, Acquisition::AudioFile(_)));
-
-        let opts = ProcessOptions {
-            worker_id: "worker-1".into(),
-            transcripts_root: tmp.path().join("transcripts"),
-            max_videos: Some(1),
-            compute_lang_probs: false,
-            transcribe_timeout: Duration::from_secs(5),
-            stale_claim_threshold: Duration::from_secs(60),
-            download_workers: 3,
-            channel_capacity: 2,
-        };
-
-        // Use the same Claim returned by claim_next — process_one needs
-        // worker_id parity with the original claim for the predicate to
-        // match in the happy path; here it shouldn't because the sweep
-        // cleared claimed_by.
-        let outcome = process_one(&mut store, &fetcher, &transcriber, &claim, &opts).await?;
-        assert_eq!(
-            outcome,
-            ProcessOutcome::StaleAfterSuccess,
-            "mark_succeeded returned 0 → StaleAfterSuccess"
-        );
-
-        // Row sits in pending (artifacts durable per 0008; will be re-claimed).
-        let row = store.get_video_for_test("vid_a")?.expect("row");
-        assert_eq!(row.status, "pending");
-
-        // Artifacts on disk (0008 invariant — written before mark_succeeded).
-        let txt = tmp.path().join("transcripts/_a/vid_a.txt");
-        assert!(
-            txt.exists(),
-            "transcript artifact must exist: {}",
-            txt.display()
-        );
-
-        Ok(())
-    }
 }
