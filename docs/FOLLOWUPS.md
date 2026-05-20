@@ -50,11 +50,9 @@ lines 120-148.
 - T10: `claim_next` polling semantics → Epic 2 (explicit sleep/backoff policy)
 - T10: Missing round-trip test — succeeded not re-claimable → Epic 2 (add to state_claims tests)
 - T5-Epic1: Worker-side closed-reply path silently swallows error → Epic 2 (tracing context)
-- T7: Mutator test parity — backport `video_events` assertions to T5/T6; no-event-on-stale across all three → Epic 2 cleanup (before Phase 2 close)
-- T8: `sweep_stale_claims` hardening — `as i64` overflow, `threshold==0` semantics, future-`claimed_at` coverage → Epic 2 cleanup (before Phase 2 close) OR Plan C
-- T9: `mark_retryable_failure` Ok(0) silently swallowed in `run_serial` (symmetric to T5 carry-forward) → Phase 2 (T17/T18 concurrent workers)
-- T9: failure-classification test enrichment — column-value assertions, transcribe-failure variant → Epic 2 cleanup (before Phase 2 close)
 - T18: `--max-videos` ignored by `run_pipelined` (silent regression from `run_serial`) → Epic 2 cleanup (before Phase 2 close)
+- T16: `fetch_worker` cancellation latency bounded by largest await, not by `token.cancel()` → Epic 2 close OR Epic 3 graceful-shutdown
+- T17: sync `write_artifacts_and_mark` inside `tokio::sync::Mutex` guard inside async fn can stall under `TOKIO_WORKER_THREADS=1` → Epic 2 close OR Epic 5 ops-hygiene
 - Full Epic 2 entries: [followups/epic-2.md](followups/epic-2.md)
 
 **Epic 3 (failure classification taxonomy)**
@@ -95,4 +93,5 @@ lines 120-148.
 - T13-Epic1: 0013 backend assertion must be `cfg(feature="cuda")`-gated → audited 2026-05-18, NOT confirmed; deferred to Epic 5 cleanup
 - T7-Epic1: Revisit `SamplingStrategy::Greedy { best_of }` after T13 bake → unscoped tuning followup (see also `bake-findings.md`)
 - T8-Epic1: Diagnostic log when `lang_detect`'s top id disagrees with primary inference → unscoped diagnostic (see also `bake-findings.md`)
+- T13/T19/T16-Epic2: plan-brief library-API drift → Epic 3 planning kickoff (checklist adoption)
 - Full cross-epic entries: [followups/cross-epic.md](followups/cross-epic.md)

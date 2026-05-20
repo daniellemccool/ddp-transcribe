@@ -468,11 +468,27 @@ impl Store {
     /// Per 0024: no artifact validation, no attempt_count bump. The
     /// sweep is operator-recovery semantics; application-retry semantics
     /// (and the `attempt_count` ladder) belong to Epic 3's classifier.
+    ///
+    /// **`threshold == 0` semantics:** cutoff == now, so the predicate is
+    /// `claimed_at < now` — same-second claims survive the sweep (the
+    /// timestamp has second resolution; a claim made in the same second as
+    /// the sweep call is NOT considered stale). This is intentional; callers
+    /// that want "all in_progress rows" must backdate claimed_at or wait one
+    /// second past the claim before sweeping with `Duration::ZERO`.
+    ///
+    /// **Clock-skew note:** rows with `claimed_at > now` (future-valued) are
+    /// never swept — the predicate `claimed_at < cutoff` is false when
+    /// `claimed_at > now`. This is correct clock-skew behavior; no special
+    /// handling is needed.
     // T9 wires this at the top of `run_serial` per 0024.
     pub fn sweep_stale_claims(&mut self, threshold: std::time::Duration) -> Result<usize> {
         let now = unix_now();
-        let threshold_secs = threshold.as_secs() as i64;
-        let cutoff = now - threshold_secs;
+        // Saturating cast: absurd Duration values (e.g., u64::MAX seconds)
+        // clamp to i64::MAX rather than wrapping. At the 30-min default this
+        // never fires; robustness-by-construction for callers that pass
+        // large thresholds (e.g., Duration::MAX in tests).
+        let threshold_secs = i64::try_from(threshold.as_secs()).unwrap_or(i64::MAX);
+        let cutoff = now.saturating_sub(threshold_secs);
 
         let changed = self
             .conn

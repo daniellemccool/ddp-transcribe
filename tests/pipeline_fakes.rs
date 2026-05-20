@@ -307,9 +307,122 @@ async fn run_serial_classifies_fetch_failure_as_retryable_and_continues() -> any
     assert_eq!(stats.failed, 2);
 
     // Both rows should be failed_retryable with the placeholder kind.
+    // 1C enrichment: assert column values + retry-safety invariant at pipeline layer.
     for vid in ["vid_a", "vid_b"] {
         let row = store.get_video_for_test(vid)?.expect("row");
         assert_eq!(row.status, "failed_retryable", "video {vid}");
+    }
+
+    // 1C enrichment: assert kind, message, and claim-slot cleared (retry-safety
+    // invariant) via raw SQL — mirrors the Store-layer assertion in
+    // state_claims::mark_retryable_failure_flips_status_and_records_columns
+    // but now exercised end-to-end through the pipeline.
+    let raw = rusqlite::Connection::open(tmp.path().join("state.sqlite"))?;
+    for vid in ["vid_a", "vid_b"] {
+        let (rk, rm, cb, ca): (Option<String>, Option<String>, Option<String>, Option<i64>) = raw
+            .query_row(
+            "SELECT last_retryable_kind, last_retryable_message, claimed_by, claimed_at
+                 FROM videos WHERE video_id = ?1",
+            [vid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        assert_eq!(
+            rk.as_deref(),
+            Some("FetchOrTranscribe"),
+            "video {vid}: placeholder kind"
+        );
+        let msg = rm.expect("last_retryable_message populated");
+        assert!(
+            !msg.is_empty(),
+            "video {vid}: last_retryable_message must carry the error chain"
+        );
+        assert_eq!(
+            cb, None,
+            "video {vid}: claimed_by must be NULL after retryable flip (retry-safety)"
+        );
+        assert_eq!(
+            ca, None,
+            "video {vid}: claimed_at must be NULL after retryable flip (retry-safety)"
+        );
+    }
+    Ok(())
+}
+
+/// 1C (symmetric): a failing transcriber leaves both rows as `failed_retryable`
+/// with the same placeholder kind as the fetch-failure variant. Confirms both
+/// arms (fetch and transcribe) route through the same Err branch in `run_serial`.
+#[tokio::test]
+async fn run_serial_classifies_transcribe_failure_as_retryable_and_continues() -> anyhow::Result<()>
+{
+    let tmp = TempDir::new()?;
+    let mut store = Store::open(&tmp.path().join("state.sqlite"))?;
+    store.upsert_video("vid_a", "https://example/a", false)?;
+    store.upsert_video("vid_b", "https://example/b", false)?;
+
+    // Stage real WAVs so fetch succeeds; only the transcriber fails.
+    let fake_wav_a = tmp.path().join("vid_a.wav");
+    let fake_wav_b = tmp.path().join("vid_b.wav");
+    std::fs::copy(silence_fixture(), &fake_wav_a)?;
+    std::fs::copy(silence_fixture(), &fake_wav_b)?;
+    let map = HashMap::from([
+        ("vid_a".to_string(), fake_wav_a.clone()),
+        ("vid_b".to_string(), fake_wav_b.clone()),
+    ]);
+    let fetcher = FakeFetcher {
+        canned: Mutex::new(map),
+        always_fails: false,
+        first_call_gate: tokio::sync::Mutex::new(None),
+    };
+    let transcriber = FakeTranscriber::always_fails_retryable();
+
+    let opts = ProcessOptions {
+        worker_id: "test-worker".into(),
+        transcripts_root: tmp.path().join("transcripts"),
+        max_videos: Some(2),
+        compute_lang_probs: false,
+        transcribe_timeout: Duration::from_secs(5),
+        stale_claim_threshold: Duration::from_secs(60),
+        download_workers: 3,
+        channel_capacity: 2,
+    };
+
+    let stats = run_serial(&mut store, &fetcher, &transcriber, opts).await?;
+    assert_eq!(stats.claimed, 2);
+    assert_eq!(stats.succeeded, 0);
+    assert_eq!(stats.failed, 2);
+
+    let raw = rusqlite::Connection::open(tmp.path().join("state.sqlite"))?;
+    for vid in ["vid_a", "vid_b"] {
+        let (status, rk, rm, cb, ca): (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+        ) = raw.query_row(
+            "SELECT status, last_retryable_kind, last_retryable_message, claimed_by, claimed_at
+             FROM videos WHERE video_id = ?1",
+            [vid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )?;
+        assert_eq!(status, "failed_retryable", "video {vid}");
+        assert_eq!(
+            rk.as_deref(),
+            Some("FetchOrTranscribe"),
+            "video {vid}: same placeholder kind regardless of which arm failed"
+        );
+        assert!(
+            rm.as_ref().map_or(false, |m| !m.is_empty()),
+            "video {vid}: last_retryable_message populated"
+        );
+        assert_eq!(
+            cb, None,
+            "video {vid}: claimed_by cleared after retryable flip"
+        );
+        assert_eq!(
+            ca, None,
+            "video {vid}: claimed_at cleared after retryable flip"
+        );
     }
     Ok(())
 }

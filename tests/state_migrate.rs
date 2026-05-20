@@ -189,3 +189,208 @@ fn migrate_pre_plan_a_db_without_meta_row_records_current_version() -> Result<()
     let _store = Store::open(&path)?;
     Ok(())
 }
+
+/// Item 3 — migration row-survival: pre-existing video rows with known column
+/// values must survive the v1→v2 migration with all original values intact and
+/// the four new nullable v2 columns defaulting to NULL. Pins the behavioral
+/// contract that `ALTER TABLE ADD COLUMN` (with NULL default) does not silently
+/// overwrite, truncate, or corrupt rows whose data predates the migration.
+#[test]
+fn migrate_preserves_existing_video_rows_with_null_new_columns() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let path = tmp.path().join("state.sqlite");
+    synthesize_v1_db(&path)?;
+
+    // Insert two known rows before migrating. Use raw SQL so we control every
+    // column value precisely — the v1 schema lacks the Epic 2 columns, so
+    // `Store::upsert_video` (which opens a v2 Store) would fail.
+    {
+        let raw = Connection::open(&path)?;
+        // Row 1: a succeeded video with all optional fields populated.
+        raw.execute(
+            "INSERT INTO videos
+                 (video_id, source_url, canonical, status,
+                  claimed_by, claimed_at, attempt_count,
+                  succeeded_at, duration_s, language_detected,
+                  fetcher, transcript_source, first_seen_at, updated_at)
+             VALUES (?1, ?2, 1, 'succeeded',
+                     NULL, NULL, 3,
+                     1716237600, 45.7, 'en',
+                     'ytdlp', 'whisper.cpp', 1716230000, 1716237600)",
+            rusqlite::params![
+                "7234567890123456789",
+                "https://www.tiktok.com/@user/video/7234567890123456789",
+            ],
+        )?;
+        // Row 2: a pending video with minimal optional fields.
+        raw.execute(
+            "INSERT INTO videos
+                 (video_id, source_url, canonical, status,
+                  claimed_by, claimed_at, attempt_count,
+                  succeeded_at, duration_s, language_detected,
+                  fetcher, transcript_source, first_seen_at, updated_at)
+             VALUES (?1, ?2, 0, 'pending',
+                     NULL, NULL, 0,
+                     NULL, NULL, NULL,
+                     NULL, NULL, 1716230001, 1716230001)",
+            rusqlite::params![
+                "9876543210987654321",
+                "https://www.tiktok.com/@other/video/9876543210987654321",
+            ],
+        )?;
+    }
+
+    run_migrate(&path)?;
+
+    // Post-migrate: all v1 column values must be intact; the four new v2
+    // columns must be NULL (ALTER TABLE ADD COLUMN defaults to NULL).
+    let raw = Connection::open(&path)?;
+
+    // Row 1 — succeeded video.
+    let (
+        source_url,
+        canonical,
+        status,
+        claimed_by,
+        claimed_at,
+        attempt_count,
+        succeeded_at,
+        duration_s,
+        language_detected,
+        fetcher,
+        transcript_source,
+        first_seen_at,
+        updated_at,
+        last_retryable_kind,
+        last_retryable_message,
+        terminal_reason,
+        terminal_message,
+    ): (
+        String,
+        i64,
+        String,
+        Option<String>,
+        Option<i64>,
+        i64,
+        Option<i64>,
+        Option<f64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        i64,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = raw.query_row(
+        "SELECT source_url, canonical, status, claimed_by, claimed_at, attempt_count,
+                    succeeded_at, duration_s, language_detected, fetcher, transcript_source,
+                    first_seen_at, updated_at,
+                    last_retryable_kind, last_retryable_message,
+                    terminal_reason, terminal_message
+             FROM videos WHERE video_id = ?1",
+        ["7234567890123456789"],
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+                r.get(9)?,
+                r.get(10)?,
+                r.get(11)?,
+                r.get(12)?,
+                r.get(13)?,
+                r.get(14)?,
+                r.get(15)?,
+                r.get(16)?,
+            ))
+        },
+    )?;
+
+    assert_eq!(
+        source_url, "https://www.tiktok.com/@user/video/7234567890123456789",
+        "source_url must survive migration"
+    );
+    assert_eq!(canonical, 1, "canonical must survive migration");
+    assert_eq!(status, "succeeded", "status must survive migration");
+    assert_eq!(claimed_by, None, "claimed_by must survive migration (NULL)");
+    assert_eq!(claimed_at, None, "claimed_at must survive migration (NULL)");
+    assert_eq!(attempt_count, 3, "attempt_count must survive migration");
+    assert_eq!(
+        succeeded_at,
+        Some(1716237600),
+        "succeeded_at must survive migration"
+    );
+    assert!(
+        (duration_s.unwrap() - 45.7).abs() < 1e-6,
+        "duration_s must survive migration"
+    );
+    assert_eq!(
+        language_detected.as_deref(),
+        Some("en"),
+        "language_detected must survive migration"
+    );
+    assert_eq!(
+        fetcher.as_deref(),
+        Some("ytdlp"),
+        "fetcher must survive migration"
+    );
+    assert_eq!(
+        transcript_source.as_deref(),
+        Some("whisper.cpp"),
+        "transcript_source must survive migration"
+    );
+    assert_eq!(
+        first_seen_at, 1716230000,
+        "first_seen_at must survive migration"
+    );
+    assert_eq!(updated_at, 1716237600, "updated_at must survive migration");
+    // v2 columns must be NULL — the ADD COLUMN default.
+    assert_eq!(
+        last_retryable_kind, None,
+        "last_retryable_kind must be NULL after migration on pre-existing row"
+    );
+    assert_eq!(
+        last_retryable_message, None,
+        "last_retryable_message must be NULL after migration on pre-existing row"
+    );
+    assert_eq!(
+        terminal_reason, None,
+        "terminal_reason must be NULL after migration on pre-existing row"
+    );
+    assert_eq!(
+        terminal_message, None,
+        "terminal_message must be NULL after migration on pre-existing row"
+    );
+
+    // Row 2 — pending video: spot-check v1 fields + v2 NULLs.
+    let (status2, attempt_count2, lrk2, tr2): (String, i64, Option<String>, Option<String>) = raw
+        .query_row(
+        "SELECT status, attempt_count, last_retryable_kind, terminal_reason
+             FROM videos WHERE video_id = ?1",
+        ["9876543210987654321"],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+    assert_eq!(status2, "pending", "row 2 status must survive migration");
+    assert_eq!(
+        attempt_count2, 0,
+        "row 2 attempt_count must survive migration"
+    );
+    assert_eq!(
+        lrk2, None,
+        "row 2 last_retryable_kind must be NULL after migration"
+    );
+    assert_eq!(
+        tr2, None,
+        "row 2 terminal_reason must be NULL after migration"
+    );
+
+    Ok(())
+}

@@ -208,6 +208,8 @@ Notes on the design:
 
 - **No polling.** 0026: drain semantics. Worker exits on `None`.
 
+- **Stale-after-failure test design (post-implementation correction, ADR 0003 deviation honesty):** The `fetch_worker_increments_stale_after_failure_on_swept_claim` test cannot be written as "pre-claim with a different worker_id to simulate Ok(0)" because `fetch_worker` only calls `mark_retryable_failure` on claims it made itself — the predicate `claimed_by = worker_id` always matches its own claim. The correct approach is to use a gated `FakeFetcher` (via `tokio::sync::Notify`) that suspends the worker's `fetcher.acquire()` call while the test sweeps the row via `Duration::ZERO` on the shared Store, then fires the gate to let the fetch return `Err`. This forces `mark_retryable_failure` to see `Ok(0)` (the row is no longer `in_progress AND claimed_by = worker_id` after the sweep cleared `claimed_by`). The committed test (`fetch_worker_increments_stale_after_failure_on_swept_claim`) uses this `gated_then_always_fails` pattern; see the test docstring for the deviation note.
+
 - [ ] **Step 4: Make `VideoFetcher` Arc-able for spawning across workers**
 
 `Arc<dyn VideoFetcher>` requires `VideoFetcher: Send + Sync + ?Sized` — confirm the trait already has those bounds (`grep 'trait VideoFetcher' src/fetcher/mod.rs`; per the earlier inspection, yes: `pub trait VideoFetcher: Send + Sync`). No trait change needed.

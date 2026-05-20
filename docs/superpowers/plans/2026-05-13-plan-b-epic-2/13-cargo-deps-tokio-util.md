@@ -32,6 +32,8 @@ Caret-pin (`"0.7"`) is intentional: tokio-util's `0.7` line tracks tokio's `1.x`
 
 The `sync` feature gates `CancellationToken`. No other tokio-util features are needed (`codec`, `io`, `compat` stay off).
 
+> **Note (post-implementation correction, ADR 0003 deviation honesty):** tokio-util 0.7 has no `sync` feature gate — the `sync` module (`CancellationToken` included) is compiled unconditionally. The T13 implementer discovered this at commit time: `cargo add tokio-util --features sync` silently succeeds but the feature key is a no-op. The committed `Cargo.toml` line is `tokio-util = "0.7"` (no features array) per the implementer's deviation disclosure. The feature-array form above is an artifact of plan-write-time API assumption; it should not be used as a template for future Cargo edits. Verify against the installed crate's `Cargo.toml` first (per the cross-epic library-API drift FOLLOWUP).
+
 - [ ] **Step 3: Verify the build**
 
 ```bash
@@ -94,7 +96,7 @@ Expected: clean. (No code changes, but the pre-commit hook runs anyway.)
 ```bash
 git add Cargo.toml Cargo.lock
 git commit -m "$(cat <<'EOF'
-feat(deps): add tokio-util = { version = "0.7", features = ["sync"] }
+feat(deps): add tokio-util = "0.7"
 
 Phase 2's supervision wiring (0025) uses
 `tokio_util::sync::CancellationToken` to signal coordinated shutdown
@@ -103,8 +105,8 @@ inheritance note (line 211) claimed tokio-util was "transitively
 present"; verified at plan-write time that it isn't —
 `grep 'tokio-util' Cargo.lock` empty.
 
-Caret-pinned on 0.7 to flow patch upgrades. `sync` feature gates
-CancellationToken; no other tokio-util features needed.
+Caret-pinned on 0.7 to flow patch upgrades. No features needed —
+tokio-util 0.7 compiles the sync module (and CancellationToken) unconditionally.
 
 This is a standalone cargo-deps task — matches Epic 1's convention
 (T2 was a clean standalone whisper-rs + hound add). Phase 2's

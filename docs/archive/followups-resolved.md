@@ -211,3 +211,140 @@ sweep should:
 
 Epic 2 is the natural home — that's when the broader Plan A → Plan B
 state-machine and config rationalization lands.
+
+---
+
+## Resolved by Plan B Epic 2 — pre-T20 cleanup (2026-05-20)
+
+Four Epic 2 entries resolved by the pre-T20 cleanup commit. All were
+carried as active-scope entries in `docs/followups/epic-2.md` and are
+archived here. Resolving SHA: this cleanup commit (pre-T20); use
+`git log --oneline --grep="pre-T20 cleanup"` to find the exact SHA.
+
+### Mutator test parity — backport `video_events` assertions to T5/T6; no-event-on-stale across all three
+
+**Found in:** T7 spec-compliance review (Sonnet + codex-advisor delegation per 0018).
+**Disposition:** Epic 2 cleanup; resolve before Phase 2 close (Epic 2 ships).
+**Trigger to revisit:** When approaching Phase 2 close, OR whenever T5/T6 happy-path tests are otherwise edited.
+**Resolved by:** this cleanup commit (pre-T20) — backported video_events shape assertions to T5 (`mark_succeeded_writes_status_and_event_in_one_transaction`) and T6 (`mark_retryable_failure_flips_status_and_records_columns`) happy-path tests; added no-event-on-stale assertions to all three stale-claim tests in `tests/state_claims.rs`.
+
+T7's review surfaced two coverage gaps in the symmetric mutator family
+(`mark_succeeded`, `mark_retryable_failure`, `mark_terminal_failure`):
+
+1. Only T7's happy-path test (after commit `0a8ad5a`) asserts the
+   `video_events` row exists with the expected `event_type`,
+   `worker_id`, and `detail_json` shape. T5 and T6 happy-path tests
+   exercise the UPDATE but never read the event row.
+
+2. None of the three stale-claim tests assert that NO `video_events`
+   row was inserted when the predicate rejected. The gating logic
+   (`if changed > 0`) is structurally simple and visible, but the
+   no-event invariant is part of the mutator contract and untested.
+
+Event INSERT shapes verified consistent across the three mutators:
+
+- `mark_succeeded` writes `(?1, ?2, 'succeeded', ?3, NULL)` —
+  worker_id at ?3, no detail.
+- `mark_retryable_failure` writes `(?1, ?2, 'failed_retryable',
+  ?3, ?4)` — worker_id + JSON detail with kind/message.
+- `mark_terminal_failure` writes `(?1, ?2, 'failed_terminal',
+  ?3, ?4)` — worker_id + JSON detail with reason/message.
+
+A backport pass should add the symmetric event-row assertions to
+T5/T6 happy-path tests and add no-event-on-stale-claim assertions to
+all three stale-claim tests. Estimated ~30 lines of test code across
+5 test functions. No source changes.
+
+Carried forward from codex-advisor review on commit `1d6b29c`;
+partially addressed by commit `0a8ad5a` (T7 only, per advisor's
+narrow-fix scope — reopening T5/T6 was explicitly out of scope).
+
+---
+
+### `sweep_stale_claims` hardening — threshold overflow, zero-threshold semantics, future-claimed_at coverage
+
+**Found in:** T8 spec-compliance review (Sonnet + codex-advisor delegation per 0018).
+**Disposition:** Defense-in-depth polish; defer to Epic 2 cleanup before Phase 2 close, OR Plan C if not surfaced sooner.
+**Trigger to revisit:** Phase 2 close cleanup, OR any task that calls `sweep_stale_claims` with a non-default threshold.
+**Resolved by:** this cleanup commit (pre-T20) — `threshold.as_secs() as i64` replaced with `i64::try_from(threshold.as_secs()).unwrap_or(i64::MAX)` + `saturating_sub`; doc-comment notes added for `threshold == 0` semantics and clock-skew behavior; two new tests added: `sweep_stale_claims_does_not_sweep_future_claimed_at` and `sweep_stale_claims_with_zero_threshold_does_not_sweep_same_second_claim`.
+
+Three small hardening items on the T8 mutator (none load-bearing
+against the brief; all approved as-is):
+
+1. `threshold.as_secs() as i64` truncates silently for absurd
+   Duration values. At the 30-min default it's irrelevant, but
+   `i64::try_from(threshold.as_secs()).unwrap_or(i64::MAX)` +
+   `saturating_sub` would make the method robust-by-construction.
+
+2. `threshold == 0` semantics are undocumented: it means
+   `claimed_at < now` (same-second claims survive the sweep).
+   Defensible but a doc-comment note OR a test pinning the
+   behavior would prevent caller confusion.
+
+3. Future-valued `claimed_at` rows are left untouched (correct
+   clock-skew behavior — `claimed_at < cutoff` is false when
+   `claimed_at > now`), but the test triplet doesn't cover this
+   case. A fourth test asserting "claimed_at in the future is
+   NOT swept" would lock the invariant down.
+
+All three are pure tightening — they don't change any current
+behavior; they document and test what the existing code already
+does correctly.
+
+---
+
+### `mark_retryable_failure` Ok(0) silently swallowed in `run_serial` (symmetric to T5 carry-forward)
+
+**Found in:** T9 spec-compliance review (Sonnet + codex-advisor delegation per 0018).
+**Disposition:** Defense-in-depth, Phase 2 scope. Unreachable in the Phase 1 serial loop today.
+**Trigger to revisit:** T17 (transcribe-worker) / T18 (supervision wiring) — anywhere concurrent sweeps + workers exist.
+**Resolved by:** commits `dd23814` (T16) + `6d95598` (T17) + `eee573d` (T18). Phase 2's design (`stats_stale_after_failure: Arc<AtomicUsize>` counter, symmetric to T9's `StaleAfterSuccess`) handles the `Ok(0)` case in both `fetch_worker` and `transcribe_worker`; `run_pipelined` merges the counter into `ProcessStats`. Note: the original entry mentioned `run_serial`, but Phase 2's `run_pipelined` is what actually handles the case (`run_serial` path was made test-only by T18 — `#[allow(dead_code)]`). The entry is functionally resolved by the Phase 2 mechanism.
+
+T9 added `ProcessOutcome::StaleAfterSuccess` to handle `mark_succeeded`
+returning `Ok(0)` (the row was no longer claimed by this worker; the
+T5-carry-forward fix). The symmetric case on the failure path is NOT
+handled: if a concurrent sweep clears the claim after `process_one`
+returns `Err`, `mark_retryable_failure` also returns `Ok(0)`, but
+`run_serial` increments `stats.failed`, logs nothing about the
+predicate rejection, and the row stays in `pending` (the sweep moved
+it there) — not in `failed_retryable` as the stats imply.
+
+Phase 1 serial single-worker makes this unreachable in practice
+(sweep is at the top of `run_serial`, claim_next runs next, then
+process_one runs through to completion; no other thread can sweep
+mid-iteration). Phase 2 (concurrent fetch workers + transcribe
+worker) makes this race reachable.
+
+Defense-in-depth fix when Phase 2's concurrent workers land: check
+the count returned by `mark_retryable_failure`. On `Ok(0)`, log a
+warn (symmetric to the StaleAfterSuccess warn in `process_one`) and
+don't increment `stats.failed` — count via a new `stats.stale_after_failure`
+counter (symmetric to `stats.stale_after_success`).
+
+---
+
+### T9 failure-classification test enrichment
+
+**Found in:** T9 spec-compliance review (codex-advisor delegation).
+**Disposition:** Epic 2 cleanup; resolve before Phase 2 close.
+**Trigger to revisit:** Phase 2 close cleanup; OR if the
+`tests/pipeline_fakes.rs::run_serial_classifies_fetch_failure_as_retryable_and_continues`
+test is otherwise edited.
+**Resolved by:** this cleanup commit (pre-T20) — extended `run_serial_classifies_fetch_failure_as_retryable_and_continues` with column-value assertions (`last_retryable_kind == "FetchOrTranscribe"`, `last_retryable_message` non-empty, `claimed_by IS NULL`, `claimed_at IS NULL`); added symmetric `run_serial_classifies_transcribe_failure_as_retryable_and_continues` test using `FakeTranscriber::always_fails_retryable()`.
+
+The T9 happy-path failure test asserts `row.status == "failed_retryable"`
+but does NOT assert:
+
+- `last_retryable_kind == "FetchOrTranscribe"` (the placeholder string-kind
+  that Epic 3 replaces with classifier dispatch).
+- `last_retryable_message` contains the formatted error chain
+  (`format!("{e:#}")`).
+- `claimed_by IS NULL` and `claimed_at IS NULL` after the flip (the
+  retry-safety invariant on `mark_retryable_failure`, already asserted
+  in `tests/state_claims.rs::mark_retryable_failure_flips_status_and_records_columns`
+  at the Store layer but not at the pipeline layer).
+
+There's also no transcribe-failure variant of the test (only fetch-failure
+is exercised). Both arms route through the same Err branch in `run_serial`
+so it's not load-bearing, but a second test exercising
+`FakeTranscriber::always_fails()` would lock down the symmetry.

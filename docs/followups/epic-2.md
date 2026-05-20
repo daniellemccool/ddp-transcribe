@@ -157,132 +157,6 @@ caller is visible in logs.
 
 ---
 
-### Mutator test parity — backport `video_events` assertions to T5/T6; no-event-on-stale across all three
-
-**Found in:** T7 spec-compliance review (Sonnet + codex-advisor delegation per 0018).
-**Disposition:** Epic 2 cleanup; resolve before Phase 2 close (Epic 2 ships).
-**Trigger to revisit:** When approaching Phase 2 close, OR whenever T5/T6 happy-path tests are otherwise edited.
-
-T7's review surfaced two coverage gaps in the symmetric mutator family
-(`mark_succeeded`, `mark_retryable_failure`, `mark_terminal_failure`):
-
-1. Only T7's happy-path test (after commit `0a8ad5a`) asserts the
-   `video_events` row exists with the expected `event_type`,
-   `worker_id`, and `detail_json` shape. T5 and T6 happy-path tests
-   exercise the UPDATE but never read the event row.
-
-2. None of the three stale-claim tests assert that NO `video_events`
-   row was inserted when the predicate rejected. The gating logic
-   (`if changed > 0`) is structurally simple and visible, but the
-   no-event invariant is part of the mutator contract and untested.
-
-Event INSERT shapes verified consistent across the three mutators:
-
-- `mark_succeeded` writes `(?1, ?2, 'succeeded', ?3, NULL)` —
-  worker_id at ?3, no detail.
-- `mark_retryable_failure` writes `(?1, ?2, 'failed_retryable',
-  ?3, ?4)` — worker_id + JSON detail with kind/message.
-- `mark_terminal_failure` writes `(?1, ?2, 'failed_terminal',
-  ?3, ?4)` — worker_id + JSON detail with reason/message.
-
-A backport pass should add the symmetric event-row assertions to
-T5/T6 happy-path tests and add no-event-on-stale-claim assertions to
-all three stale-claim tests. Estimated ~30 lines of test code across
-5 test functions. No source changes.
-
-Carried forward from codex-advisor review on commit `1d6b29c`;
-partially addressed by commit `0a8ad5a` (T7 only, per advisor's
-narrow-fix scope — reopening T5/T6 was explicitly out of scope).
-
----
-
-### `sweep_stale_claims` hardening — threshold overflow, zero-threshold semantics, future-claimed_at coverage
-
-**Found in:** T8 spec-compliance review (Sonnet + codex-advisor delegation per 0018).
-**Disposition:** Defense-in-depth polish; defer to Epic 2 cleanup before Phase 2 close, OR Plan C if not surfaced sooner.
-**Trigger to revisit:** Phase 2 close cleanup, OR any task that calls `sweep_stale_claims` with a non-default threshold.
-
-Three small hardening items on the T8 mutator (none load-bearing
-against the brief; all approved as-is):
-
-1. `threshold.as_secs() as i64` truncates silently for absurd
-   Duration values. At the 30-min default it's irrelevant, but
-   `i64::try_from(threshold.as_secs()).unwrap_or(i64::MAX)` +
-   `saturating_sub` would make the method robust-by-construction.
-
-2. `threshold == 0` semantics are undocumented: it means
-   `claimed_at < now` (same-second claims survive the sweep).
-   Defensible but a doc-comment note OR a test pinning the
-   behavior would prevent caller confusion.
-
-3. Future-valued `claimed_at` rows are left untouched (correct
-   clock-skew behavior — `claimed_at < cutoff` is false when
-   `claimed_at > now`), but the test triplet doesn't cover this
-   case. A fourth test asserting "claimed_at in the future is
-   NOT swept" would lock the invariant down.
-
-All three are pure tightening — they don't change any current
-behavior; they document and test what the existing code already
-does correctly.
-
----
-
-### `mark_retryable_failure` Ok(0) silently swallowed in `run_serial` (symmetric to T5 carry-forward)
-
-**Found in:** T9 spec-compliance review (Sonnet + codex-advisor delegation per 0018).
-**Disposition:** Defense-in-depth, Phase 2 scope. Unreachable in the Phase 1 serial loop today.
-**Trigger to revisit:** T17 (transcribe-worker) / T18 (supervision wiring) — anywhere concurrent sweeps + workers exist.
-
-T9 added `ProcessOutcome::StaleAfterSuccess` to handle `mark_succeeded`
-returning `Ok(0)` (the row was no longer claimed by this worker; the
-T5-carry-forward fix). The symmetric case on the failure path is NOT
-handled: if a concurrent sweep clears the claim after `process_one`
-returns `Err`, `mark_retryable_failure` also returns `Ok(0)`, but
-`run_serial` increments `stats.failed`, logs nothing about the
-predicate rejection, and the row stays in `pending` (the sweep moved
-it there) — not in `failed_retryable` as the stats imply.
-
-Phase 1 serial single-worker makes this unreachable in practice
-(sweep is at the top of `run_serial`, claim_next runs next, then
-process_one runs through to completion; no other thread can sweep
-mid-iteration). Phase 2 (concurrent fetch workers + transcribe
-worker) makes this race reachable.
-
-Defense-in-depth fix when Phase 2's concurrent workers land: check
-the count returned by `mark_retryable_failure`. On `Ok(0)`, log a
-warn (symmetric to the StaleAfterSuccess warn in `process_one`) and
-don't increment `stats.failed` — count via a new `stats.stale_after_failure`
-counter (symmetric to `stats.stale_after_success`).
-
----
-
-### T9 failure-classification test enrichment
-
-**Found in:** T9 spec-compliance review (codex-advisor delegation).
-**Disposition:** Epic 2 cleanup; resolve before Phase 2 close.
-**Trigger to revisit:** Phase 2 close cleanup; OR if the
-`tests/pipeline_fakes.rs::run_serial_classifies_fetch_failure_as_retryable_and_continues`
-test is otherwise edited.
-
-The T9 happy-path failure test asserts `row.status == "failed_retryable"`
-but does NOT assert:
-
-- `last_retryable_kind == "FetchOrTranscribe"` (the placeholder string-kind
-  that Epic 3 replaces with classifier dispatch).
-- `last_retryable_message` contains the formatted error chain
-  (`format!("{e:#}")`).
-- `claimed_by IS NULL` and `claimed_at IS NULL` after the flip (the
-  retry-safety invariant on `mark_retryable_failure`, already asserted
-  in `tests/state_claims.rs::mark_retryable_failure_flips_status_and_records_columns`
-  at the Store layer but not at the pipeline layer).
-
-There's also no transcribe-failure variant of the test (only fetch-failure
-is exercised). Both arms route through the same Err branch in `run_serial`
-so it's not load-bearing, but a second test exercising
-`FakeTranscriber::always_fails()` would lock down the symmetry.
-
----
-
 ### `--max-videos` ignored by `run_pipelined` (silent regression from `run_serial`)
 
 **Found in:** T18 supervision wiring (codex-advisor + opus review).
@@ -310,3 +184,59 @@ A bounded-take adapter on the claim stream is an alternative; either
 shape works as long as the cap is honored under N concurrent fetch
 workers (the obvious sum-after-the-fact "claim N, take first
 max_videos" would over-claim by up to N-1 rows).
+
+---
+
+### `fetch_worker` cancellation latency bounded by largest await, not by `token.cancel()`
+
+**Found in:** T16 codex review (Sonnet + codex-advisor delegation per 0018), surfaced again in T18 Opus deep review.
+**Disposition:** Phase 2 close scope OR Epic 3 graceful-shutdown work.
+**Trigger to revisit:** If operator-observable shutdown latency on Bug-class errors becomes a complaint, OR when Epic 3's failure-classification work touches `fetch_worker`.
+
+`fetch_worker` polls `token.is_cancelled()` only at loop top. The hot
+await is `fetcher.acquire()` (multi-second; up to `cfg.ytdlp_timeout =
+300s` default). When `token.cancel()` fires, the worker continues until
+`acquire()` returns naturally. `CancellationToken::cancel()` does NOT
+drop the worker future; `kill_on_drop` on the yt-dlp subprocess only
+fires when the future is actually dropped.
+
+Two fix options for a future task:
+
+- **(a)** Wrap `fetcher.acquire()` in
+  `tokio::select! { _ = token.cancelled() => Err(Cancelled), r = fetcher.acquire(...) => r }`.
+  Mirrors T18 fixup's transcribe-side wrap (`a66d38b`). Future-drop fires
+  `kill_on_drop` on the subprocess.
+- **(b)** The orchestrator's first-error path could call
+  `join_set.abort_all()` after a grace period to force future-drop.
+  Faster but loses graceful-cleanup chance for in-flight fetches.
+
+Worst-case observable: ~5 min shutdown latency on Bug-class errors with
+stuck fetches. Best case: <100ms.
+
+---
+
+### sync `write_artifacts_and_mark` inside `tokio::sync::Mutex` guard inside async fn can stall under `TOKIO_WORKER_THREADS=1`
+
+**Found in:** T17 codex review.
+**Disposition:** Phase 2 close scope or Epic 5 ops-hygiene work.
+**Trigger to revisit:** If T20 bake or production logs show single-worker tokio stalling during write+mark phase.
+
+`transcribe_worker` calls the sync `write_artifacts_and_mark` helper
+inside a `store.lock().await` guard scope, inside an async fn. The
+helper does `atomic_write` (filesystem) + rusqlite commit — both
+blocking syscalls. On the operator's dev workstation under
+`TOKIO_WORKER_THREADS=1`, this can stall ALL other tokio tasks during
+the I/O (typically <50ms but variable).
+
+Correct shape would be:
+
+- Write artifacts OUTSIDE the store mutex (`atomic_write` is independent
+  — no `Store` interaction needed).
+- Use `tokio::task::spawn_blocking` for genuine blocking I/O (rusqlite
+  `mark_succeeded` call).
+- OR: split into `transcribe_outside_lock`, then brief `store.lock().await`
+  for just `mark_succeeded`.
+
+On the A10 bake (default multi-worker tokio), this is not visible. Phase 2
+ships with the current shape; if T20 bake numbers don't show degradation,
+revisit at Epic 5.
