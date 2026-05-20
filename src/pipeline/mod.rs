@@ -29,19 +29,20 @@ use crate::fetcher::{Acquisition, VideoFetcher};
 use crate::output::artifacts::{RawSignals, TranscriptMetadata};
 use crate::output::{artifacts, shard};
 use crate::state::{Claim, Store, SuccessArtifacts};
-use crate::transcribe::{PerCallConfig, Transcriber};
+use crate::transcribe::{PerCallConfig, TranscribeOutput, Transcriber};
 
 mod pipelined;
 mod serial;
 
-// `run_pipelined`, `SharedStore`, `fetch_worker`, and `FetchedItem` are
-// exposed for T18 — the bin target (`main.rs`) doesn't reach for them
-// yet, so the bin compilation marks these re-exports as unused.
-// Suppressed per 0002 until T18 wires `--pipelined`. The integration
-// tests in `tests/pipeline_fakes.rs` consume `fetch_worker` /
-// `FetchedItem` directly, so they must be `pub` (not `pub(crate)`).
+// `run_pipelined`, `SharedStore`, `fetch_worker`, `transcribe_worker`, and
+// `FetchedItem` are exposed for T18 — the bin target (`main.rs`) doesn't
+// reach for them yet, so the bin compilation marks these re-exports as
+// unused. Suppressed per 0002 until T18 wires `--pipelined`. The
+// integration tests in `tests/pipeline_fakes.rs` consume `fetch_worker` /
+// `transcribe_worker` / `FetchedItem` directly, so they must be `pub`
+// (not `pub(crate)`).
 #[allow(unused_imports)]
-pub use pipelined::{fetch_worker, run_pipelined, FetchedItem, SharedStore};
+pub use pipelined::{fetch_worker, run_pipelined, transcribe_worker, FetchedItem, SharedStore};
 pub use serial::run_serial;
 
 pub struct ProcessOptions {
@@ -166,9 +167,12 @@ pub(crate) async fn transcribe_and_write(
     fetcher_name: &'static str,
     opts: &ProcessOptions,
 ) -> Result<ProcessOutcome> {
-    // Compute duration_s from sample count once (16 kHz is the 0014
-    // invariant); avoids a second pass via ffprobe.
-    let duration_s = Some(samples.len() as f64 / 16_000.0);
+    // T17 refactor: capture `samples_len` and `transcript_source` BEFORE
+    // the transcribe move so the shared `write_artifacts_and_mark` helper
+    // can be called without re-deriving them from a consumed Vec or a
+    // borrowed &dyn Transcriber.
+    let samples_len = samples.len();
+    let transcript_source = transcriber.name();
 
     // Epic 1 stays auto-detect-only (PerCallConfig::default().language == None).
     // No CLI flag for language pin; if Epic 4 needs one, it adds it then.
@@ -187,6 +191,77 @@ pub(crate) async fn transcribe_and_write(
         language = transcribe_output.language.as_str(),
         "transcribed"
     );
+
+    // T17 refactor (Path A): the post-transcribe artifact write + DB
+    // mark + wav cleanup lives in `write_artifacts_and_mark`, shared with
+    // `pipelined::transcribe_worker`. Splitting the helper this way keeps
+    // the 0008 ordering invariant in a single place — the pipelined worker
+    // needs the same write+mark logic but can't reuse this whole function
+    // because it must run the transcribe call OUTSIDE the store mutex.
+    write_artifacts_and_mark(
+        store,
+        transcribe_output,
+        claim,
+        samples_len,
+        wav_path,
+        fetcher_name,
+        transcript_source,
+        opts,
+    )
+}
+
+/// Phase 4 helper extracted from [`transcribe_and_write`] (T17, Path A):
+/// write artifacts → mark_succeeded → cleanup wav.
+///
+/// **0008 invariant (load-bearing).** Artifacts (txt + json) must be
+/// durable on disk BEFORE `store.mark_succeeded`. A crash between
+/// artifact writes and `mark_succeeded` leaves the row in `in_progress`,
+/// which the next run's `sweep_stale_claims` reclaims (per 0024); the
+/// artifacts on disk are re-written on the next attempt (atomic_write
+/// is idempotent).
+///
+/// This helper is the **single source of truth** for that ordering.
+/// Both `transcribe_and_write` (serial path) and
+/// `pipelined::transcribe_worker` (T17) delegate here; a regression in
+/// the order would silently pass tests on the happy path but corrupt
+/// invariants in a crash-mid-write scenario.
+///
+/// Returns [`ProcessOutcome::StaleAfterSuccess`] when `mark_succeeded`
+/// updates 0 rows (concurrent sweep cleared the claim during
+/// transcription). Artifacts are durable per 0008; the row sits in
+/// `pending` and will be re-claimed.
+///
+/// `transcript_source` is passed in (instead of calling
+/// `transcriber.name()` inside) because the pipelined worker holds a
+/// `Arc<dyn Transcriber>` and consumes `transcribe_output` here — the
+/// caller captures `transcriber.name()` before the transcribe move per
+/// the same pattern that captures `samples_len`.
+///
+/// Sync (not async): every operation here is a blocking syscall
+/// (`atomic_write`, `mark_succeeded` via rusqlite, `remove_file`). The
+/// caller holds the store mutex around this call and serializes against
+/// other workers — making this `async` would only add a `.await` that
+/// never yields, since there's no I/O wait point.
+///
+/// clippy::too_many_arguments allow: 8 args; a builder/param struct
+/// would add boilerplate disproportionate to the value (every arg is
+/// part of the same logical "write+mark" operation; none are optional;
+/// the call is internal with two callers).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_artifacts_and_mark(
+    store: &mut Store,
+    transcribe_output: TranscribeOutput,
+    claim: &Claim,
+    samples_len: usize,
+    wav_path: PathBuf,
+    fetcher_name: &'static str,
+    transcript_source: &'static str,
+    opts: &ProcessOptions,
+) -> Result<ProcessOutcome> {
+    // duration_s derives from the 0014 audio invariant (16 kHz mono):
+    // samples_len / 16_000. Caller captured samples_len before the
+    // transcribe call moved the Vec.
+    let duration_s = Some(samples_len as f64 / 16_000.0);
 
     let shard_dir = opts.transcripts_root.join(shard(&claim.video_id));
     std::fs::create_dir_all(&shard_dir)
@@ -208,7 +283,7 @@ pub(crate) async fn transcribe_and_write(
         language_detected: Some(transcribe_output.language.clone()),
         transcribed_at: Utc::now().to_rfc3339(),
         fetcher: fetcher_name.to_string(),
-        transcript_source: transcriber.name().to_string(),
+        transcript_source: transcript_source.to_string(),
         model: transcribe_output.model_id.clone(),
         raw_signals: Some(RawSignals::from_transcribe_output(&transcribe_output)),
     };
@@ -229,7 +304,7 @@ pub(crate) async fn transcribe_and_write(
             duration_s,
             language_detected: Some(transcribe_output.language.clone()),
             fetcher: fetcher_name,
-            transcript_source: transcriber.name(),
+            transcript_source,
         },
     )?;
 
