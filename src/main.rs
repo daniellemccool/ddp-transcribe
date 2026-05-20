@@ -116,6 +116,11 @@ async fn main() -> Result<()> {
                 claimed = stats.claimed,
                 succeeded = stats.succeeded,
                 failed = stats.failed,
+                // T9 (T5-review carry-forward): expect 0 in Phase 1
+                // (single serial worker); non-zero signals a concurrent
+                // sweep cleared the claim mid-process — early-warning
+                // surface for Phase 2's concurrent workers.
+                stale_after_success = stats.stale_after_success,
                 "process complete"
             );
             if stats.claimed == 0 {
