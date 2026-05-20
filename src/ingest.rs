@@ -173,8 +173,16 @@ struct WatchEntry {
 }
 
 fn parse_watched_at(s: &str) -> Option<i64> {
-    let naive = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok()?;
-    Some(Utc.from_utc_datetime(&naive).timestamp())
+    const FORMATS: &[&str] = &[
+        "%Y-%m-%d %H:%M:%S",     // synthetic fixtures
+        "%Y-%m-%d %H:%M:%S UTC", // production TikTok DDP
+    ];
+    for fmt in FORMATS {
+        if let Ok(naive) = NaiveDateTime::parse_from_str(s, fmt) {
+            return Some(Utc.from_utc_datetime(&naive).timestamp());
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -205,5 +213,16 @@ mod tests {
     #[test]
     fn parse_watched_at_returns_none_on_garbage() {
         assert!(parse_watched_at("not a date").is_none());
+    }
+
+    #[test]
+    fn parse_watched_at_handles_utc_suffix() {
+        assert!(parse_watched_at("2024-01-01 12:00:00 UTC").is_some());
+    }
+
+    #[test]
+    fn parse_watched_at_returns_none_on_garbage_with_partial_utc() {
+        assert!(parse_watched_at("not a date UTC").is_none());
+        assert!(parse_watched_at("UTC").is_none());
     }
 }

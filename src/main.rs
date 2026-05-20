@@ -59,6 +59,7 @@ async fn main() -> Result<()> {
                 duplicates = stats.watch_history_duplicates,
                 short_links_skipped = stats.short_links_skipped,
                 invalid_urls_skipped = stats.invalid_urls_skipped,
+                date_parse_failures = stats.date_parse_failures,
                 "ingest complete"
             );
         }
