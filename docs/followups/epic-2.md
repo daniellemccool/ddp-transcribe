@@ -141,24 +141,6 @@ if they don't, add a one-liner here.
 
 ---
 
-### WhisperEngine teardown can hang once T7 lands real inference
-
-**Found in:** T5 (engine shell) — codex-advisor code-quality review.
-**Disposition:** Epic 2 (graceful shutdown / state-machine work).
-**Trigger to revisit:** Epic 2 planning, before pipelined orchestrator lands.
-
-T5's teardown (drop sender → join handle) is correct for an idle worker.
-Once T7 adds `whisper_full_with_state` inside the worker loop, an in-flight
-request that's already been dequeued can take seconds-to-minutes to finish;
-`shutdown()`/`Drop` will block until the request completes OR its deadline
-fires. For Epic 1's fail-fast exit (process dies on transcribe failure;
-OS reclaims everything) this is acceptable. For Epic 2's graceful shutdown,
-add a shutdown signal path that flips the current request's `cancel` flag
-when teardown begins — then the worker observes cancel and exits via
-`TranscribeError::Cancelled` rather than blocking on inference.
-
----
-
 ### Worker-side closed-reply path silently swallows the error
 
 **Found in:** T5 (engine shell) — codex-advisor code-quality review.
@@ -172,36 +154,6 @@ dropped) but suspicious otherwise. Once Epic 2 adds request-scoped tracing
 context, replace the swallow with a `tracing::warn!` that includes the
 video_id / request_id and the elapsed wallclock — so an unexplained dropped
 caller is visible in logs.
-
----
-
-### `Config::whisper_use_gpu` and `Config::whisper_threads` are unused by Plan B's engine path
-
-**Found in:** T11 (pipeline integration) — Plan A leftovers.
-**Disposition:** Defer cleanup sweep to Epic 2.
-**Trigger to revisit:** Epic 2's state-machine and config rationalization work,
-OR any task that touches `Config::from_args` for unrelated reasons.
-
-Plan B's `WhisperEngine` does not consume `whisper_use_gpu` or `whisper_threads`:
-whisper-rs picks `n_threads = min(4, hw_concurrency)` itself (api-and-pipeline.md:51),
-and the GPU choice is an `i32` device index passed via `EngineConfig::gpu_device`
-(currently hardcoded to `0` in `main.rs::Process` per pre-correction 3 of T11).
-T11 left both fields in place because they have CLI/env plumbing and per-field
-unit tests in `src/config.rs::tests`; deletion is a separate cleanup sweep.
-
-Both fields carry `#[allow(dead_code)]` annotations pointing here. The cleanup
-sweep should:
-
-1. Delete `whisper_use_gpu` and `whisper_threads` from `Config`.
-2. Remove their `whisper_model_override_takes_precedence_over_profile_default`-
-   adjacent unit tests in `src/config.rs::tests` (the assertions that check
-   default values).
-3. If a future operator-facing config knob is needed for GPU device index or
-   threads, add a typed field (`gpu_device: i32`, `n_threads: Option<usize>`)
-   to `EngineConfig` and thread it from `Config` then.
-
-Epic 2 is the natural home — that's when the broader Plan A → Plan B
-state-machine and config rationalization lands.
 
 ---
 

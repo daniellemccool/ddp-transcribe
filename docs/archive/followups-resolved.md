@@ -157,3 +157,57 @@ Two `verify-then-archive` forward-pointers from Plan B Epic 1's codex-advisor re
 - line 138: `if !td.plog.is_finite() || td.plog > 0.0001 { return Err(...) }`
 
 `extract_segments` returns `Result<Vec<SegmentRaw>, String>`; the worker maps this to `TranscribeError::Bug` at line 725. Behavior matches the guidance: reject non-finite at the extraction boundary so `serde_json::to_string` never sees `NaN`/`inf`.
+
+---
+
+## Resolved by Plan B Epic 2 — T18 supervision wiring (2026-05-20)
+
+Two Epic 2 entries resolved by commit `eee573d` (`feat(orchestrator): pipelined supervision wiring with LOAD-BEARING shutdown ORDER`). Both were carried as active-scope entries in `docs/followups/epic-2.md` and are archived here with the resolving SHA.
+
+### WhisperEngine teardown can hang once T7 lands real inference
+
+**Found in:** T5 (engine shell) — codex-advisor code-quality review.
+**Disposition:** Epic 2 (graceful shutdown / state-machine work).
+**Trigger to revisit:** Epic 2 planning, before pipelined orchestrator lands.
+**Resolved by:** commit `eee573d` — T18's 4-step shutdown ORDER (token.cancel → drop tx → join_set.join_next → engine.shutdown) ensures the transcribe worker exits before engine.shutdown() drops the request sender; the engine worker then sees the closed channel and exits blocking_recv cleanly.
+
+T5's teardown (drop sender → join handle) is correct for an idle worker.
+Once T7 adds `whisper_full_with_state` inside the worker loop, an in-flight
+request that's already been dequeued can take seconds-to-minutes to finish;
+`shutdown()`/`Drop` will block until the request completes OR its deadline
+fires. For Epic 1's fail-fast exit (process dies on transcribe failure;
+OS reclaims everything) this is acceptable. For Epic 2's graceful shutdown,
+add a shutdown signal path that flips the current request's `cancel` flag
+when teardown begins — then the worker observes cancel and exits via
+`TranscribeError::Cancelled` rather than blocking on inference.
+
+---
+
+### `Config::whisper_use_gpu` and `Config::whisper_threads` are unused by Plan B's engine path
+
+**Found in:** T11 (pipeline integration) — Plan A leftovers.
+**Disposition:** Defer cleanup sweep to Epic 2.
+**Trigger to revisit:** Epic 2's state-machine and config rationalization work,
+OR any task that touches `Config::from_args` for unrelated reasons.
+**Resolved by:** commit `eee573d` — T18 deleted both fields from `Config` as part of the supervision wiring task.
+
+Plan B's `WhisperEngine` does not consume `whisper_use_gpu` or `whisper_threads`:
+whisper-rs picks `n_threads = min(4, hw_concurrency)` itself (api-and-pipeline.md:51),
+and the GPU choice is an `i32` device index passed via `EngineConfig::gpu_device`
+(currently hardcoded to `0` in `main.rs::Process` per pre-correction 3 of T11).
+T11 left both fields in place because they have CLI/env plumbing and per-field
+unit tests in `src/config.rs::tests`; deletion is a separate cleanup sweep.
+
+Both fields carry `#[allow(dead_code)]` annotations pointing here. The cleanup
+sweep should:
+
+1. Delete `whisper_use_gpu` and `whisper_threads` from `Config`.
+2. Remove their `whisper_model_override_takes_precedence_over_profile_default`-
+   adjacent unit tests in `src/config.rs::tests` (the assertions that check
+   default values).
+3. If a future operator-facing config knob is needed for GPU device index or
+   threads, add a typed field (`gpu_device: i32`, `n_threads: Option<usize>`)
+   to `EngineConfig` and thread it from `Config` then.
+
+Epic 2 is the natural home — that's when the broader Plan A → Plan B
+state-machine and config rationalization lands.

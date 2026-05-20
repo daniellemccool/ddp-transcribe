@@ -234,22 +234,12 @@ pub async fn fetch_worker(
 /// workers' `claim_next`. The store guard is acquired only for the
 /// write + mark phase (sub-50ms total).
 ///
-/// **Cancellation composition (0003 deviation from ADR 0025 strict
-/// text).** ADR 0025's Consequences says the transcribe worker MUST
-/// wrap `engine.transcribe()` in `tokio::select! { token.cancelled() | … }`
-/// so cancellation drops the in-flight transcribe future, firing Epic 1's
-/// 0012 `CancelOnDrop` and aborting whisper.cpp within milliseconds.
-/// **This worker does NOT implement that wrap** — only the outer
-/// `recv()` is in the select. Cancellation latency is bounded by the
-/// in-flight transcribe (~1s on `large-v3-turbo-q5_0`); cancel takes
-/// effect at the next loop-top iteration. Rationale: tighter
-/// cancellation requires the worker to receive a cancellable handle
-/// from `WhisperEngine` (the trait's `transcribe` returns a non-`select!`-
-/// friendly future today); restructuring that surface is Epic 3+ scope.
-/// Acknowledged trade-off: ~1s shutdown latency for the transcribe
-/// worker vs. immediate-ish for fetch workers' parked
-/// `claim_next`/`recv()` arms. Tracked for FOLLOWUPS at Phase 2 close
-/// pending T18's measured shutdown wall-clock.
+/// **Cancellation composition (ADR 0025 strict text).** Per ADR 0025:
+/// the per-item transcribe call is wrapped in `tokio::select!` against
+/// the `CancellationToken`. When `token.cancel()` fires, the select arm
+/// wins, the in-flight transcribe future drops, the `CancelOnDrop` chain
+/// (per ADR 0012) fires the per-request `Arc<AtomicBool>`, and
+/// whisper.cpp's `abort_callback` aborts inference within milliseconds.
 ///
 /// **Error classification.**
 /// - [`TranscribeError::Cancelled`]: row stays `in_progress`, sweep
@@ -327,9 +317,14 @@ pub async fn transcribe_worker(
             compute_lang_probs: opts.compute_lang_probs,
             ..PerCallConfig::default()
         };
-        let transcribe_result = transcriber
-            .transcribe(samples, per_call, opts.transcribe_timeout)
-            .await;
+        let transcribe_result = tokio::select! {
+            biased;
+            _ = token.cancelled() => {
+                tracing::info!(worker = %worker_id, video_id = %claim.video_id.as_str(), "transcribe_worker: cancellation during transcribe; exiting");
+                return Ok(());
+            }
+            r = transcriber.transcribe(samples, per_call, opts.transcribe_timeout) => r,
+        };
 
         match transcribe_result {
             Ok(transcribe_output) => {
