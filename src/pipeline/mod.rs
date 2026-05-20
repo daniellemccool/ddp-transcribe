@@ -34,12 +34,14 @@ use crate::transcribe::{PerCallConfig, Transcriber};
 mod pipelined;
 mod serial;
 
-// `run_pipelined` and `SharedStore` are exposed for T18 — the bin target
-// (`main.rs`) doesn't reach for them yet, so the bin compilation marks
-// these re-exports as unused. Suppressed per 0002 until T18 wires
-// `--pipelined`.
+// `run_pipelined`, `SharedStore`, `fetch_worker`, and `FetchedItem` are
+// exposed for T18 — the bin target (`main.rs`) doesn't reach for them
+// yet, so the bin compilation marks these re-exports as unused.
+// Suppressed per 0002 until T18 wires `--pipelined`. The integration
+// tests in `tests/pipeline_fakes.rs` consume `fetch_worker` /
+// `FetchedItem` directly, so they must be `pub` (not `pub(crate)`).
 #[allow(unused_imports)]
-pub use pipelined::{run_pipelined, SharedStore};
+pub use pipelined::{fetch_worker, run_pipelined, FetchedItem, SharedStore};
 pub use serial::run_serial;
 
 pub struct ProcessOptions {

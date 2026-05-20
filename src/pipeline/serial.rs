@@ -164,6 +164,7 @@ mod tests {
         let fetcher = FakeFetcher {
             canned: Mutex::new(map),
             always_fails: false,
+            first_call_gate: tokio::sync::Mutex::new(None),
         };
         let transcriber = ScriptedTranscriber {
             output: TranscribeOutput {
