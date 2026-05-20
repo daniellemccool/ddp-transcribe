@@ -154,6 +154,22 @@ fn mark_retryable_failure_flips_status_and_records_columns() -> anyhow::Result<(
     assert_eq!(status, "failed_retryable");
     assert_eq!(rk.as_deref(), Some("FetchTimeout"));
     assert_eq!(rm.as_deref(), Some("yt-dlp exceeded 300s budget"));
+
+    // Core retry-safety invariant: claim slot must be cleared so the
+    // row is re-claimable by claim_next without operator intervention.
+    let (claimed_by, claimed_at): (Option<String>, Option<i64>) = raw.query_row(
+        "SELECT claimed_by, claimed_at FROM videos WHERE video_id = ?1",
+        ["vid_a"],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    assert_eq!(
+        claimed_by, None,
+        "claimed_by must be NULL after retryable flip"
+    );
+    assert_eq!(
+        claimed_at, None,
+        "claimed_at must be NULL after retryable flip"
+    );
     Ok(())
 }
 
@@ -171,6 +187,32 @@ fn mark_retryable_failure_with_stale_claim_returns_zero() -> anyhow::Result<()> 
     let changed =
         store.mark_retryable_failure("vid_a", "worker-OTHER", "FetchTimeout", "spurious")?;
     assert_eq!(changed, 0, "stale-claim should be rejected by predicate");
+
+    let raw = rusqlite::Connection::open(&path)?;
+    let (status, rk, rm, cb): (String, Option<String>, Option<String>, Option<String>) = raw
+        .query_row(
+            "SELECT status, last_retryable_kind, last_retryable_message, claimed_by
+         FROM videos WHERE video_id = ?1",
+            ["vid_a"],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+    assert_eq!(
+        status, "in_progress",
+        "stale-claim must leave status unchanged"
+    );
+    assert_eq!(
+        rk, None,
+        "retryable kind must not be written on stale claim"
+    );
+    assert_eq!(
+        rm, None,
+        "retryable message must not be written on stale claim"
+    );
+    assert_eq!(
+        cb.as_deref(),
+        Some("worker-1"),
+        "original claim must be preserved"
+    );
     Ok(())
 }
 
