@@ -55,14 +55,13 @@ cargo build --release --features cuda
 echo ""
 echo "[bootstrap] complete. Native workspace ready at: $REPO_NATIVE"
 echo ""
-echo "Bake invocation (copy-paste from here; do NOT run from $REPO_STORAGE):"
+echo "Bake invocation (CWD-independent; absolute paths so copy-paste works from anywhere):"
 echo ""
 cat <<EOF
-cd $REPO_NATIVE
 mkdir -p $NATIVE/work/inbox $NATIVE/work/transcripts
-cp tests/fixtures/ddp/news_orgs/*.json $NATIVE/work/inbox/   # if not already populated
+cp $REPO_NATIVE/tests/fixtures/ddp/news_orgs/*.json $NATIVE/work/inbox/   # if not already populated
 
-./target/release/uu-tiktok \\
+$REPO_NATIVE/target/release/uu-tiktok \\
   --state-db $NATIVE/work/state.sqlite \\
   --inbox $NATIVE/work/inbox \\
   --transcripts $NATIVE/work/transcripts \\
@@ -70,13 +69,13 @@ cp tests/fixtures/ddp/news_orgs/*.json $NATIVE/work/inbox/   # if not already po
   --compute-lang-probs \\
   init
 
-./target/release/uu-tiktok \\
+$REPO_NATIVE/target/release/uu-tiktok \\
   --state-db $NATIVE/work/state.sqlite \\
   --inbox $NATIVE/work/inbox \\
   --transcripts $NATIVE/work/transcripts \\
   ingest
 
-time ./target/release/uu-tiktok \\
+time $REPO_NATIVE/target/release/uu-tiktok \\
   --state-db $NATIVE/work/state.sqlite \\
   --inbox $NATIVE/work/inbox \\
   --transcripts $NATIVE/work/transcripts \\

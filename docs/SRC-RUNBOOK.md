@@ -37,15 +37,25 @@ The bootstrap script reads from the storage drive only — it never talks to
 GitHub directly. Updates flow GitHub → storage drive → A10 native:
 
 ```bash
-# Run this from a workspace session before bootstrapping the A10 native checkout.
+# Run from a workspace session before bootstrapping the A10 native checkout.
+# Two steps: pull latest, then check out the branch you want to bake.
+git -C /data/transcription-pipeline-storage/uu-tiktok fetch
+git -C /data/transcription-pipeline-storage/uu-tiktok checkout <branch>   # e.g. feat/plan-b-epic-2
 git -C /data/transcription-pipeline-storage/uu-tiktok pull
 ```
 
+**The `git checkout` step is required if storage is currently on a
+different branch (e.g., main).** `git pull` only updates the currently-
+checked-out branch; without first switching, you'll bake against the wrong
+commits. Alternatively, pass the branch explicitly to the bootstrap
+script (which switches it on native), but storage stays where it was —
+that's fine as long as native is what runs the bake.
+
 The repo is public and SRC's network policy permits outbound HTTPS to
-GitHub, so this works without credentials. Pre-condition: the storage
-drive's repo has `origin` set to the GitHub URL (verify with
-`git -C /data/transcription-pipeline-storage/uu-tiktok remote -v`; set
-with `git remote set-url origin https://github.com/<user>/uu-tiktok.git`
+GitHub, so the `git fetch` / `git pull` work without credentials. Pre-
+condition: the storage drive's repo has `origin` set to the GitHub URL
+(verify with `git -C /data/transcription-pipeline-storage/uu-tiktok remote -v`;
+set with `git remote set-url origin https://github.com/<user>/uu-tiktok.git`
 if needed).
 
 The A10 itself does not need GitHub credentials — it pulls from the
@@ -54,6 +64,28 @@ storage drive's local working tree, not from GitHub.
 **Cannot push from SRC:** there's no secure way to authenticate as the
 operator from the shared workspace. Commits and pushes happen on the dev
 workstation; updates flow to the storage drive via the `git pull` above.
+
+## Models on the storage drive
+
+The whisper model files live on the storage drive at
+`/data/transcription-pipeline-storage/models/`. The bootstrap script
+symlinks them to `$REPO_NATIVE/models/`. Models are read-once at startup
+so the symlink is safe (no fsync hazard).
+
+If `bootstrap.sh` prints `WARN: /data/transcription-pipeline-storage/models
+not present`, the models directory is empty or missing. Populate it once:
+
+```bash
+# Production model (Plan B): ~573 MB, multilingual, GPU-friendly.
+bash /data/transcription-pipeline-storage/uu-tiktok/scripts/fetch-large-v3-turbo-model.sh
+
+# Optional: tiny.en for dev profile.
+MODEL_DIR=/data/transcription-pipeline-storage/models \
+  bash /data/transcription-pipeline-storage/uu-tiktok/scripts/fetch-tiny-model.sh
+```
+
+Models persist on the storage drive across workspace lifecycle — download
+once per storage drive, reuse forever.
 
 ## Bootstrap: at session start (after `srun --resume`)
 
