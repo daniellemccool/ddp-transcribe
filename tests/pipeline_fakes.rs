@@ -79,6 +79,8 @@ async fn pipeline_processes_one_video_to_succeeded_with_fake_fetcher() {
         compute_lang_probs: false,
         transcribe_timeout: Duration::from_secs(60),
         stale_claim_threshold: Duration::from_secs(30 * 60),
+        download_workers: 3,
+        channel_capacity: 2,
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts)
@@ -161,6 +163,8 @@ async fn pipeline_writes_raw_signals_to_json_artifact() {
         compute_lang_probs: false,
         transcribe_timeout: Duration::from_secs(60),
         stale_claim_threshold: Duration::from_secs(30 * 60),
+        download_workers: 3,
+        channel_capacity: 2,
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts)
@@ -251,6 +255,8 @@ async fn run_serial_classifies_fetch_failure_as_retryable_and_continues() -> any
         compute_lang_probs: false,
         transcribe_timeout: Duration::from_secs(5),
         stale_claim_threshold: Duration::from_secs(60),
+        download_workers: 3,
+        channel_capacity: 2,
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts).await?;

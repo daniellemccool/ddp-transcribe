@@ -25,6 +25,16 @@ pub struct ProcessOptions {
     /// (30-min default). Constructed from `Config::stale_claim_threshold` in
     /// main.rs and consumed below.
     pub stale_claim_threshold: Duration,
+    /// 0027: default 3; flag-tunable via --download-workers. Consumed by
+    /// T15-T18 when the pipelined orchestrator is wired; suppressed until
+    /// then per 0002.
+    #[allow(dead_code)]
+    pub download_workers: usize,
+    /// 0027: default 2; flag-tunable via --channel-capacity. Consumed by
+    /// T15-T18 when the pipelined orchestrator is wired; suppressed until
+    /// then per 0002.
+    #[allow(dead_code)]
+    pub channel_capacity: usize,
 }
 
 #[derive(Debug, Default)]
@@ -345,6 +355,8 @@ mod tests {
             compute_lang_probs: false,
             transcribe_timeout: Duration::from_secs(5),
             stale_claim_threshold: Duration::from_secs(60),
+            download_workers: 3,
+            channel_capacity: 2,
         };
 
         // Use the same Claim returned by claim_next — process_one needs

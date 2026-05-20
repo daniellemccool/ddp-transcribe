@@ -102,6 +102,8 @@ async fn main() -> Result<()> {
                 compute_lang_probs: cfg.compute_lang_probs,
                 transcribe_timeout: cfg.transcribe_timeout,
                 stale_claim_threshold: cfg.stale_claim_threshold,
+                download_workers: cfg.download_workers,
+                channel_capacity: cfg.channel_capacity,
             };
 
             // Shut the engine down whether the serial loop succeeded or

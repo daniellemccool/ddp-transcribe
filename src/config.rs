@@ -32,6 +32,10 @@ pub struct Config {
     /// Stale-claim sweep threshold (0024). Default 30 min if CLI/env
     /// did not supply a value.
     pub stale_claim_threshold: Duration,
+    /// 0027: default 3 (curve-flattening point).
+    pub download_workers: usize,
+    /// 0027: default 2 (small backpressure smoothing).
+    pub channel_capacity: usize,
 }
 
 impl Config {
@@ -54,6 +58,8 @@ impl Config {
                 stale_claim_threshold: args
                     .stale_claim_threshold
                     .unwrap_or_else(|| Duration::from_secs(30 * 60)),
+                download_workers: args.download_workers.unwrap_or(3),
+                channel_capacity: args.channel_capacity.unwrap_or(2),
             },
         }
     }
@@ -79,6 +85,8 @@ mod tests {
             whisper_model: None,
             compute_lang_probs: false,
             stale_claim_threshold: None,
+            download_workers: None,
+            channel_capacity: None,
         }
     }
 
@@ -123,5 +131,33 @@ mod tests {
         args.stale_claim_threshold = Some(humantime::Duration::from_str("5m").unwrap().into());
         let cfg = Config::from_args(&args);
         assert_eq!(cfg.stale_claim_threshold, Duration::from_secs(5 * 60));
+    }
+
+    #[test]
+    fn default_download_workers_is_3_per_ad0027() {
+        let cfg = Config::from_args(&dev_args());
+        assert_eq!(cfg.download_workers, 3);
+    }
+
+    #[test]
+    fn default_channel_capacity_is_2_per_ad0027() {
+        let cfg = Config::from_args(&dev_args());
+        assert_eq!(cfg.channel_capacity, 2);
+    }
+
+    #[test]
+    fn download_workers_override_flows_through() {
+        let mut args = dev_args();
+        args.download_workers = Some(5);
+        let cfg = Config::from_args(&args);
+        assert_eq!(cfg.download_workers, 5);
+    }
+
+    #[test]
+    fn channel_capacity_override_flows_through() {
+        let mut args = dev_args();
+        args.channel_capacity = Some(8);
+        let cfg = Config::from_args(&args);
+        assert_eq!(cfg.channel_capacity, 8);
     }
 }

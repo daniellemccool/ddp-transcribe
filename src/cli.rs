@@ -51,6 +51,27 @@ pub struct GlobalArgs {
         value_parser = humantime::parse_duration
     )]
     pub stale_claim_threshold: Option<std::time::Duration>,
+
+    /// Number of parallel fetch workers in the pipelined orchestrator.
+    /// 0027: default 3 (curve-flattening point on the bake throughput
+    /// math; ~3.5× serial wallclock on news_orgs fixture). Must be ≥ 1.
+    #[arg(
+        long,
+        env = "UU_TIKTOK_DOWNLOAD_WORKERS",
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+    )]
+    pub download_workers: Option<usize>,
+
+    /// Bounded mpsc capacity between fetch workers and the transcribe
+    /// worker. 0027: default 2 (small backpressure smoothing for
+    /// transcribe's ~1s variance; peak channel memory ~6 × 3 MB = 18 MB
+    /// at default N=3 + capacity 2). Must be ≥ 1.
+    #[arg(
+        long,
+        env = "UU_TIKTOK_CHANNEL_CAPACITY",
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+    )]
+    pub channel_capacity: Option<usize>,
 }
 
 #[derive(Subcommand, Debug)]
