@@ -333,6 +333,59 @@ impl Store {
         tx.commit().context("commit mark_succeeded")?;
         Ok(changed)
     }
+
+    /// Flip a video row from `in_progress` to `failed_retryable`, recording
+    /// the failure classification (kind + message) per 0023. Same
+    /// stale-claim predicate as `mark_succeeded`. Returns the row-change
+    /// count per 0006: 0 on stale claim, 1 on successful flip.
+    ///
+    /// `kind` is a stable short tag (e.g. "FetchTimeout", "TranscribeError").
+    /// Epic 3's typed RetryableKind serializes via tag()/message() into the
+    /// same columns; no schema change at that point — just the caller switching
+    /// from string literals to enum projections.
+    // T9 wires this into pipeline.rs; no bin consumer until then.
+    #[allow(dead_code)]
+    pub fn mark_retryable_failure(
+        &mut self,
+        video_id: &str,
+        worker_id: &str,
+        kind: &str,
+        message: &str,
+    ) -> Result<usize> {
+        let now = unix_now();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("begin immediate for mark_retryable_failure")?;
+
+        let changed = tx
+            .execute(
+                "UPDATE videos
+                 SET status = 'failed_retryable',
+                     last_retryable_kind = ?2,
+                     last_retryable_message = ?3,
+                     claimed_by = NULL,
+                     claimed_at = NULL,
+                     updated_at = ?4
+                 WHERE video_id = ?1
+                   AND status = 'in_progress'
+                   AND claimed_by = ?5",
+                params![video_id, kind, message, now, worker_id],
+            )
+            .with_context(|| format!("update videos for failed_retryable {}", video_id))?;
+
+        if changed > 0 {
+            let detail = serde_json::json!({ "kind": kind, "message": message }).to_string();
+            tx.execute(
+                "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
+                 VALUES (?1, ?2, 'failed_retryable', ?3, ?4)",
+                params![video_id, now, worker_id, detail],
+            )?;
+        }
+
+        tx.commit().context("commit mark_retryable_failure")?;
+        Ok(changed)
+    }
 }
 
 impl Store {

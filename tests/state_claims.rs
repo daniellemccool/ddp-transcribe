@@ -126,6 +126,55 @@ fn mark_succeeded_with_stale_claim_returns_zero_and_does_not_update() -> Result<
 }
 
 #[test]
+fn mark_retryable_failure_flips_status_and_records_columns() -> anyhow::Result<()> {
+    use rusqlite::Connection;
+    use uu_tiktok::state::Store;
+
+    let tmp = tempfile::TempDir::new()?;
+    let path = tmp.path().join("state.sqlite");
+    let mut store = Store::open(&path)?;
+    store.upsert_video("vid_a", "https://example/a", false)?;
+    let claim = store.claim_next("worker-1")?.expect("claim");
+
+    let changed = store.mark_retryable_failure(
+        &claim.video_id,
+        "worker-1",
+        "FetchTimeout",
+        "yt-dlp exceeded 300s budget",
+    )?;
+    assert_eq!(changed, 1);
+
+    let raw = Connection::open(&path)?;
+    let (status, rk, rm): (String, Option<String>, Option<String>) = raw.query_row(
+        "SELECT status, last_retryable_kind, last_retryable_message
+         FROM videos WHERE video_id = ?1",
+        ["vid_a"],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    assert_eq!(status, "failed_retryable");
+    assert_eq!(rk.as_deref(), Some("FetchTimeout"));
+    assert_eq!(rm.as_deref(), Some("yt-dlp exceeded 300s budget"));
+    Ok(())
+}
+
+#[test]
+fn mark_retryable_failure_with_stale_claim_returns_zero() -> anyhow::Result<()> {
+    use uu_tiktok::state::Store;
+
+    let tmp = tempfile::TempDir::new()?;
+    let path = tmp.path().join("state.sqlite");
+    let mut store = Store::open(&path)?;
+    store.upsert_video("vid_a", "https://example/a", false)?;
+    store.claim_next("worker-1")?.expect("claim");
+
+    // Stale: different worker tries to mark.
+    let changed =
+        store.mark_retryable_failure("vid_a", "worker-OTHER", "FetchTimeout", "spurious")?;
+    assert_eq!(changed, 0, "stale-claim should be rejected by predicate");
+    Ok(())
+}
+
+#[test]
 fn claim_then_mark_succeeded_then_reclaim_returns_none() -> Result<()> {
     let tmp = TempDir::new()?;
     let path = tmp.path().join("state.sqlite");
