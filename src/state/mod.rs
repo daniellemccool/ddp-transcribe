@@ -348,8 +348,9 @@ impl Store {
     /// this flip — they're retained as diagnostic history if the row was
     /// previously terminal (e.g., operator manually requeued). Symmetric:
     /// `mark_terminal_failure` likewise preserves prior `last_retryable_*`.
-    // T9 wires this into pipeline.rs; no bin consumer until then.
-    #[allow(dead_code)]
+    // T9 wires this into `run_serial`'s error arm (placeholder kind
+    // "FetchOrTranscribe" per 0023); Epic 3 replaces the placeholder with
+    // typed classifier dispatch.
     pub fn mark_retryable_failure(
         &mut self,
         video_id: &str,
@@ -465,8 +466,7 @@ impl Store {
     /// Per 0024: no artifact validation, no attempt_count bump. The
     /// sweep is operator-recovery semantics; application-retry semantics
     /// (and the `attempt_count` ladder) belong to Epic 3's classifier.
-    // T9 wires this into run_serial; no bin consumer until then.
-    #[allow(dead_code)]
+    // T9 wires this at the top of `run_serial` per 0024.
     pub fn sweep_stale_claims(&mut self, threshold: std::time::Duration) -> Result<usize> {
         let now = unix_now();
         let threshold_secs = threshold.as_secs() as i64;

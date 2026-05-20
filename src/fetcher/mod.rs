@@ -31,12 +31,35 @@ pub trait VideoFetcher: Send + Sync {
 #[allow(dead_code)]
 pub struct FakeFetcher {
     pub canned: std::sync::Mutex<std::collections::HashMap<String, std::path::PathBuf>>,
+    /// When true, `acquire` always returns `FetchError::NetworkError` regardless
+    /// of the canned map. Used by `run_serial` failure-classification tests
+    /// (T9) to exercise the retryable-failure path.
+    pub always_fails: bool,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+#[allow(dead_code)]
+impl FakeFetcher {
+    /// Construct a `FakeFetcher` that fails every `acquire` call. Used by T9's
+    /// continue-on-failure test in `tests/pipeline_fakes.rs`.
+    pub fn always_fails() -> Self {
+        Self {
+            canned: std::sync::Mutex::new(std::collections::HashMap::new()),
+            always_fails: true,
+        }
+    }
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
 #[async_trait]
 impl VideoFetcher for FakeFetcher {
     async fn acquire(&self, video_id: &str, _source_url: &str) -> Result<Acquisition, FetchError> {
+        if self.always_fails {
+            return Err(FetchError::NetworkError(format!(
+                "FakeFetcher::always_fails synthetic failure for {}",
+                video_id
+            )));
+        }
         let map = self.canned.lock().expect("canned mutex");
         match map.get(video_id) {
             Some(path) => Ok(Acquisition::AudioFile(path.clone())),
@@ -66,6 +89,7 @@ mod tests {
         )]);
         let fake = FakeFetcher {
             canned: std::sync::Mutex::new(map),
+            always_fails: false,
         };
         let result = fake.acquire("7234567890123456789", "url").await.unwrap();
         match result {

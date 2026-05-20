@@ -59,6 +59,7 @@ async fn pipeline_processes_one_video_to_succeeded_with_fake_fetcher() {
     let map = HashMap::from([("7234567890123456789".to_string(), fake_wav.clone())]);
     let fetcher = FakeFetcher {
         canned: Mutex::new(map),
+        always_fails: false,
     };
 
     let transcriber = FakeTranscriber {
@@ -129,6 +130,7 @@ async fn pipeline_writes_raw_signals_to_json_artifact() {
     let map = HashMap::from([("7234567890123456789".to_string(), fake_wav.clone())]);
     let fetcher = FakeFetcher {
         canned: Mutex::new(map),
+        always_fails: false,
     };
 
     // Scripted output with one realistic segment+token so the projection
@@ -218,4 +220,48 @@ async fn pipeline_writes_raw_signals_to_json_artifact() {
     // model field reflects the transcriber's per-call model_id (no more
     // ProcessOptions::transcript_model literal).
     assert_eq!(parsed["model"], "fake-model.bin");
+}
+
+/// `run_serial` no longer aborts on first failure (Plan A behavior); it
+/// classifies the failure as retryable and continues. This test confirms
+/// the new behavior: a failing fetcher leaves the row as `failed_retryable`
+/// and run_serial returns Ok(stats) with `failed >= 1`.
+#[tokio::test]
+async fn run_serial_classifies_fetch_failure_as_retryable_and_continues() -> anyhow::Result<()> {
+    let tmp = TempDir::new()?;
+    let mut store = Store::open(&tmp.path().join("state.sqlite"))?;
+    store.upsert_video("vid_a", "https://example/a", false)?;
+    store.upsert_video("vid_b", "https://example/b", false)?;
+
+    let fetcher = FakeFetcher::always_fails();
+    let transcriber = FakeTranscriber {
+        scripted: TranscribeOutput {
+            text: "unused".into(),
+            language: "en".into(),
+            lang_probs: None,
+            segments: vec![],
+            model_id: "unused.bin".into(),
+        },
+    };
+
+    let opts = ProcessOptions {
+        worker_id: "test-worker".into(),
+        transcripts_root: tmp.path().join("transcripts"),
+        max_videos: Some(2),
+        compute_lang_probs: false,
+        transcribe_timeout: Duration::from_secs(5),
+        stale_claim_threshold: Duration::from_secs(60),
+    };
+
+    let stats = run_serial(&mut store, &fetcher, &transcriber, opts).await?;
+    assert_eq!(stats.claimed, 2);
+    assert_eq!(stats.succeeded, 0);
+    assert_eq!(stats.failed, 2);
+
+    // Both rows should be failed_retryable with the placeholder kind.
+    for vid in ["vid_a", "vid_b"] {
+        let row = store.get_video_for_test(vid)?.expect("row");
+        assert_eq!(row.status, "failed_retryable", "video {vid}");
+    }
+    Ok(())
 }
