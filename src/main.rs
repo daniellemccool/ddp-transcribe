@@ -71,20 +71,6 @@ async fn main() -> Result<()> {
                 tracing::info!(removed, "cleaned up leftover .tmp files");
             }
 
-            // T18 known gap: the pipelined orchestrator does NOT honor
-            // `--max-videos` (the run_serial cap mechanism doesn't
-            // generalize to N concurrent fetch workers without a shared
-            // counter). Warn so the operator isn't surprised by an
-            // unbounded drain when they intended a bounded test
-            // invocation. Tracked in `docs/followups/epic-2.md`.
-            if max_videos.is_some() {
-                tracing::warn!(
-                    "--max-videos is currently ignored by the pipelined orchestrator \
-                     (Phase 2 known gap; see docs/followups/epic-2.md); \
-                     the run will drain every pending row"
-                );
-            }
-
             let work_dir = cfg.transcripts.join(".work");
             std::fs::create_dir_all(&work_dir).context("creating work dir")?;
 

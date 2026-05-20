@@ -45,7 +45,6 @@ lines 120-148.
 
 **Epic 2 (concurrent fetch + state-machine)**
 - T5-Epic1: Worker-side closed-reply path silently swallows error → Epic 2 (tracing context)
-- T18: `--max-videos` ignored by `run_pipelined` (silent regression from `run_serial`) → Epic 2 cleanup (before Phase 2 close)
 - T16: `fetch_worker` cancellation latency bounded by largest await, not by `token.cancel()` → Epic 2 close OR Epic 3 graceful-shutdown
 - T17: sync `write_artifacts_and_mark` inside `tokio::sync::Mutex` guard inside async fn can stall under `TOKIO_WORKER_THREADS=1` → Epic 2 close OR Epic 5 ops-hygiene
 - Full Epic 2 entries: [followups/epic-2.md](followups/epic-2.md)

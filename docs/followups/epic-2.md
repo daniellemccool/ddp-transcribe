@@ -24,36 +24,6 @@ caller is visible in logs.
 
 ---
 
-### `--max-videos` ignored by `run_pipelined` (silent regression from `run_serial`)
-
-**Found in:** T18 supervision wiring (codex-advisor + opus review).
-**Disposition:** Epic 2 cleanup; resolve before Phase 2 close.
-**Trigger to revisit:** Phase 2 close cleanup; OR any task that
-touches `ProcessOptions::max_videos` or the orchestrator's
-fetch_worker loop.
-
-T18 swapped `main::Process` from `run_serial` (which honors
-`opts.max_videos` by checking `stats.claimed < max` in the outer
-loop) to `run_pipelined` (which does not). The CLI flag still
-parses, `Config::download_workers` still threads through, but
-`run_pipelined` never reads the field — every pending row drains
-regardless of the operator's cap.
-
-T18 added a startup `tracing::warn!` in `main.rs` when
-`max_videos.is_some()` so the operator sees the regression in the
-log instead of silently. The proper fix is a shared atomic counter
-in the orchestrator that fetch workers decrement-and-check before
-each `claim_next`, with a coordinated cancellation when the bound
-is reached. The dead-code suppression on
-`ProcessOptions::max_videos` should come off in the same commit.
-
-A bounded-take adapter on the claim stream is an alternative; either
-shape works as long as the cap is honored under N concurrent fetch
-workers (the obvious sum-after-the-fact "claim N, take first
-max_videos" would over-claim by up to N-1 rows).
-
----
-
 ### `fetch_worker` cancellation latency bounded by largest await, not by `token.cancel()`
 
 **Found in:** T16 codex review (Sonnet + codex-advisor delegation per 0018), surfaced again in T18 Opus deep review.

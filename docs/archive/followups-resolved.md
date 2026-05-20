@@ -490,3 +490,38 @@ changed the SELECT predicate to `WHERE status IN ('pending',
 'succeeded')` would not be caught by the current suite. T14's
 end-to-end fake-fetcher tests will likely cover this incidentally;
 if they don't, add a one-liner here.
+
+---
+
+## Resolved by Plan B Epic 2 — --max-videos cap honored by run_pipelined (2026-05-21)
+
+One Epic 2 entry resolved by this fix commit. Carried as an active-scope
+entry in `docs/followups/epic-2.md`.
+
+### `--max-videos` ignored by `run_pipelined` (silent regression from `run_serial`)
+
+**Found in:** T18 supervision wiring (codex-advisor + opus review).
+**Disposition:** Epic 2 cleanup; resolve before Phase 2 close.
+**Trigger to revisit:** Phase 2 close cleanup; OR any task that
+touches `ProcessOptions::max_videos` or the orchestrator's
+fetch_worker loop.
+**Resolved by:** this commit — `fetch_worker` gains a shared
+`Arc<AtomicUsize> claims_counter` parameter; the cap check
+(`claims_counter.load(Ordering::Relaxed) >= max`), the
+`claim_next` call, and the `claims_counter.fetch_add(1)` increment
+all occur inside the same `Mutex<Store>` guard scope, making the
+entire sequence race-free across N concurrent fetch workers (zero
+overshoot). The `#[allow(dead_code)]` annotation on
+`ProcessOptions::max_videos` is lifted; the T18 startup
+`tracing::warn!` about the gap is removed; a new integration test
+`run_pipelined_honors_max_videos_cap` (10 pending rows,
+`max_videos=Some(3)`, `download_workers=3`) asserts exactly 3 rows
+reach `succeeded` and 7 remain `pending`.
+
+T18 swapped `main::Process` from `run_serial` (which honored
+`opts.max_videos` by checking `stats.claimed < max` in the outer
+loop) to `run_pipelined` (which did not). The CLI flag still
+parsed, but `run_pipelined` never read the field — every pending
+row drained regardless of the operator's cap. T18 added a startup
+`tracing::warn!` so the regression was visible in logs rather than
+silent.

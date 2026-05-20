@@ -110,6 +110,7 @@ pub async fn fetch_worker(
     fetcher: Arc<dyn VideoFetcher>,
     sender: mpsc::Sender<FetchedItem>,
     stats_stale_after_failure: Arc<AtomicUsize>,
+    claims_counter: Arc<AtomicUsize>,
     opts: Arc<ProcessOptions>,
 ) -> Result<()> {
     let worker_id = opts.worker_id.clone();
@@ -124,9 +125,30 @@ pub async fn fetch_worker(
 
         // Acquire the store guard ONLY for the claim transaction; drop it
         // before the long-running fetch_and_decode below.
+        //
+        // Honor --max-videos cap. The check, claim_next, and counter
+        // increment are all inside this Mutex<Store> guard scope, so the
+        // entire check+claim+increment is atomic across concurrent fetch
+        // workers (the Mutex serializes them). Zero overshoot guaranteed.
         let claim = {
             let mut guard = store.lock().await;
-            guard.claim_next(&worker_id)?
+            let at_cap = match opts.max_videos {
+                Some(max) => claims_counter.load(Ordering::Relaxed) >= max,
+                None => false,
+            };
+            if at_cap {
+                tracing::info!(
+                    worker = %worker_id,
+                    "fetch_worker: max_videos cap reached; exiting"
+                );
+                None
+            } else {
+                let c = guard.claim_next(&worker_id)?;
+                if c.is_some() {
+                    claims_counter.fetch_add(1, Ordering::Relaxed);
+                }
+                c
+            }
         };
         let claim = match claim {
             Some(c) => c,
@@ -491,6 +513,10 @@ pub async fn run_pipelined(
     let opts_arc = Arc::new(opts);
     let stats_stale_after_failure = Arc::new(AtomicUsize::new(0));
     let stats_stale_after_success = Arc::new(AtomicUsize::new(0));
+    // Shared counter for --max-videos cap. Checked and incremented inside the
+    // Mutex<Store> guard in fetch_worker, so the check+claim+increment is
+    // race-free across all concurrent fetch workers.
+    let claims_counter = Arc::new(AtomicUsize::new(0));
     let mut join_set: JoinSet<Result<()>> = JoinSet::new();
 
     // Spawn the transcribe worker FIRST so the channel has a consumer
@@ -515,6 +541,7 @@ pub async fn run_pipelined(
             Arc::clone(&fetcher),
             tx.clone(),
             Arc::clone(&stats_stale_after_failure),
+            Arc::clone(&claims_counter),
             Arc::clone(&opts_arc),
         ));
     }

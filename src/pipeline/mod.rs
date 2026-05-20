@@ -56,20 +56,11 @@ pub use serial::run_serial;
 pub struct ProcessOptions {
     pub worker_id: String,
     pub transcripts_root: PathBuf,
-    /// Honored by `run_serial` (caps `claimed`). `run_pipelined` does
-    /// NOT honor this in Epic 2 — bounding across N concurrent fetch
-    /// workers would require either a shared counter or a take-N
-    /// adapter on the claim stream. The CLI flag stays plumbed so a
-    /// future iteration can implement it without re-touching the
-    /// argument shape; `main.rs` warns at startup when the operator
-    /// supplies a value. Tracked in `docs/followups/epic-2.md` for
-    /// resolution before Phase 2 close.
-    ///
-    /// 0002: serial still reads this; pipelined doesn't. The bin path
-    /// no longer reaches `run_serial` after T18, so the field appears
-    /// dead in bin compilation — suppress with the placeholder until
-    /// pipelined honors it or `run_serial` is retired.
-    #[allow(dead_code)]
+    /// Cap on total claimed rows. Honored by both `run_serial` (outer loop
+    /// guard `stats.claimed < max`) and `run_pipelined` (shared
+    /// `Arc<AtomicUsize>` counter checked inside the `Mutex<Store>` guard
+    /// before each `claim_next`, so the check + claim + increment is
+    /// race-free across N concurrent fetch workers; zero overshoot).
     pub max_videos: Option<usize>,
     /// Threaded from `Config::compute_lang_probs`. Consumed in `process_one`
     /// when constructing `PerCallConfig`.

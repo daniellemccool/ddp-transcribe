@@ -467,6 +467,7 @@ async fn fetch_worker_drains_pending_rows_and_exits() -> anyhow::Result<()> {
     let (tx, mut rx) = mpsc::channel::<FetchedItem>(2);
     let token = CancellationToken::new();
     let stats_stale_after_failure = Arc::new(AtomicUsize::new(0));
+    let claims_counter = Arc::new(AtomicUsize::new(0));
     let opts = ProcessOptions {
         worker_id: "fetcher-1".into(),
         transcripts_root: tmp.path().join("transcripts"),
@@ -484,6 +485,7 @@ async fn fetch_worker_drains_pending_rows_and_exits() -> anyhow::Result<()> {
         Arc::new(fetcher),
         tx,
         Arc::clone(&stats_stale_after_failure),
+        Arc::clone(&claims_counter),
         Arc::new(opts),
     ));
 
@@ -561,6 +563,7 @@ async fn fetch_worker_increments_stale_after_failure_on_swept_claim() -> anyhow:
     let (tx, mut rx) = mpsc::channel::<FetchedItem>(1);
     let token = CancellationToken::new();
     let stats_stale_after_failure = Arc::new(AtomicUsize::new(0));
+    let claims_counter = Arc::new(AtomicUsize::new(0));
     let opts = ProcessOptions {
         worker_id: "fetcher-1".into(),
         transcripts_root: tmp.path().join("transcripts"),
@@ -580,6 +583,7 @@ async fn fetch_worker_increments_stale_after_failure_on_swept_claim() -> anyhow:
         Arc::new(fetcher),
         tx,
         counter_handle,
+        Arc::clone(&claims_counter),
         Arc::new(opts),
     ));
 
@@ -897,6 +901,76 @@ async fn transcribe_worker_increments_stale_after_failure_on_swept_claim() -> an
     let row = guard.get_video_for_test("vid_a")?.expect("row");
     assert_eq!(row.status, "pending");
     drop(guard);
+
+    Ok(())
+}
+
+/// `run_pipelined` honors `--max-videos`: with 10 pending rows and
+/// `max_videos=Some(3)`, exactly 3 rows are claimed and reach `succeeded`;
+/// the remaining 7 rows stay `pending`. The cap check happens inside the
+/// `Mutex<Store>` guard before `claim_next`, making the check + claim +
+/// counter increment race-free across all fetch workers.
+#[tokio::test]
+async fn run_pipelined_honors_max_videos_cap() -> anyhow::Result<()> {
+    use std::sync::Arc;
+    use tokio::sync::Mutex as TokioMutex;
+
+    use uu_tiktok::pipeline::{run_pipelined, ProcessOptions, SharedStore};
+
+    let tmp = TempDir::new()?;
+    std::fs::create_dir_all(tmp.path().join("transcripts"))?;
+
+    let mut store = Store::open(&tmp.path().join("state.sqlite"))?;
+    let mut map = HashMap::new();
+    for i in 0..10 {
+        let vid = format!("vid_{i}");
+        store.upsert_video(&vid, &format!("https://example/{i}"), false)?;
+        let wav = tmp.path().join(format!("{vid}.wav"));
+        std::fs::copy(silence_fixture(), &wav)?;
+        map.insert(vid, wav);
+    }
+    drop(store);
+
+    let store = Store::open(&tmp.path().join("state.sqlite"))?;
+    let shared: SharedStore = Arc::new(TokioMutex::new(store));
+    let fetcher = Arc::new(FakeFetcher {
+        canned: Mutex::new(map),
+        always_fails: false,
+        first_call_gate: tokio::sync::Mutex::new(None),
+    });
+    let transcriber: Arc<dyn Transcriber> = Arc::new(FakeTranscriber::echo());
+
+    let opts = ProcessOptions {
+        worker_id: "orchestrator".into(),
+        transcripts_root: tmp.path().join("transcripts"),
+        max_videos: Some(3),
+        compute_lang_probs: false,
+        transcribe_timeout: Duration::from_secs(5),
+        stale_claim_threshold: Duration::from_secs(60),
+        download_workers: 3,
+        channel_capacity: 2,
+    };
+
+    let stats = run_pipelined(Arc::clone(&shared), fetcher, transcriber, opts).await?;
+    assert_eq!(stats.succeeded, 3, "exactly 3 rows should succeed");
+    assert_eq!(stats.failed, 0);
+
+    // 7 rows must remain pending
+    let guard = shared.lock().await;
+    let mut pending_count = 0usize;
+    let mut succeeded_count = 0usize;
+    for i in 0..10 {
+        let row = guard
+            .get_video_for_test(&format!("vid_{i}"))?
+            .expect("row present");
+        match row.status.as_str() {
+            "pending" => pending_count += 1,
+            "succeeded" => succeeded_count += 1,
+            other => panic!("unexpected status {other} for vid_{i}"),
+        }
+    }
+    assert_eq!(succeeded_count, 3, "3 rows must be succeeded");
+    assert_eq!(pending_count, 7, "7 rows must remain pending");
 
     Ok(())
 }
