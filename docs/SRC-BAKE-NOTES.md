@@ -284,4 +284,130 @@ Bake-completion checklist (Epic 2 scope):
 - [x] Coordinated-shutdown drill completed (6-row recovery, final state clean)
 - [x] Language detection confirmed on multilingual fixture (fr/nl/en/tl)
 - [ ] --compute-lang-probs measurement (deferred to Epic 3)
-- [ ] Multi-fixture speedup ceiling verification (deferred)
+- [ ] Multi-fixture speedup ceiling verification (partially addressed by the real-DDP addendum below)
+
+---
+
+## Addendum: real-DDP validation (2026-05-21)
+
+**Goal:** Pre-production validation of Phase 2 against real donor data. The
+`news_orgs` fixture is synthetic and used curated URLs that all succeeded;
+real DDPs exercise yt-dlp failure modes (deleted videos, region-locks,
+rate-limits) that the synthetic fixture didn't surface.
+
+**Build:** `feat/plan-b-epic-2` @ `2d89860` (Phase 2 + cleanup + bootstrap UX +
+`--max-videos` regression fix at `9228c89` + ingest UTC-suffix fix at `2d89860`).
+
+**Fixture:** PI's TikTok DDP — 65,024 watch-history entries, 56,600 unique
+videos, 93 same-second source duplicates. Stored at
+`/data/transcription-pipeline-storage/test_data/` per the Research Drive
+layout in `docs/SRC-RUNBOOK.md`. Ingested via symlink into
+`~/src/work-pi-100/inbox/`.
+
+**Topology:** Default (N=3 download workers, capacity 2).
+**Cap:** `--max-videos 100` (the fix landed in `9228c89` enabled this).
+**Model:** `ggml-large-v3-turbo-q5_0.bin` (GPU/CUDA).
+
+### Bake-100 outcome
+
+```
+process complete claimed=100 succeeded=93 failed=7
+                  stale_after_success=0 stale_after_failure=0
+real    3m51.766s
+```
+
+Per-video: 2.32s (vs 1.45s on `news_orgs`). The ~0.9s/video overhead is
+failure-handling cost: yt-dlp probes that 404/403/region-lock take seconds
+to detect before erroring; the synthetic fixture had no such probes.
+
+Status breakdown after the run:
+
+```
+failed_retryable | 7
+pending          | 56500
+succeeded        | 93
+```
+
+Math sanity: 56,500 + 7 + 93 = 56,600 = the unique_videos_seen the
+ingest reported. State machine is consistent end-to-end. No
+`in_progress` (all 100 claimed reached terminal); no `failed_terminal`
+(Phase 2 doesn't wire `mark_terminal_failure` — Epic 3+ scope).
+
+### Bugs surfaced + fixed during setup
+
+Two bugs surfaced when first running the real DDP through ingest. Both
+are fixed; this addendum records them for the operator playbook:
+
+1. **`--max-videos` ignored by `run_pipelined`** (commit `9228c89` —
+   Phase 2 T18 regression). Shared `Arc<AtomicUsize>` counter inside
+   the `Mutex<Store>` guard scope; race-free via existing serialization.
+   Honored exactly (claimed=100 on the bake confirms).
+2. **Ingest silently dropped 65,024 entries** because real DDPs use the
+   date format `"2026-02-17 21:28:52 UTC"` and the parser expected
+   `%Y-%m-%d %H:%M:%S` (no suffix; matched synthetic fixtures only).
+   Fixed at `2d89860`: multi-format parser slice; also surfaced the
+   previously-hidden `date_parse_failures` counter in the ingest log
+   line. The log gap was a real defect — the bug was invisible until
+   `videos=0 history=0` showed up on real data.
+
+### Real-DDP failure profile
+
+7 of 100 fetches failed_retryable (~7% failure rate). All 7 routed
+through `mark_retryable_failure` with `kind="FetchOrTranscribe"` (the
+Phase 2 placeholder string-kind; Epic 3 will replace with typed
+`RetryableKind`). No failures escalated; the run drained cleanly to 93
+succeeded.
+
+Common real-data failure modes (categorized by `yt-dlp`'s error class —
+inferred from yt-dlp documentation, NOT from inspecting donor URLs):
+
+- Video deleted (404 from CDN)
+- Region-locked content
+- Rate-limit / temporary CDN issues
+- yt-dlp format-selection edge cases (Epic 1 bake Finding 1 lineage)
+
+These categories will become typed `RetryableKind` variants in Epic 3.
+
+### What this validates
+
+1. **The classifier-on-failure design (ADR 0008, ADR 0023) works against
+   real failure modes.** Plan A would have aborted on the first 404;
+   Phase 2 processed 93 successes alongside 7 failures.
+2. **`--max-videos N` is the right Phase 3 chunking primitive.** Exact
+   cap, no overshoot. A 65k bake split into 10k-row sessions
+   (~6 sessions × ~6.5 hours at 2.32s/video) fits the ADR 0011
+   pause/resume operational rhythm.
+3. **The state machine end-to-end is consistent on real volume.** 56,600
+   videos ingested in ~19s; 100 processed; 56,500 pending; row math
+   adds up exactly.
+4. **The diagnostic surface improvement** (date_parse_failures in the
+   log) shows the project's learning loop: a real-data setup found a
+   long-hidden bug, fixed it, and updated the playbook in one cycle.
+
+### Phase 3 production-scale projection
+
+At the measured 2.32s/video on real DDP data:
+
+- 56,600 remaining pending rows × 2.32s = **~131,400s ≈ 36.5 hours** of
+  A10 wallclock to drain in N=3 default topology.
+- Chunked at `--max-videos 10000`: ~6.5 sessions × ~6.5h each.
+- Chunked at `--max-videos 5000`: ~13 sessions × ~3.3h each.
+- Per-session pause-resume per ADR 0011; storage drive persists state.sqlite
+  + transcripts; `attempt_count` tracks per-row retry history.
+
+This is the operational shape Phase 3's failure-classification work
+(typed `RetryableKind`, `Acquisition::Unavailable`, etc.) builds on. The
+7 retryable failures from bake-100 are the input the Epic 3 classifier
+will categorize.
+
+### What this bake did NOT do (real-DDP scope)
+
+- Did NOT push beyond 100 videos (production-scale validation is Phase 3
+  exit criteria, not Phase 2).
+- Did NOT run the coordinated-shutdown drill against real DDP volume
+  (synthetic news_orgs drill already validated the mechanism per the
+  table above).
+- Did NOT measure `--compute-lang-probs` overhead on real data
+  (deferred to Epic 3 bake addendum).
+- Did NOT inspect transcript content quality (orchestrator-side review
+  out of scope; PI handles content review per study design).
