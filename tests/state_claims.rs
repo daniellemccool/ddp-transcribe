@@ -1,3 +1,4 @@
+use anyhow::Result;
 use tempfile::TempDir;
 use uu_tiktok::state::{Claim, Store, SuccessArtifacts};
 
@@ -60,7 +61,9 @@ fn mark_succeeded_writes_status_and_event_in_one_transaction() {
         fetcher: "ytdlp",
         transcript_source: "whisper.cpp",
     };
-    store.mark_succeeded(&claim.video_id, artifacts).unwrap();
+    store
+        .mark_succeeded(&claim.video_id, "w", artifacts)
+        .unwrap();
 
     let row = store.get_video_for_test(&claim.video_id).unwrap().unwrap();
     assert_eq!(row.status, "succeeded");
@@ -89,4 +92,57 @@ fn concurrent_claim_serializes_via_begin_immediate() {
 
     let claimed: Vec<&Claim> = [a.as_ref(), b.as_ref()].into_iter().flatten().collect();
     assert_eq!(claimed.len(), 1, "exactly one connection wins the row");
+}
+
+#[test]
+fn mark_succeeded_with_stale_claim_returns_zero_and_does_not_update() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let path = tmp.path().join("state.sqlite");
+    let mut store = Store::open(&path)?;
+
+    store.upsert_video("vid_a", "https://example/a", false)?;
+
+    let claim = store.claim_next("worker-1")?.expect("first claim succeeds");
+    assert_eq!(claim.video_id, "vid_a");
+
+    // Simulate a different worker calling mark_succeeded with the wrong
+    // worker_id (stale claim): the predicate rejects, returns 0.
+    let artifacts = SuccessArtifacts {
+        duration_s: Some(1.0),
+        language_detected: Some("en".to_string()),
+        fetcher: "fake",
+        transcript_source: "fake",
+    };
+    let changed = store.mark_succeeded("vid_a", "worker-DIFFERENT", artifacts)?;
+    assert_eq!(changed, 0, "stale-claim mark_succeeded should not update");
+
+    // Row should still be in_progress, still claimed by worker-1.
+    let row = store
+        .get_video_for_test("vid_a")?
+        .expect("row still present");
+    assert_eq!(row.status, "in_progress");
+
+    Ok(())
+}
+
+#[test]
+fn claim_then_mark_succeeded_then_reclaim_returns_none() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let path = tmp.path().join("state.sqlite");
+    let mut store = Store::open(&path)?;
+    store.upsert_video("vid_a", "https://example/a", false)?;
+
+    let claim = store.claim_next("worker-1")?.expect("first claim");
+    let artifacts = SuccessArtifacts {
+        duration_s: Some(1.0),
+        language_detected: Some("en".to_string()),
+        fetcher: "fake",
+        transcript_source: "fake",
+    };
+    let changed = store.mark_succeeded(&claim.video_id, "worker-1", artifacts)?;
+    assert_eq!(changed, 1);
+
+    let second = store.claim_next("worker-1")?;
+    assert!(second.is_none(), "round-trip: no pending rows left");
+    Ok(())
 }

@@ -273,13 +273,20 @@ impl Store {
     }
 
     /// Mark a video as succeeded and record a `succeeded` event, atomically.
-    /// Returns the row-change count from the videos UPDATE per 0006. Without
-    /// a `WHERE status = 'in_progress'` predicate (FOLLOWUPS-tracked, deferred
-    /// to Plan B's state-machine work), this count is symbolic — always 1 for
-    /// any matching video_id. Once Plan B adds the predicate, callers can
-    /// detect "0 means the row was not in_progress (stale claim?)" without a
-    /// separate query.
-    pub fn mark_succeeded(&mut self, video_id: &str, artifacts: SuccessArtifacts) -> Result<usize> {
+    /// Returns the row-change count from the videos UPDATE per 0006.
+    ///
+    /// The UPDATE is guarded by `WHERE status='in_progress' AND claimed_by = ?`
+    /// (0023 symmetric with mark_retryable_failure / mark_terminal_failure):
+    /// callers can detect "0 means the row was not in_progress or claimed by
+    /// a different worker (stale claim)" without a separate query. The event
+    /// row is inserted only when the UPDATE matches, so video_events stays
+    /// faithful to what actually changed.
+    pub fn mark_succeeded(
+        &mut self,
+        video_id: &str,
+        worker_id: &str,
+        artifacts: SuccessArtifacts,
+    ) -> Result<usize> {
         let now = unix_now();
         let tx = self
             .conn
@@ -296,7 +303,9 @@ impl Store {
                  fetcher = ?5,
                  transcript_source = ?6,
                  updated_at = ?2
-             WHERE video_id = ?1",
+             WHERE video_id = ?1
+               AND status = 'in_progress'
+               AND claimed_by = ?7",
                 params![
                     video_id,
                     now,
@@ -304,15 +313,22 @@ impl Store {
                     artifacts.language_detected,
                     artifacts.fetcher,
                     artifacts.transcript_source,
+                    worker_id,
                 ],
             )
             .with_context(|| format!("update videos for succeeded {}", video_id))?;
 
-        tx.execute(
-            "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
-             VALUES (?1, ?2, 'succeeded', NULL, NULL)",
-            params![video_id, now],
-        )?;
+        // Only insert the event row if the UPDATE matched — symmetry with the
+        // mutator's row-change count. 0008 invariant: artifacts are durable
+        // before this call regardless of outcome; the event row is bookkeeping
+        // for "the DB acknowledged the success."
+        if changed > 0 {
+            tx.execute(
+                "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
+                 VALUES (?1, ?2, 'succeeded', ?3, NULL)",
+                params![video_id, now, worker_id],
+            )?;
+        }
 
         tx.commit().context("commit mark_succeeded")?;
         Ok(changed)

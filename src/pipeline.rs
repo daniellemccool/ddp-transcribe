@@ -160,6 +160,7 @@ async fn process_one(
     // 0008: artifacts durable, now mark the row succeeded.
     store.mark_succeeded(
         &claim.video_id,
+        &opts.worker_id,
         SuccessArtifacts {
             duration_s,
             language_detected: Some(transcribe_output.language.clone()),
