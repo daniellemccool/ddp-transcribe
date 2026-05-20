@@ -61,6 +61,8 @@ lines 120-148.
 - T10: `claim_next`/`mark_succeeded` lack `with_context` → Epic 3 (bundle with error restructure)
 - T11: `YtDlpFetcher::acquire` error mapping → Epic 3 (classifier covers it)
 - T5-Epic1: `From<AudioDecodeError> for TranscribeError` maps to Bug → Epic 3 (classification taxonomy)
+- Epic2-review: `pipeline_fakes.rs` mixing concerns + over-narrated → Epic 3 (file split + strip phase comments)
+- Epic2-review: over-reliance on worker-level entry points in `pipeline_fakes` → Epic 3 (audit vs run_pipelined)
 - Full Epic 3 entries: [followups/epic-3.md](followups/epic-3.md)
 
 **Epic 4 (operator-facing commands / timestamps)**
