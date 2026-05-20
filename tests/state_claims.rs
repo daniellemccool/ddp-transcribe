@@ -74,24 +74,59 @@ fn mark_succeeded_writes_status_and_event_in_one_transaction() {
 }
 
 #[test]
-fn concurrent_claim_serializes_via_begin_immediate() {
-    // Two distinct connections to the same DB. claim_next must atomically
-    // pick a row so only one connection succeeds for a given pending row.
-    let tmp = TempDir::new().unwrap();
+fn concurrent_claim_serializes_via_begin_immediate() -> Result<()> {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    // Seed the row from a one-shot Store, then drop it so the two racing
+    // threads have unambiguous ownership of their own Store handles.
+    let tmp = TempDir::new()?;
     let path = tmp.path().join("state.sqlite");
+    {
+        let mut seed = Store::open(&path)?;
+        seed.upsert_video("7234567890123456789", "https://example/a", true)?;
+    }
 
-    let mut store_a = Store::open(&path).unwrap();
-    let mut store_b = Store::open(&path).unwrap();
+    // Both threads open their own handle before the barrier so any
+    // connection-setup latency is excluded from the race window.
+    let barrier = Arc::new(Barrier::new(2));
+    let path_a = path.clone();
+    let path_b = path.clone();
+    let barrier_a = Arc::clone(&barrier);
+    let barrier_b = Arc::clone(&barrier);
 
-    store_a
-        .upsert_video("7234567890123456789", "url", true)
-        .unwrap();
+    let handle_a = thread::spawn(move || -> anyhow::Result<Option<Claim>> {
+        let mut store = Store::open(&path_a)?;
+        barrier_a.wait();
+        Ok(store.claim_next("worker-A")?)
+    });
+    let handle_b = thread::spawn(move || -> anyhow::Result<Option<Claim>> {
+        let mut store = Store::open(&path_b)?;
+        barrier_b.wait();
+        Ok(store.claim_next("worker-B")?)
+    });
 
-    let a = store_a.claim_next("worker-a").unwrap();
-    let b = store_b.claim_next("worker-b").unwrap();
+    let result_a = handle_a.join().expect("thread A panicked")?;
+    let result_b = handle_b.join().expect("thread B panicked")?;
 
-    let claimed: Vec<&Claim> = [a.as_ref(), b.as_ref()].into_iter().flatten().collect();
-    assert_eq!(claimed.len(), 1, "exactly one connection wins the row");
+    // BEGIN-IMMEDIATE serializes the two transactions: exactly one wins
+    // (Some) and the other sees no pending row (None).
+    // some_count == 2 would mean serialization is broken — a real bug.
+    // some_count == 0 would mean both hit busy_timeout — needs investigation.
+    let some_count = [&result_a, &result_b]
+        .iter()
+        .filter(|r| r.is_some())
+        .count();
+    let none_count = [&result_a, &result_b]
+        .iter()
+        .filter(|r| r.is_none())
+        .count();
+    assert_eq!(some_count, 1, "exactly one thread should win the claim");
+    assert_eq!(none_count, 1, "exactly one thread should see no pending");
+
+    let winner = result_a.or(result_b).unwrap();
+    assert_eq!(winner.video_id, "7234567890123456789");
+    Ok(())
 }
 
 #[test]
