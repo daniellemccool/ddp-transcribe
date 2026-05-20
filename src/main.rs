@@ -121,6 +121,17 @@ async fn main() -> Result<()> {
                 std::process::exit(3);
             }
         }
+        cli::Command::Migrate => {
+            let path = &cfg.state_db;
+            if !path.exists() {
+                anyhow::bail!(
+                    "migrate: state.sqlite not found at {}. Run `uu-tiktok init` first.",
+                    path.display()
+                );
+            }
+            state::migrate::run_migrate(path).context("running migrate")?;
+            tracing::info!(path = %path.display(), "migrate complete");
+        }
     }
 
     Ok(())

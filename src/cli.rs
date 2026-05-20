@@ -57,6 +57,9 @@ pub enum Command {
         #[arg(long)]
         max_videos: Option<usize>,
     },
+    /// Upgrade a pre-Epic-2 (v1) state.sqlite to the current schema version.
+    /// Idempotent: no-op if already at the current version.
+    Migrate,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]

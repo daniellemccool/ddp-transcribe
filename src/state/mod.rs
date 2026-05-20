@@ -1,3 +1,4 @@
+pub mod migrate;
 mod schema;
 
 use std::path::Path;
