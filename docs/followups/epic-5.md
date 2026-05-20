@@ -249,3 +249,24 @@ pub whisper_model: Option<PathBuf>,
 ```
 
 Should land alongside any future change touching the same struct.
+
+**Scope extension (2026-05-20, T11 review):** the same papercut affects
+ALL `GlobalArgs` fields except `compute_lang_probs`. As of T11
+(`feat/plan-b-epic-2`), the GlobalArgs surface is:
+
+| Field | `global = true`? |
+|---|---|
+| `profile` | no |
+| `state_db` | no |
+| `inbox` | no |
+| `transcripts` | no |
+| `log_format` | no |
+| `whisper_model` | no (this entry's original scope) |
+| `compute_lang_probs` | **yes** (the lone outlier) |
+| `stale_claim_threshold` | no (added in T11) |
+
+The Epic 5 cleanup sweep should add `global = true` to all six
+non-`compute_lang_probs` flags in one commit. T11's
+`stale_claim_threshold` was deliberately left without `global = true`
+to match the prevailing project convention rather than create
+two-of-eight inconsistency.

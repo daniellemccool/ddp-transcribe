@@ -77,7 +77,7 @@ lines 120-148.
 - T9/T10: `Store::conn`/`conn_mut` accessor hygiene → Epic 5 (delete `conn_mut`; refresh comment)
 - T13: `ingest::walk_recursive` polish → Epic 5 (bundle with sync-IO sweep)
 - T15: `output::shard_dir` unused → Epic 5 (delete)
-- SRC-bake: `--whisper-model` global flag rejected after subcommand → Epic 5 (one-line `global = true`)
+- SRC-bake + T11: `--whisper-model` (and 5 other GlobalArgs flags) rejected after subcommand → Epic 5 (one-line `global = true` per flag)
 - Full Epic 5 entries: [followups/epic-5.md](followups/epic-5.md)
 
 **Plan C (short-link resolution, multi-engine, storage scale)**
