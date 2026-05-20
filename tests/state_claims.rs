@@ -51,7 +51,7 @@ fn claim_next_orders_by_first_seen_at() {
 
 #[test]
 fn mark_succeeded_writes_status_and_event_in_one_transaction() {
-    let (_tmp, mut store) = fresh_store_with(&[("7234567890123456789", "url")]);
+    let (tmp, mut store) = fresh_store_with(&[("7234567890123456789", "url")]);
     let claim = store.claim_next("w").unwrap().unwrap();
     assert_eq!(claim.video_id, "7234567890123456789");
 
@@ -71,6 +71,29 @@ fn mark_succeeded_writes_status_and_event_in_one_transaction() {
     let kinds: Vec<&str> = events.iter().map(|e| e.event_type.as_str()).collect();
     assert!(kinds.contains(&"claimed"), "claimed event recorded");
     assert!(kinds.contains(&"succeeded"), "succeeded event recorded");
+
+    // 1A backport: verify the succeeded event row has the expected shape
+    // (symmetric with T7's mark_terminal_failure assertion — T7 reviewed first).
+    let raw = rusqlite::Connection::open(tmp.path().join("state.sqlite")).unwrap();
+    let (event_type, evt_worker, detail): (String, Option<String>, Option<String>) = raw
+        .query_row(
+            "SELECT event_type, worker_id, detail_json
+             FROM video_events
+             WHERE video_id = ?1 AND event_type = 'succeeded'",
+            ["7234567890123456789"],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(event_type, "succeeded");
+    assert_eq!(
+        evt_worker.as_deref(),
+        Some("w"),
+        "worker_id recorded on succeeded event"
+    );
+    assert!(
+        detail.is_none(),
+        "detail_json must be NULL for succeeded event"
+    );
 }
 
 #[test]
@@ -157,6 +180,19 @@ fn mark_succeeded_with_stale_claim_returns_zero_and_does_not_update() -> Result<
         .expect("row still present");
     assert_eq!(row.status, "in_progress");
 
+    // no-event-on-stale: predicate rejected, so NO 'succeeded' event row.
+    // Only the 'claimed' event from claim_next should be present.
+    let raw = rusqlite::Connection::open(&path)?;
+    let succeeded_event_count: i64 = raw.query_row(
+        "SELECT COUNT(*) FROM video_events WHERE video_id = 'vid_a' AND event_type = 'succeeded'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(
+        succeeded_event_count, 0,
+        "stale-claim mark_succeeded must not insert a succeeded event row"
+    );
+
     Ok(())
 }
 
@@ -205,6 +241,36 @@ fn mark_retryable_failure_flips_status_and_records_columns() -> anyhow::Result<(
         claimed_at, None,
         "claimed_at must be NULL after retryable flip"
     );
+
+    // 1A backport: verify the failed_retryable event row has the expected shape.
+    let (evt_type, evt_worker, detail): (String, Option<String>, Option<String>) = raw.query_row(
+        "SELECT event_type, worker_id, detail_json
+             FROM video_events
+             WHERE video_id = ?1 AND event_type = 'failed_retryable'",
+        ["vid_a"],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    assert_eq!(evt_type, "failed_retryable");
+    assert_eq!(
+        evt_worker.as_deref(),
+        Some("worker-1"),
+        "worker_id recorded on failed_retryable event"
+    );
+    let detail = detail.expect("detail_json populated for failed_retryable event");
+    let detail: serde_json::Value =
+        serde_json::from_str(&detail).expect("detail_json parses as JSON");
+    assert_eq!(
+        detail["kind"].as_str(),
+        Some("FetchTimeout"),
+        "detail_json[\"kind\"] must be \"FetchTimeout\", got {:?}",
+        detail["kind"]
+    );
+    assert_eq!(
+        detail["message"].as_str(),
+        Some("yt-dlp exceeded 300s budget"),
+        "detail_json[\"message\"] must match, got {:?}",
+        detail["message"]
+    );
     Ok(())
 }
 
@@ -247,6 +313,17 @@ fn mark_retryable_failure_with_stale_claim_returns_zero() -> anyhow::Result<()> 
         cb.as_deref(),
         Some("worker-1"),
         "original claim must be preserved"
+    );
+
+    // no-event-on-stale: predicate rejected, so NO 'failed_retryable' event row.
+    let retryable_event_count: i64 = raw.query_row(
+        "SELECT COUNT(*) FROM video_events WHERE video_id = 'vid_a' AND event_type = 'failed_retryable'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(
+        retryable_event_count, 0,
+        "stale-claim mark_retryable_failure must not insert a failed_retryable event row"
     );
     Ok(())
 }
@@ -332,13 +409,19 @@ fn mark_terminal_failure_flips_status_and_records_columns() -> anyhow::Result<()
     assert_eq!(event_type, "failed_terminal");
     assert_eq!(evt_worker.as_deref(), Some("worker-1"));
     let detail = detail.expect("detail_json populated");
-    assert!(
-        detail.contains("VideoUnavailable"),
-        "detail JSON includes reason: {detail}"
+    let detail: serde_json::Value =
+        serde_json::from_str(&detail).expect("detail_json parses as JSON");
+    assert_eq!(
+        detail["reason"].as_str(),
+        Some("VideoUnavailable"),
+        "detail_json[\"reason\"] must be \"VideoUnavailable\", got {:?}",
+        detail["reason"]
     );
-    assert!(
-        detail.contains("yt-dlp returned 410 Gone"),
-        "detail JSON includes message: {detail}"
+    assert_eq!(
+        detail["message"].as_str(),
+        Some("yt-dlp returned 410 Gone"),
+        "detail_json[\"message\"] must match, got {:?}",
+        detail["message"]
     );
 
     Ok(())
@@ -384,6 +467,17 @@ fn mark_terminal_failure_with_stale_claim_returns_zero() -> anyhow::Result<()> {
         cb.as_deref(),
         Some("worker-1"),
         "original claim must be preserved"
+    );
+
+    // no-event-on-stale: predicate rejected, so NO 'failed_terminal' event row.
+    let terminal_event_count: i64 = raw.query_row(
+        "SELECT COUNT(*) FROM video_events WHERE video_id = 'vid_a' AND event_type = 'failed_terminal'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(
+        terminal_event_count, 0,
+        "stale-claim mark_terminal_failure must not insert a failed_terminal event row"
     );
 
     Ok(())
@@ -501,5 +595,70 @@ fn sweep_stale_claims_is_idempotent() -> anyhow::Result<()> {
         store.sweep_stale_claims(Duration::from_secs(60 * 60 * 24))?,
         0
     );
+    Ok(())
+}
+
+/// 1B hardening: a row whose `claimed_at` is in the future (clock-skew
+/// simulation) must NOT be swept. The predicate is `claimed_at < cutoff`;
+/// when `claimed_at > now`, the predicate is false regardless of threshold.
+#[test]
+fn sweep_stale_claims_does_not_sweep_future_claimed_at() -> anyhow::Result<()> {
+    use rusqlite::Connection;
+    use std::time::Duration;
+    use uu_tiktok::state::Store;
+
+    let tmp = tempfile::TempDir::new()?;
+    let path = tmp.path().join("state.sqlite");
+    let mut store = Store::open(&path)?;
+    store.upsert_video("vid_a", "https://example/a", false)?;
+    let _claim = store.claim_next("worker-1")?.expect("claim");
+
+    // Advance claimed_at far into the future to simulate clock skew.
+    {
+        let raw = Connection::open(&path)?;
+        raw.execute(
+            "UPDATE videos SET claimed_at = ?1 WHERE video_id = 'vid_a'",
+            [i64::MAX / 2], // year ~146 billion — definitely in the future
+        )?;
+    }
+
+    // Even with a tiny threshold, the row must not be swept.
+    let recovered = store.sweep_stale_claims(Duration::from_secs(0))?;
+    assert_eq!(
+        recovered, 0,
+        "future-valued claimed_at must not be swept (clock-skew safety)"
+    );
+    let row = store.get_video_for_test("vid_a")?.expect("row present");
+    assert_eq!(row.status, "in_progress", "row status unchanged");
+    Ok(())
+}
+
+/// 1B hardening: sweeping immediately with `Duration::ZERO` after a claim
+/// (same second, no sleep) must NOT sweep the row. `threshold == 0` sets
+/// `cutoff = now`, and `claimed_at < cutoff` is false when claimed_at == now
+/// (second-resolution tie: same-second claims survive). Pinning this
+/// behavior prevents silent regression if the predicate is ever changed to
+/// `<=` (which would break claim semantics for same-second callers).
+#[test]
+fn sweep_stale_claims_with_zero_threshold_does_not_sweep_same_second_claim() -> anyhow::Result<()> {
+    use std::time::Duration;
+    use uu_tiktok::state::Store;
+
+    let tmp = tempfile::TempDir::new()?;
+    let path = tmp.path().join("state.sqlite");
+    let mut store = Store::open(&path)?;
+    store.upsert_video("vid_a", "https://example/a", false)?;
+    let _claim = store.claim_next("worker-1")?.expect("claim");
+
+    // Sweep immediately with zero threshold — no sleep, same second as claim.
+    // `unix_now()` is second-resolution, so claimed_at == now, and the strict
+    // `claimed_at < cutoff` predicate must reject the row.
+    let recovered = store.sweep_stale_claims(Duration::ZERO)?;
+    assert_eq!(
+        recovered, 0,
+        "same-second claim must survive a Duration::ZERO sweep"
+    );
+    let row = store.get_video_for_test("vid_a")?.expect("row present");
+    assert_eq!(row.status, "in_progress", "same-second claim not swept");
     Ok(())
 }
