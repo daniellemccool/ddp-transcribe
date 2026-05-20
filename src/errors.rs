@@ -26,7 +26,7 @@ pub enum FetchError {
 
 #[derive(Debug, Error)]
 pub enum TranscribeError {
-    // AD0002: Plan A's whisper-cli subprocess constructed these (T11 deleted
+    // 0002: Plan A's whisper-cli subprocess constructed these (T11 deleted
     // the legacy `transcribe()` fn). Epic 3's failure-classification work will
     // rebuild this enum with a richer taxonomy (`AudioDecode`, `ModelOOM`,
     // `RetryableKind`, `UnavailableReason`, etc.). Keeping `Timeout`,

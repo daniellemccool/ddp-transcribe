@@ -147,8 +147,8 @@ docs/
   — the canonical design: scope, architecture, data model, error taxonomy,
   operational model. Start here for *why*.
 - [`docs/decisions/`](docs/decisions/) — ADRs covering concrete choices
-  (e.g. transcript sharding `AD0004`, `test-helpers` feature `AD0005`,
-  artifact-write ordering `AD0008`). See `index.yaml`.
+  (e.g. transcript sharding `0004`, `test-helpers` feature `0005`,
+  artifact-write ordering `0008`). See `index.yaml`.
 - [`docs/superpowers/plans/2026-04-16-plan-a/`](docs/superpowers/plans/2026-04-16-plan-a/)
   — per-task Plan A files (what was built, in order).
 - [`docs/superpowers/plans/PLAN-B-KICKOFF-PROMPT.md`](docs/superpowers/plans/PLAN-B-KICKOFF-PROMPT.md)

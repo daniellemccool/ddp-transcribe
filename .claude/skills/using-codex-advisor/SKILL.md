@@ -1,11 +1,11 @@
 ---
 name: using-codex-advisor
-description: Use when consulting `codex-advisor` for design tradeoffs or code-quality review in this repo. Covers the AD0018 delegation policy (orchestrators do NOT call codex-advisor directly during task reviews; Sonnet spec-compliance reviewers call it and distill the response), the pinned-session model, and output-cap discipline. Operational surface is in `codex-advisor --help`.
+description: Use when consulting `codex-advisor` for design tradeoffs or code-quality review in this repo. Covers the 0018 delegation policy (orchestrators do NOT call codex-advisor directly during task reviews; Sonnet spec-compliance reviewers call it and distill the response), the pinned-session model, and output-cap discipline. Operational surface is in `codex-advisor --help`.
 ---
 
 # Using `codex-advisor` in this repo
 
-## The policy (AD0018)
+## The policy (0018)
 
 **During per-task review cycles, the orchestrator (Opus) does NOT call `codex-advisor` directly.** The Sonnet spec-compliance reviewer calls it, reads the response, and reports a distilled signal back to the orchestrator (≤300 words). codex's full reply lives in the pinned-session transcript (`codex-advisor transcript`) for spot-checks; it does NOT land in the orchestrator's conversation. This keeps the orchestrator's working set lean across multi-task dispatches.
 

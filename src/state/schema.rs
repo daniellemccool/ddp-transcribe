@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: &str = "1";
+pub const SCHEMA_VERSION: &str = "2";
 
 pub const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS videos (
@@ -18,6 +18,13 @@ CREATE TABLE IF NOT EXISTS videos (
     language_detected   TEXT,
     fetcher             TEXT,
     transcript_source   TEXT,
+    -- Plan B Epic 2: failure classification columns (0022, 0023).
+    -- String-typed today per 0023; Epic 3's typed enums serialize into
+    -- the same columns via tag()/message() projections.
+    last_retryable_kind     TEXT,
+    last_retryable_message  TEXT,
+    terminal_reason         TEXT,
+    terminal_message        TEXT,
     first_seen_at       INTEGER NOT NULL,
     updated_at          INTEGER NOT NULL
 );

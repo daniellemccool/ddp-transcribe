@@ -8,31 +8,31 @@ Pipeline that ingests TikTok DDP (Data Donation Programme) exports, fetches the 
 
 Project conventions live in `docs/decisions/` as Architectural Decision Records. The meta-process slate that applies to every epic:
 
-- **AD0001** — per-task file split for plans (subagent context economy)
-- **AD0002** — dead-code suppression strategy + deferred bin/lib reassessment
-- **AD0003** — test discipline + brief-deviation honesty in commits
-- **AD0005** — `test-helpers` Cargo feature for integration-test library items
-- **AD0006** — `Store` mutators return `Result<usize>` (row-change count)
-- **AD0007** — stats structs use input-side counters with verb-named fields
-- **AD0008** — pipeline writes transcript artifacts before `mark_succeeded`
-- **AD0018** — three-tier review with codex-advisor delegated via Sonnet reviewer
-- **AD0019** — subagent report format and phase-boundary controller restart
-- **AD0020** — FOLLOWUPS document structure and lifecycle
+- **0001** — per-task file split for plans (subagent context economy)
+- **0002** — dead-code suppression strategy + deferred bin/lib reassessment
+- **0003** — test discipline + brief-deviation honesty in commits
+- **0005** — `test-helpers` Cargo feature for integration-test library items
+- **0006** — `Store` mutators return `Result<usize>` (row-change count)
+- **0007** — stats structs use input-side counters with verb-named fields
+- **0008** — pipeline writes transcript artifacts before `mark_succeeded`
+- **0018** — three-tier review with codex-advisor delegated via Sonnet reviewer
+- **0019** — subagent report format and phase-boundary controller restart
+- **0020** — FOLLOWUPS document structure and lifecycle
 
-Feature-derived ADRs (AD0004, AD0009–AD0017, plus Epic 2+ feature ADRs) live on feat branches and merge in. Read ADRs as needed via `adg view --id NNNN --model docs/decisions` (or browse `adg list`).
+Feature-derived ADRs (0004, 0009–0017, plus Epic 2+ feature ADRs) live on feat branches and merge in. Read ADRs as needed via `adg view --id NNNN --model docs/decisions` (or browse `adg list`).
 
 ## Default working patterns
 
 - **Executing plans:** `superpowers:subagent-driven-development` (in-session) or `superpowers:executing-plans` (multi-session).
-- **Before claiming done:** `superpowers:verification-before-completion`. Run `cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test`.
+- **Before claiming done:** `superpowers:verification-before-completion`. Run `cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test --features test-helpers -- --test-threads=1`. The `--features test-helpers` flag exposes library items needed by integration tests (per 0005). **`--test-threads=1` is mandatory on the operator's dev workstation — multi-threaded `cargo test` overheats the machine.** Secondary benefits: deterministic ordering for state-machine tests with per-test fixture DBs, and avoiding GPU-contention noise across the whisper-engine integration tests. Do not drop `--test-threads=1` for "faster" runs.
 - **Parallel work / conflict isolation:** `superpowers:using-git-worktrees`.
-- **Code review:** `superpowers:requesting-code-review` / `superpowers:receiving-code-review`; the three-tier protocol per AD0018.
+- **Code review:** `superpowers:requesting-code-review` / `superpowers:receiving-code-review`; the three-tier protocol per 0018.
 - **Debugging:** `superpowers:systematic-debugging`.
 
 ## Project-local tools
 
 - **ADRs:** see the `using-adg` skill. Use `scripts/adr` (a thin wrapper around `adg` that hardcodes `--model docs/decisions` and takes bodies via stdin).
-- **codex-advisor:** see the `using-codex-advisor` skill. Per AD0018, the orchestrator never calls codex directly during task reviews — the Sonnet spec-compliance reviewer delegates and distills.
+- **codex-advisor:** see the `using-codex-advisor` skill. Per 0018, the orchestrator never calls codex directly during task reviews — the Sonnet spec-compliance reviewer delegates and distills.
 
 ## Active state — query, don't write down
 
@@ -43,7 +43,7 @@ Feature-derived ADRs (AD0004, AD0009–AD0017, plus Epic 2+ feature ADRs) live o
 
 ## FOLLOWUPS
 
-Per AD0020, `docs/FOLLOWUPS.md` carries active-scope review items grouped by target epic, with a scope index at top. `docs/cosmetic-followups.md` and `docs/bake-findings.md` are off the planning-time reading path. `docs/archive/followups-resolved.md` is the append-only resolved history. At epic close, resolved entries move to archive with the resolving commit SHA.
+Per 0020, `docs/FOLLOWUPS.md` carries active-scope review items grouped by target epic, with a scope index at top. `docs/cosmetic-followups.md` and `docs/bake-findings.md` are off the planning-time reading path. `docs/archive/followups-resolved.md` is the append-only resolved history. At epic close, resolved entries move to archive with the resolving commit SHA.
 
 ## Verification before any commit
 

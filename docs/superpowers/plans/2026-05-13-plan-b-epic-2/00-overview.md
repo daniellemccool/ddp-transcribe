@@ -42,7 +42,7 @@ Resulting ADR slate is six Epic-2 ADRs (`0022`–`0027`) instead of seven (`0022
 
 The `adg` tool was rewritten as a MADR-native fork mid-plan-write. Implications for Epic 2 execution:
 
-- **ADR filenames lose the `AD` prefix.** `AD0021-foo.md` → `0021-foo.md`. References in plan files use bare 4-digit IDs (matches `scripts/adr list` output).
+- **ADR filenames lose the `AD` prefix.** `0021-foo.md` → `0021-foo.md`. References in plan files use bare 4-digit IDs (matches `scripts/adr list` output).
 - **`scripts/adr` is the wrapper.** Subcommands: `adr new <title>` (prints ID), `adr edit <id> [--force] < body`, `adr decide <id> <option-text> [<reason>]`, `adr supersede`, `adr comment`, `adr tag`, `adr link`, `adr list`, `adr view`, `adr validate`. T1 and T12 use this surface; older `adg add --id`/`scripts/adr-fill` patterns are retired.
 - **MADR required sections:** `## Context and Problem Statement`, `## Considered Options` (bulleted with `*`), `## Decision Outcome` (placeholder until `adr decide` overwrites). Optional: `## Decision Drivers`, `## Pros and Cons of the Options`, `## Consequences`. `adr edit` rejects bodies missing any required section.
 - **`adr decide` overwrites `## Decision Outcome`** with `"We decided for <option> because: <reason>"`. Content that must persist (e.g., the load-bearing shutdown ORDER from `0025`) MUST live in `## Consequences`, not `## Decision Outcome`.

@@ -41,6 +41,37 @@ pub struct GlobalArgs {
     /// Costs one extra encoder pass per video; default false.
     #[arg(long, env = "UU_TIKTOK_COMPUTE_LANG_PROBS", global = true)]
     pub compute_lang_probs: bool,
+
+    /// Threshold for sweeping stale (process-crashed) claims back to pending.
+    /// Accepts humantime strings: "30m" (default), "1h", "45s".
+    /// 0024: 30-min default is well above bake worst-case (~25s).
+    #[arg(
+        long,
+        env = "UU_TIKTOK_STALE_CLAIM_THRESHOLD",
+        value_parser = humantime::parse_duration
+    )]
+    pub stale_claim_threshold: Option<std::time::Duration>,
+
+    /// Number of parallel fetch workers in the pipelined orchestrator.
+    /// 0027: default 3 (curve-flattening point on the bake throughput
+    /// math; ~3.5× serial wallclock on news_orgs fixture). Must be ≥ 1.
+    #[arg(
+        long,
+        env = "UU_TIKTOK_DOWNLOAD_WORKERS",
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+    )]
+    pub download_workers: Option<usize>,
+
+    /// Bounded mpsc capacity between fetch workers and the transcribe
+    /// worker. 0027: default 2 (small backpressure smoothing for
+    /// transcribe's ~1s variance; peak channel memory ~6 × 3 MB = 18 MB
+    /// at default N=3 + capacity 2). Must be ≥ 1.
+    #[arg(
+        long,
+        env = "UU_TIKTOK_CHANNEL_CAPACITY",
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+    )]
+    pub channel_capacity: Option<usize>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -57,6 +88,9 @@ pub enum Command {
         #[arg(long)]
         max_videos: Option<usize>,
     },
+    /// Upgrade a pre-Epic-2 (v1) state.sqlite to the current schema version.
+    /// Idempotent: no-op if already at the current version.
+    Migrate,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]

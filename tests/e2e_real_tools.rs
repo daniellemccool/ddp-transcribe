@@ -1,9 +1,9 @@
 //! End-to-end real-tools test for Plan B Epic 1. Exercises the embedded
 //! whisper-rs pipeline against a real TikTok URL via yt-dlp.
 //!
-//! Requires (per AD0009, AD0011):
+//! Requires (per 0009, 0011):
 //! - yt-dlp on PATH
-//! - ffmpeg on PATH (yt-dlp's postprocessor — 16 kHz mono WAV per AD0014)
+//! - ffmpeg on PATH (yt-dlp's postprocessor — 16 kHz mono WAV per 0014)
 //! - ./models/ggml-tiny.en.bin on disk (or UU_TIKTOK_WHISPER_MODEL=PATH)
 //! - clang/libclang installed (whisper-rs's whisper-rs-sys binds via bindgen)
 //! - cmake on PATH (whisper-rs's build script invokes it)
@@ -81,10 +81,10 @@ fn end_to_end_one_known_url() {
     }
     assert!(found_txt, "no .txt transcript produced");
 
-    // Plan B Epic 1 (T12): .json artifact shape per AD0010.
+    // Plan B Epic 1 (T12): .json artifact shape per 0010.
     //
     // Real audio content is non-deterministic and TikTok content drifts. Assert
-    // structural shape per AD0010 (schema_version, ranges, types) rather than
+    // structural shape per 0010 (schema_version, ranges, types) rather than
     // specific token text / probabilities / segment counts.
     let json_paths: Vec<_> = walkdir(&transcripts)
         .into_iter()
@@ -109,7 +109,7 @@ fn end_to_end_one_known_url() {
         "model field should be a non-empty string (engine returns the model file basename)"
     );
 
-    // raw_signals: AD0010 contract.
+    // raw_signals: 0010 contract.
     let rs = &parsed["raw_signals"];
     assert!(!rs.is_null(), "raw_signals must be present");
     // Two assertions on schema_version:

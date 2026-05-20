@@ -1,4 +1,4 @@
-//! Tier 2 tests for bounded subprocess capture (T5 perf-tweaks; AD0021).
+//! Tier 2 tests for bounded subprocess capture (T5 perf-tweaks; 0021).
 //!
 //! Exercise the bounded streaming reader via real subprocesses (echo, sleep,
 //! a stderr-spammer) and via direct calls to `process::read_bounded` for the
@@ -18,11 +18,24 @@ const CAP: usize = 8 * 1024;
 
 #[tokio::test]
 async fn stderr_excerpt_preserves_tail_when_subprocess_overflows_cap() {
-    // Spawn a child that emits ~2*CAP bytes to stderr. The excerpt must
-    // be CAP bytes long, contain the LAST CAP bytes (the tail), and
-    // truncate the head.
-    let payload_size = 2 * CAP;
-    let cmd = format!("yes 'x' | head -c {} >&2", payload_size);
+    // Spawn a child that emits a marker-bracketed payload to stderr:
+    //   "START\n" + filler 'x' bytes exceeding CAP + "END_OF_STREAM\n"
+    //
+    // Total stream is ~2*CAP so the head is guaranteed to fall outside the
+    // last-CAP-bytes window. The captured excerpt must:
+    //   1. Be exactly CAP bytes — catches the no-data and un-bounded bugs.
+    //   2. Contain "END_OF_STREAM" — catches front-truncation (if the
+    //      implementation captured the front instead of the tail, END_OF_STREAM
+    //      would not appear because it is at the very end).
+    //   3. NOT contain "START" — catches no-truncation (if the implementation
+    //      captured the entire stream, START would also be present).
+    let marker_start = "START\n";
+    let marker_end = "END_OF_STREAM\n";
+    // Total filler: 2*CAP minus the two markers, all 'x' bytes.
+    let filler_len = 2 * CAP - marker_start.len() - marker_end.len();
+    let cmd = format!(
+        "{{ printf 'START\\n'; head -c {filler_len} /dev/zero | tr '\\0' x; printf 'END_OF_STREAM\\n'; }} >&2",
+    );
     let spec = CommandSpec {
         program: "sh",
         args: vec!["-c".into(), cmd],
@@ -40,9 +53,16 @@ async fn stderr_excerpt_preserves_tail_when_subprocess_overflows_cap() {
         "stderr_excerpt must be exactly CAP bytes, got {}",
         excerpt.len()
     );
-    // Tail bytes from `yes 'x' | head -c N` are 'x' or '\n'; just sanity-
-    // check the excerpt is non-empty and looks like the expected payload.
-    assert!(excerpt.chars().all(|c| c == 'x' || c == '\n'));
+    // Must include the tail marker — proves we captured the TAIL of the stream.
+    assert!(
+        excerpt.contains("END_OF_STREAM"),
+        "tail marker missing from excerpt — captured the front instead of the tail"
+    );
+    // Must NOT include the head marker — proves we did NOT capture the full stream.
+    assert!(
+        !excerpt.contains("START"),
+        "head marker present in excerpt — stream was not truncated (captured full stream or wrong end)"
+    );
 }
 
 #[tokio::test]

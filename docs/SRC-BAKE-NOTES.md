@@ -12,7 +12,7 @@
 
 ## Headline outcomes
 
-1. **AD0013 gate passes on all four models.** No silent CPU fallback. `whisper_backend_init_gpu: using CUDA0 backend` confirmed in stderr for tiny.en, small, medium.en, and large-v3-turbo-q5_0. Binary linked against `libcudart.so.13`, `libcublas.so.13`, `libcuda.so.1`, `libcublasLt.so.13` from `/usr/local/cuda/targets/x86_64-linux/lib/`.
+1. **0013 gate passes on all four models.** No silent CPU fallback. `whisper_backend_init_gpu: using CUDA0 backend` confirmed in stderr for tiny.en, small, medium.en, and large-v3-turbo-q5_0. Binary linked against `libcudart.so.13`, `libcublas.so.13`, `libcuda.so.1`, `libcublasLt.so.13` from `/usr/local/cuda/targets/x86_64-linux/lib/`.
 2. **CUDA 13.2 + whisper-rs 0.16.0 (whisper.cpp v1.8.3, commit `2eeeba5`) build cleanly.** 3 minutes 17 seconds release build with `--features cuda`. No flag adjustments, no patched headers, no fallback to older CUDA needed. This is a "tested-good" combination worth pinning in the playbook.
 3. **End-to-end pipeline integration confirmed.** One video flowed through fetch → WAV decode → engine → text + JSON artifact with `raw_signals` (schema_version=`"1"`, per-segment `no_speech_prob`, per-token `{id, text, p, plog}`, language code, lang_probs slot) and provenance fields (`fetcher: "ytdlp"`, `transcript_source: "whisper-rs"`, model basename).
 4. **Production model choice clarified by quality observation: `large-v3-turbo-q5_0` is the winner.** Better transcripts than `medium.en` (multilingual where medium.en hallucinates) and faster wall-clock at one-third the model size. See per-model table.
@@ -26,7 +26,7 @@ These caused friction during the bake and should be in the eventual operator pla
 
 1. **`SRC-BAKE-CHECKLIST.md` is Plan A; Phase 1 is stale.** Lists `whisper-cli` as required (Plan B removed it) and omits Plan B's actual build prereqs: `cmake`, `clang`, `libclang-dev` / `libclang-18-dev`, CUDA toolkit. Phase 5's `cargo build --release` should be `cargo build --release --features cuda` for A10 builds. Update the checklist (or supersede it) when the playbook lands.
 2. **Ubuntu 24.04's `libclang-dev` package installs only C++ headers (`/usr/include/clang/`), NOT the C-API headers (`clang-c/Index.h`)** that bindgen needs. Need the versioned package `libclang-18-dev` explicitly. Headers land at `/usr/lib/llvm-18/include/clang-c/`, discovered by bindgen via `llvm-config-18`.
-3. **`jq` is missing from the standard apt install set** but is needed for the AD0017 done-contract check (inspect `.json` artifacts). Add to playbook's install list.
+3. **`jq` is missing from the standard apt install set** but is needed for the 0017 done-contract check (inspect `.json` artifacts). Add to playbook's install list.
 4. **`apt update` on the SRC base image emits ~60 W: warnings** about multi-configured sources (`fallback-mirrors.sources` + `ubuntu.sources` overlap). All cosmetic; "All packages are up to date" line at the top is the only success signal that matters.
 5. **SSH from a modern terminal emulator (kitty, alacritty, wezterm) breaks ncurses tools** because the workspace doesn't ship those terminfo entries. `TERM=xterm-256color <cmd>` for one-offs or `export TERM=xterm-256color` to persist.
 6. **`pipx inject yt-dlp curl-cffi` reports success but yt-dlp still shows `(unavailable)` for impersonation targets.** Diagnostic unfinished due to paste-friction; root cause likely a C-extension build / libcurl-dev gap. See FOLLOWUPS entry.
@@ -51,7 +51,7 @@ These caused friction during the bake and should be in the eventual operator pla
 
 ---
 
-## GPU verification (AD0013 gate)
+## GPU verification (0013 gate)
 
 **Outcome: PASS** — backend init logs and `ldd` of the release binary both confirm GPU is active. No silent CPU fallback at any point.
 
@@ -61,7 +61,7 @@ whisper_backend_init_gpu: found GPU device 0: CUDA0 (type: 1, cnt: 0)
 whisper_backend_init_gpu: using CUDA0 backend
 ```
 
-Appears twice per inference (once for the primary state, once for the language-detection state per AD0012's separate-state design from T8). Confirmed on every one of the four model runs.
+Appears twice per inference (once for the primary state, once for the language-detection state per 0012's separate-state design from T8). Confirmed on every one of the four model runs.
 
 `ldd target/release/uu-tiktok | grep -E "cuda|cublas"`:
 ```
@@ -77,7 +77,7 @@ libcublasLt.so.13 => /usr/local/cuda/targets/x86_64-linux/lib/libcublasLt.so.13
 
 ## Per-model wallclock — n=1 each on video `7491984376423615766` (35.6440625s of French audio, "RTL FR" helicopter-crash news clip)
 
-| Model | Size on disk | Model VRAM | State VRAM (×2 per AD0012) | Total VRAM est | Transcribe wallclock† | Realtime ratio | `time -v` total | RSS peak |
+| Model | Size on disk | Model VRAM | State VRAM (×2 per 0012) | Total VRAM est | Transcribe wallclock† | Realtime ratio | `time -v` total | RSS peak |
 |-------|--------------|------------|----------------------------|----------------|------------------------|-----------------|-----------------|----------|
 | `tiny.en` | 75 MB | 77 MB | 148 MB | ~373 MB | **0.17 s** | **213× realtime** | 4.37 s | 493 MB |
 | `small` | 466 MB | 487 MB | 242 MB | ~969 MB | **0.79 s** | **45× realtime** | 3.69 s | 514 MB |
@@ -109,17 +109,17 @@ The `lang_detect` probability (T8 on the separate `lang_state`) is a reliable co
 
 ## 1-state vs 2-state measurement
 
-**Not measured in this bake** — fetch failures (Epic 3 finding below) prevented running the multi-instance test that would have produced 5 videos through two concurrent processes. The architectural future-proofing per AD0016 is in place (Engine API is stable across single/multi-state); intra-process multi-state implementation is Plan C / production grant work regardless.
+**Not measured in this bake** — fetch failures (Epic 3 finding below) prevented running the multi-instance test that would have produced 5 videos through two concurrent processes. The architectural future-proofing per 0016 is in place (Engine API is stable across single/multi-state); intra-process multi-state implementation is Plan C / production grant work regardless.
 
 ---
 
-## Raw artifact size growth (per AD0010 schema_version="1")
+## Raw artifact size growth (per 0010 schema_version="1")
 
 Single artifact for the 35.6-second French video:
 - `.txt`: 730 bytes (transcript)
 - `.json`: 2250 bytes (metadata + `raw_signals` with per-token `id`/`text`/`p`/`plog`)
 
-**Per-token raw-signal growth roughly doubles JSON size** vs a hypothetical `{p, plog}`-only token shape. For 1M-video production at this artifact size: ~2.25 GB of metadata JSON. Acceptable at scale; gzip compression (Plan C consideration) could halve again. The `id` + `text` fields are load-bearing for downstream filtering of special tokens like `[_BEG_]`, `[_EOT_]`, `<|en|>` etc. (AD0010 pass-through rule).
+**Per-token raw-signal growth roughly doubles JSON size** vs a hypothetical `{p, plog}`-only token shape. For 1M-video production at this artifact size: ~2.25 GB of metadata JSON. Acceptable at scale; gzip compression (Plan C consideration) could halve again. The `id` + `text` fields are load-bearing for downstream filtering of special tokens like `[_BEG_]`, `[_EOT_]`, `<|en|>` etc. (0010 pass-through rule).
 
 ---
 
@@ -180,17 +180,17 @@ For completeness and to clearly delegate to future epics:
 
 - **N=5-video averaging per model.** Blocked by Epic 3 fetch-classification gap (no recovery from per-video fetch failure under Plan A's serial loop; Epic 2 introduces failure persistence).
 - **--compute-lang-probs overhead.** Carry to Epic 2's bake addendum.
-- **1-state vs 2-state throughput delta.** Multi-instance test deferred to Plan C / production grant work; architecture is future-proofed per AD0016.
+- **1-state vs 2-state throughput delta.** Multi-instance test deferred to Plan C / production grant work; architecture is future-proofed per 0016.
 - **Long-running steady-state characterization.** Each bake run was single-shot; a 100-video continuous run would reveal CUDA-graph warmup effects, RSS growth/leak signatures, and amortized model-load cost. Becomes Epic 2 bake work once the pipelined orchestrator lands.
 - **Donation-side TikTok URL reachability.** The single account-failure observed (`@rtl.nl`) reproduced consistently but no broader survey of donation-source URL fetchability was conducted.
 
 ---
 
-## Operational habits documented (per AD0011)
+## Operational habits documented (per 0011)
 
-After capturing these notes, the workspace was paused per the AD0011 spin-down practice. Grant-wallet bills $0 while paused; storage and workspace state persist for the next session.
+After capturing these notes, the workspace was paused per the 0011 spin-down practice. Grant-wallet bills $0 while paused; storage and workspace state persist for the next session.
 
-Bake-completion checklist (informal — formalize in Epic 4's `status` subcommand per AD0017):
+Bake-completion checklist (informal — formalize in Epic 4's `status` subcommand per 0017):
 
 - [x] `cargo build --release --features cuda` succeeded
 - [x] CUDA backend log line confirmed on all measured models
@@ -201,3 +201,213 @@ Bake-completion checklist (informal — formalize in Epic 4's `status` subcomman
 - [ ] 1-state vs 2-state measurement (deferred to production grant)
 - [x] Bake notes written + committed
 - [x] Workspace paused
+
+---
+
+# SRC A10 Bake Notes — Plan B Epic 2
+
+**Date:** 2026-05-20
+**Workspace:** `transcription.develop-data-do.src.surf-hosted.nl`
+**Hardware:** 1× NVIDIA A10 (same workspace as Epic 1)
+**Operator:** Danielle McCool
+**Branch:** `feat/plan-b-epic-2` @ `d928905` (Phase 2 + cleanup commits + bootstrap UX fixes)
+**Build:** `cargo build --release --features cuda`
+**Bake scope:** N=1/N=3/N=5 throughput comparison + coordinated-shutdown drill.
+
+---
+
+## Headline outcomes
+
+1. **N=3 is the empirically validated default** per ADR 0027. N=5 adds essentially nothing (1.007× over N=3); the curve-flattening point is confirmed.
+2. **1.44× absolute speedup at N=3 vs N=1** — below ADR 0027's ~3.5× prediction because this fixture's fetch is much faster than the modeled ratio (avg 1.5s/clip vs the 5.5s the prediction assumed). When fetch is fast, transcribe becomes the bottleneck sooner; the design ceiling depends on the avg_fetch / avg_transcribe ratio.
+3. **User CPU constant at ~56s across all three topologies** — CPU work is fixed; wallclock varies via overlap. Design intent confirmed.
+4. **Coordinated-shutdown drill validates ADR 0024 end-to-end.** Pre-kill `in_progress` count matched post-restart `recovered` count exactly; no half-written transcripts surfaced.
+5. **Fixture:** `news_orgs` (20 pending videos after ingest). **Model:** `ggml-large-v3-turbo-q5_0.bin` (~573 MB, GPU/CUDA).
+
+---
+
+## Throughput comparison
+
+| Topology | Wallclock | Per-clip | Speedup vs N=1 | User CPU | Sys |
+|---|---|---|---|---|---|
+| N=1 (serial) | 41.7s | 2.09s | 1.00× | 56.1s | 4.2s |
+| **N=3 (default)** | **29.0s** | **1.45s** | **1.44×** | 56.3s | 4.1s |
+| N=5 | 28.8s | 1.44s | 1.45× | 56.4s | 4.3s |
+
+---
+
+## Coordinated-shutdown drill
+
+- N=3 default, started in background, `sleep 5`, `kill -KILL` the process tree.
+- Pre-restart DB: 6 rows in `in_progress` with non-NULL `claimed_at` (5-second spread: timestamps 1779312832–1779312837).
+- Restart with `--stale-claim-threshold 1s`: log line `sweep_stale_claims recovered=6 threshold_secs=1`. All 6 swept rows re-claimed and processed to `succeeded`.
+- Final state: `claimed=20 succeeded=20 failed=0 stale_after_success=0 stale_after_failure=0`. No half-states.
+
+---
+
+## Findings
+
+1. **N=3 is empirically validated as the right default** per ADR 0027. N=5 adds essentially zero (1.007× over N=3) — the curve-flattening point is confirmed.
+2. **Absolute speedup (1.44×) is below ADR 0027's ~3.5× prediction** because this fixture's fetch is much faster than Epic 1's measurements (avg 1.5s/clip vs Epic 1's modeled 5.5s). When fetch is fast, transcribe becomes the bottleneck sooner — the design ceiling depends on the avg_fetch / avg_transcribe ratio. For fixtures with slower fetches (network-bound or pathological yt-dlp paths), the speedup would approach the predicted 3.5×.
+3. **User CPU is constant at ~56s across all three topologies.** CPU work is fixed; wallclock varies via overlap. Design intent confirmed.
+4. **All Phase 2 stale counters (`stale_after_success`, `stale_after_failure`) stayed at 0** across all happy-path runs. The symmetric race-detection design is in place but the happy path doesn't exercise it — expected.
+5. **Coordinated-shutdown drill validates ADR 0024 (sweep semantics) end-to-end.** Pre-kill `in_progress` count matched post-restart `recovered` count exactly. No half-written transcripts surfaced because ADR 0008's artifact-before-`mark_succeeded` order prevented them.
+6. **`attempt_count` accumulates across bake sweeps** (rows showed attempt=7-8 on the drill recovery). Expected behavior; the reset-between-runs SQL deliberately doesn't reset `attempt_count` per ADR 0024.
+
+---
+
+## Language detection (multilingual model exercised)
+
+French ×1, Dutch ×8, English ×9, Tagalog ×2 — all detected with confidence > 0.987.
+
+---
+
+## What this bake did NOT do
+
+- **Long-running steady-state characterization (>20 videos).** Each bake run was bounded to the 20-video `news_orgs` fixture.
+- **Multi-fixture comparison.** e.g., longer videos to verify the 3.5× ceiling under network-bound fetch conditions.
+- **Real-world concurrent claim contention.** The multi-process scenario `stale_after_failure` is designed to surface was not exercised.
+- **`--compute-lang-probs` overhead measurement.** Carry to Epic 3 bake addendum (deferred since Epic 1).
+- **ADR 0025's `engine.transcribe()` cancellation latency under in-flight load.** The T18 fixup at `a66d38b` wrapped the `select!` but cancel-mid-transcribe latency was not measured under load.
+
+---
+
+## Operational habits documented (per 0011)
+
+Workspace paused per the 0011 spin-down practice after capturing these notes.
+
+Bake-completion checklist (Epic 2 scope):
+
+- [x] `cargo build --release --features cuda` succeeded
+- [x] CUDA backend log line confirmed (inherited from Epic 1 baseline; `ggml-large-v3-turbo-q5_0.bin` confirmed GPU on A10)
+- [x] N=1 / N=3 / N=5 throughput captured (20-video fixture)
+- [x] Coordinated-shutdown drill completed (6-row recovery, final state clean)
+- [x] Language detection confirmed on multilingual fixture (fr/nl/en/tl)
+- [ ] --compute-lang-probs measurement (deferred to Epic 3)
+- [ ] Multi-fixture speedup ceiling verification (partially addressed by the real-DDP addendum below)
+
+---
+
+## Addendum: real-DDP validation (2026-05-21)
+
+**Goal:** Pre-production validation of Phase 2 against real donor data. The
+`news_orgs` fixture is synthetic and used curated URLs that all succeeded;
+real DDPs exercise yt-dlp failure modes (deleted videos, region-locks,
+rate-limits) that the synthetic fixture didn't surface.
+
+**Build:** `feat/plan-b-epic-2` @ `2d89860` (Phase 2 + cleanup + bootstrap UX +
+`--max-videos` regression fix at `9228c89` + ingest UTC-suffix fix at `2d89860`).
+
+**Fixture:** PI's TikTok DDP — 65,024 watch-history entries, 56,600 unique
+videos, 93 same-second source duplicates. Stored at
+`/data/transcription-pipeline-storage/test_data/` per the Research Drive
+layout in `docs/SRC-RUNBOOK.md`. Ingested via symlink into
+`~/src/work-pi-100/inbox/`.
+
+**Topology:** Default (N=3 download workers, capacity 2).
+**Cap:** `--max-videos 100` (the fix landed in `9228c89` enabled this).
+**Model:** `ggml-large-v3-turbo-q5_0.bin` (GPU/CUDA).
+
+### Bake-100 outcome
+
+```
+process complete claimed=100 succeeded=93 failed=7
+                  stale_after_success=0 stale_after_failure=0
+real    3m51.766s
+```
+
+Per-video: 2.32s (vs 1.45s on `news_orgs`). The ~0.9s/video overhead is
+failure-handling cost: yt-dlp probes that 404/403/region-lock take seconds
+to detect before erroring; the synthetic fixture had no such probes.
+
+Status breakdown after the run:
+
+```
+failed_retryable | 7
+pending          | 56500
+succeeded        | 93
+```
+
+Math sanity: 56,500 + 7 + 93 = 56,600 = the unique_videos_seen the
+ingest reported. State machine is consistent end-to-end. No
+`in_progress` (all 100 claimed reached terminal); no `failed_terminal`
+(Phase 2 doesn't wire `mark_terminal_failure` — Epic 3+ scope).
+
+### Bugs surfaced + fixed during setup
+
+Two bugs surfaced when first running the real DDP through ingest. Both
+are fixed; this addendum records them for the operator playbook:
+
+1. **`--max-videos` ignored by `run_pipelined`** (commit `9228c89` —
+   Phase 2 T18 regression). Shared `Arc<AtomicUsize>` counter inside
+   the `Mutex<Store>` guard scope; race-free via existing serialization.
+   Honored exactly (claimed=100 on the bake confirms).
+2. **Ingest silently dropped 65,024 entries** because real DDPs use the
+   date format `"2026-02-17 21:28:52 UTC"` and the parser expected
+   `%Y-%m-%d %H:%M:%S` (no suffix; matched synthetic fixtures only).
+   Fixed at `2d89860`: multi-format parser slice; also surfaced the
+   previously-hidden `date_parse_failures` counter in the ingest log
+   line. The log gap was a real defect — the bug was invisible until
+   `videos=0 history=0` showed up on real data.
+
+### Real-DDP failure profile
+
+7 of 100 fetches failed_retryable (~7% failure rate). All 7 routed
+through `mark_retryable_failure` with `kind="FetchOrTranscribe"` (the
+Phase 2 placeholder string-kind; Epic 3 will replace with typed
+`RetryableKind`). No failures escalated; the run drained cleanly to 93
+succeeded.
+
+Common real-data failure modes (categorized by `yt-dlp`'s error class —
+inferred from yt-dlp documentation, NOT from inspecting donor URLs):
+
+- Video deleted (404 from CDN)
+- Region-locked content
+- Rate-limit / temporary CDN issues
+- yt-dlp format-selection edge cases (Epic 1 bake Finding 1 lineage)
+
+These categories will become typed `RetryableKind` variants in Epic 3.
+
+### What this validates
+
+1. **The classifier-on-failure design (ADR 0008, ADR 0023) works against
+   real failure modes.** Plan A would have aborted on the first 404;
+   Phase 2 processed 93 successes alongside 7 failures.
+2. **`--max-videos N` is the right Phase 3 chunking primitive.** Exact
+   cap, no overshoot. A 65k bake split into 10k-row sessions
+   (~6 sessions × ~6.5 hours at 2.32s/video) fits the ADR 0011
+   pause/resume operational rhythm.
+3. **The state machine end-to-end is consistent on real volume.** 56,600
+   videos ingested in ~19s; 100 processed; 56,500 pending; row math
+   adds up exactly.
+4. **The diagnostic surface improvement** (date_parse_failures in the
+   log) shows the project's learning loop: a real-data setup found a
+   long-hidden bug, fixed it, and updated the playbook in one cycle.
+
+### Phase 3 production-scale projection
+
+At the measured 2.32s/video on real DDP data:
+
+- 56,600 remaining pending rows × 2.32s = **~131,400s ≈ 36.5 hours** of
+  A10 wallclock to drain in N=3 default topology.
+- Chunked at `--max-videos 10000`: ~6.5 sessions × ~6.5h each.
+- Chunked at `--max-videos 5000`: ~13 sessions × ~3.3h each.
+- Per-session pause-resume per ADR 0011; storage drive persists state.sqlite
+  + transcripts; `attempt_count` tracks per-row retry history.
+
+This is the operational shape Phase 3's failure-classification work
+(typed `RetryableKind`, `Acquisition::Unavailable`, etc.) builds on. The
+7 retryable failures from bake-100 are the input the Epic 3 classifier
+will categorize.
+
+### What this bake did NOT do (real-DDP scope)
+
+- Did NOT push beyond 100 videos (production-scale validation is Phase 3
+  exit criteria, not Phase 2).
+- Did NOT run the coordinated-shutdown drill against real DDP volume
+  (synthetic news_orgs drill already validated the mechanism per the
+  table above).
+- Did NOT measure `--compute-lang-probs` overhead on real data
+  (deferred to Epic 3 bake addendum).
+- Did NOT inspect transcript content quality (orchestrator-side review
+  out of scope; PI handles content review per study design).

@@ -1,3 +1,4 @@
+pub mod migrate;
 mod schema;
 
 use std::path::Path;
@@ -32,6 +33,21 @@ pub struct VideoRow {
     pub attempt_count: i64,
 }
 
+/// Typed errors surfaced by `state::Store` mutators and accessors.
+///
+/// Per 0022, `Store::open` returns `SchemaVersionMismatch` when the on-disk
+/// `meta.schema_version` doesn't match the binary's `SCHEMA_VERSION`. The
+/// `Display` impl carries the operator-readable instruction directing them
+/// to `uu-tiktok migrate`.
+#[derive(Debug, thiserror::Error)]
+pub enum StateError {
+    #[error(
+        "schema version mismatch: state.sqlite is at v{found}, this binary requires v{expected}. \
+         Run `uu-tiktok migrate` to upgrade the database, then retry."
+    )]
+    SchemaVersionMismatch { expected: String, found: String },
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -50,16 +66,43 @@ impl Store {
         )
         .context("setting connection pragmas")?;
 
-        // Schema (idempotent — uses CREATE IF NOT EXISTS).
+        // Schema (idempotent — uses CREATE IF NOT EXISTS). The column set
+        // declared here is the CURRENT schema version; older DBs miss the
+        // newer columns and must run `uu-tiktok migrate` (0022) before
+        // they can be opened.
         conn.execute_batch(schema::SCHEMA_SQL)
             .context("applying schema")?;
 
-        // Record schema version (only on first run).
-        conn.execute(
-            "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?1)",
-            params![SCHEMA_VERSION],
-        )
-        .context("recording schema_version")?;
+        // Schema-version check (0022). Three cases:
+        //   - fresh DB (no meta row): record the current version.
+        //   - existing DB at current version: continue.
+        //   - mismatch: return typed StateError::SchemaVersionMismatch.
+        let found: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .context("reading schema_version from meta")?;
+
+        match found {
+            None => {
+                conn.execute(
+                    "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)",
+                    params![SCHEMA_VERSION],
+                )
+                .context("recording schema_version on fresh DB")?;
+            }
+            Some(v) if v == SCHEMA_VERSION => {}
+            Some(v) => {
+                return Err(StateError::SchemaVersionMismatch {
+                    expected: SCHEMA_VERSION.to_string(),
+                    found: v,
+                }
+                .into());
+            }
+        }
 
         Ok(Self { conn })
     }
@@ -84,7 +127,7 @@ impl Store {
 
     // No bin consumer; only the cfg(test) `pragma_journal_mode_is_wal`
     // integration test calls this. Visibility/API decision deferred per
-    // FOLLOWUPS (`Store::pragma_string` visibility) and AD0002.
+    // FOLLOWUPS (`Store::pragma_string` visibility) and 0002.
     #[allow(dead_code)]
     pub fn pragma_string(&self, name: &str) -> Result<String> {
         let value: String = self
@@ -96,8 +139,10 @@ impl Store {
 
     /// Borrow the underlying connection for advanced operations. Internal use
     /// for now; the public API will grow as Tasks 9+ add methods.
-    // T9 (store-ingest) and T10 (store-claims) are the first consumers.
-    #[allow(dead_code)]
+    ///
+    /// T18 (pipelined orchestrator's `compute_process_stats`) is the first
+    /// in-bin consumer; the `#[allow(dead_code)]` placeholder is lifted as
+    /// part of that wiring per 0002.
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
     }
@@ -230,13 +275,20 @@ impl Store {
     }
 
     /// Mark a video as succeeded and record a `succeeded` event, atomically.
-    /// Returns the row-change count from the videos UPDATE per AD0006. Without
-    /// a `WHERE status = 'in_progress'` predicate (FOLLOWUPS-tracked, deferred
-    /// to Plan B's state-machine work), this count is symbolic — always 1 for
-    /// any matching video_id. Once Plan B adds the predicate, callers can
-    /// detect "0 means the row was not in_progress (stale claim?)" without a
-    /// separate query.
-    pub fn mark_succeeded(&mut self, video_id: &str, artifacts: SuccessArtifacts) -> Result<usize> {
+    /// Returns the row-change count from the videos UPDATE per 0006.
+    ///
+    /// The UPDATE is guarded by `WHERE status='in_progress' AND claimed_by = ?`
+    /// (0023 symmetric with mark_retryable_failure / mark_terminal_failure):
+    /// callers can detect "0 means the row was not in_progress or claimed by
+    /// a different worker (stale claim)" without a separate query. The event
+    /// row is inserted only when the UPDATE matches, so video_events stays
+    /// faithful to what actually changed.
+    pub fn mark_succeeded(
+        &mut self,
+        video_id: &str,
+        worker_id: &str,
+        artifacts: SuccessArtifacts,
+    ) -> Result<usize> {
         let now = unix_now();
         let tx = self
             .conn
@@ -253,7 +305,9 @@ impl Store {
                  fetcher = ?5,
                  transcript_source = ?6,
                  updated_at = ?2
-             WHERE video_id = ?1",
+             WHERE video_id = ?1
+               AND status = 'in_progress'
+               AND claimed_by = ?7",
                 params![
                     video_id,
                     now,
@@ -261,17 +315,200 @@ impl Store {
                     artifacts.language_detected,
                     artifacts.fetcher,
                     artifacts.transcript_source,
+                    worker_id,
                 ],
             )
             .with_context(|| format!("update videos for succeeded {}", video_id))?;
 
-        tx.execute(
-            "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
-             VALUES (?1, ?2, 'succeeded', NULL, NULL)",
-            params![video_id, now],
-        )?;
+        // Only insert the event row if the UPDATE matched — symmetry with the
+        // mutator's row-change count. 0008 invariant: artifacts are durable
+        // before this call regardless of outcome; the event row is bookkeeping
+        // for "the DB acknowledged the success."
+        if changed > 0 {
+            tx.execute(
+                "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
+                 VALUES (?1, ?2, 'succeeded', ?3, NULL)",
+                params![video_id, now, worker_id],
+            )?;
+        }
 
         tx.commit().context("commit mark_succeeded")?;
+        Ok(changed)
+    }
+
+    /// Flip a video row from `in_progress` to `failed_retryable`, recording
+    /// the failure classification (kind + message) per 0023. Same
+    /// stale-claim predicate as `mark_succeeded`. Returns the row-change
+    /// count per 0006: 0 on stale claim, 1 on successful flip.
+    ///
+    /// `kind` is a stable short tag (e.g. "FetchTimeout", "TranscribeError").
+    /// Epic 3's typed RetryableKind serializes via tag()/message() into the
+    /// same columns; no schema change at that point — just the caller switching
+    /// from string literals to enum projections.
+    ///
+    /// The `terminal_reason`/`terminal_message` columns are NOT cleared on
+    /// this flip — they're retained as diagnostic history if the row was
+    /// previously terminal (e.g., operator manually requeued). Symmetric:
+    /// `mark_terminal_failure` likewise preserves prior `last_retryable_*`.
+    // T9 wires this into `run_serial`'s error arm (placeholder kind
+    // "FetchOrTranscribe" per 0023); Epic 3 replaces the placeholder with
+    // typed classifier dispatch.
+    pub fn mark_retryable_failure(
+        &mut self,
+        video_id: &str,
+        worker_id: &str,
+        kind: &str,
+        message: &str,
+    ) -> Result<usize> {
+        let now = unix_now();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("begin immediate for mark_retryable_failure")?;
+
+        let changed = tx
+            .execute(
+                "UPDATE videos
+                 SET status = 'failed_retryable',
+                     last_retryable_kind = ?2,
+                     last_retryable_message = ?3,
+                     claimed_by = NULL,
+                     claimed_at = NULL,
+                     updated_at = ?4
+                 WHERE video_id = ?1
+                   AND status = 'in_progress'
+                   AND claimed_by = ?5",
+                params![video_id, kind, message, now, worker_id],
+            )
+            .with_context(|| format!("update videos for failed_retryable {}", video_id))?;
+
+        if changed > 0 {
+            let detail = serde_json::json!({ "kind": kind, "message": message }).to_string();
+            tx.execute(
+                "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
+                 VALUES (?1, ?2, 'failed_retryable', ?3, ?4)",
+                params![video_id, now, worker_id, detail],
+            )?;
+        }
+
+        tx.commit().context("commit mark_retryable_failure")?;
+        Ok(changed)
+    }
+
+    /// Flip a video row from `in_progress` to `failed_terminal`, recording
+    /// the terminal reason + message in the terminal_reason/terminal_message
+    /// columns. Same stale-claim predicate as the rest of the family
+    /// (0023). Returns the row-change count per 0006.
+    ///
+    /// **SURFACE ONLY in Epic 2 — no caller wires this.** Epic 3's classifier
+    /// dispatcher is the first caller (when failure classification distinguishes
+    /// VideoUnavailable / VideoNonExistent / similar terminal kinds from
+    /// transient classes that go through mark_retryable_failure). Landing the
+    /// surface in Epic 2 means Epic 3 is a classifier-add task, not a
+    /// mutator-add task — keeps Epic 3's diff focused on the new logic.
+    ///
+    /// 0002 cleanup discipline: `#[allow(dead_code)]` lives on this method
+    /// until Epic 3's first caller wires it. The closing task of Epic 3's
+    /// classifier work removes the attribute.
+    ///
+    /// The `last_retryable_kind`/`last_retryable_message` columns are NOT
+    /// cleared on this flip — they're retained as diagnostic history so an
+    /// operator inspecting a terminal row can see what retryable failures
+    /// preceded it (e.g., "retried 3× as FetchTimeout, then gave up as
+    /// VideoUnavailable"). Symmetric: `mark_retryable_failure` likewise
+    /// preserves prior `terminal_*`.
+    #[allow(dead_code)]
+    pub fn mark_terminal_failure(
+        &mut self,
+        video_id: &str,
+        worker_id: &str,
+        reason: &str,
+        message: &str,
+    ) -> Result<usize> {
+        let now = unix_now();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("begin immediate for mark_terminal_failure")?;
+
+        let changed = tx
+            .execute(
+                "UPDATE videos
+                 SET status = 'failed_terminal',
+                     terminal_reason = ?2,
+                     terminal_message = ?3,
+                     claimed_by = NULL,
+                     claimed_at = NULL,
+                     updated_at = ?4
+                 WHERE video_id = ?1
+                   AND status = 'in_progress'
+                   AND claimed_by = ?5",
+                params![video_id, reason, message, now, worker_id],
+            )
+            .with_context(|| format!("update videos for failed_terminal {}", video_id))?;
+
+        if changed > 0 {
+            let detail = serde_json::json!({ "reason": reason, "message": message }).to_string();
+            tx.execute(
+                "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
+                 VALUES (?1, ?2, 'failed_terminal', ?3, ?4)",
+                params![video_id, now, worker_id, detail],
+            )?;
+        }
+
+        tx.commit().context("commit mark_terminal_failure")?;
+        Ok(changed)
+    }
+
+    /// Recover rows abandoned by a crashed process. Flips rows with
+    /// `status='in_progress' AND claimed_at < (now - threshold)` back to
+    /// `status='pending'`, clearing claimed_by/claimed_at. Returns the
+    /// row-change count (per 0006).
+    ///
+    /// Per 0024: no artifact validation, no attempt_count bump. The
+    /// sweep is operator-recovery semantics; application-retry semantics
+    /// (and the `attempt_count` ladder) belong to Epic 3's classifier.
+    ///
+    /// **`threshold == 0` semantics:** cutoff == now, so the predicate is
+    /// `claimed_at < now` — same-second claims survive the sweep (the
+    /// timestamp has second resolution; a claim made in the same second as
+    /// the sweep call is NOT considered stale). This is intentional; callers
+    /// that want "all in_progress rows" must backdate claimed_at or wait one
+    /// second past the claim before sweeping with `Duration::ZERO`.
+    ///
+    /// **Clock-skew note:** rows with `claimed_at > now` (future-valued) are
+    /// never swept — the predicate `claimed_at < cutoff` is false when
+    /// `claimed_at > now`. This is correct clock-skew behavior; no special
+    /// handling is needed.
+    // T9 wires this at the top of `run_serial` per 0024.
+    pub fn sweep_stale_claims(&mut self, threshold: std::time::Duration) -> Result<usize> {
+        let now = unix_now();
+        // Saturating cast: absurd Duration values (e.g., u64::MAX seconds)
+        // clamp to i64::MAX rather than wrapping. At the 30-min default this
+        // never fires; robustness-by-construction for callers that pass
+        // large thresholds (e.g., Duration::MAX in tests).
+        let threshold_secs = i64::try_from(threshold.as_secs()).unwrap_or(i64::MAX);
+        let cutoff = now.saturating_sub(threshold_secs);
+
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE videos
+                 SET status = 'pending',
+                     claimed_by = NULL,
+                     claimed_at = NULL,
+                     updated_at = ?1
+                 WHERE status = 'in_progress'
+                   AND claimed_at IS NOT NULL
+                   AND claimed_at < ?2",
+                params![now, cutoff],
+            )
+            .context("UPDATE videos for sweep_stale_claims")?;
+
+        if changed > 0 {
+            tracing::info!(recovered = changed, threshold_secs, "sweep_stale_claims");
+        }
+
         Ok(changed)
     }
 }
@@ -305,7 +542,7 @@ impl Store {
 }
 
 /// A row from `video_events`, returned by `get_events_for_test`.
-// Cfg-gated test helper per AD0005; fires dead_code in bin compilation when --features test-helpers is enabled.
+// Cfg-gated test helper per 0005; fires dead_code in bin compilation when --features test-helpers is enabled.
 #[cfg(any(test, feature = "test-helpers"))]
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -317,7 +554,7 @@ pub struct EventRow {
 #[cfg(any(test, feature = "test-helpers"))]
 impl Store {
     /// Retrieve all `video_events` rows for a given video_id, ordered by id.
-    // Cfg-gated test helper per AD0005; same bin-firing dynamic as EventRow above.
+    // Cfg-gated test helper per 0005; same bin-firing dynamic as EventRow above.
     #[allow(dead_code)]
     pub fn get_events_for_test(&self, video_id: &str) -> Result<Vec<EventRow>> {
         let mut stmt = self.conn.prepare(

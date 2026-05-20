@@ -71,7 +71,7 @@ pub struct GlobalArgs {
     #[arg(
         long,
         env = "UU_TIKTOK_DOWNLOAD_WORKERS",
-        value_parser = clap::value_parser!(usize).range(1..)
+        value_parser = clap::value_parser!(usize).range(1..)  // see correction note below
     )]
     pub download_workers: Option<usize>,
 
@@ -82,13 +82,15 @@ pub struct GlobalArgs {
     #[arg(
         long,
         env = "UU_TIKTOK_CHANNEL_CAPACITY",
-        value_parser = clap::value_parser!(usize).range(1..)
+        value_parser = clap::value_parser!(usize).range(1..)  // see correction note below
     )]
     pub channel_capacity: Option<usize>,
 }
 ```
 
 `clap::value_parser!(usize).range(1..)` enforces ≥ 1 at parse time; clap rejects 0 with a clear error.
+
+> **Note (post-implementation correction, ADR 0003 deviation honesty):** `clap::value_parser!(usize).range(1..)` does not compile on clap 4.6.1 for `usize` targets — the macro form is not valid for range constraints on `usize`. The T19 implementer caught this at compile time and substituted `clap::builder::RangedU64ValueParser::<usize>::new().range(1..)`, which is the correct builder form for clap 4.x. The committed code uses the builder form; the macro form above is incorrect and should not be copied to future tasks. Verify against the installed clap version's API (`clap::builder::RangedU64ValueParser`) before adopting either form.
 
 Update `dev_args()` in `src/config.rs::tests` to include the new fields:
 

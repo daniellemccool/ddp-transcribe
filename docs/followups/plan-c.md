@@ -5,7 +5,7 @@ multi-engine, storage scale). See `../FOLLOWUPS.md` for the scope index
 across all epics; `../cosmetic-followups.md`, `../bake-findings.md`,
 `../archive/followups-resolved.md` for sibling categories. The
 unverified-hypothesis prefix rule (`**Hypothesis (unverified):**`) applies
-here per AD0020.
+here per 0020.
 
 ---
 
@@ -68,15 +68,15 @@ comment stating the ASCII-only contract.
 
 ---
 
-### Consider promoting AD0010's pass-through rule to a meta-process ADR
+### Consider promoting 0010's pass-through rule to a meta-process ADR
 
 **Found in:** T1 (ADR drafts for Plan B Epic 1).
 **Disposition:** Deferred to Plan C planning.
-**Trigger to revisit:** When Plan C surfaces speculative-aggregation pressure for new derived data (comments, video metadata, etc.), evaluate whether the pass-through rule should be promoted from AD0010's scope to a standalone meta-process ADR alongside AD0001–3.
+**Trigger to revisit:** When Plan C surfaces speculative-aggregation pressure for new derived data (comments, video metadata, etc.), evaluate whether the pass-through rule should be promoted from 0010's scope to a standalone meta-process ADR alongside 0001–3.
 
 The pass-through rule ("raw pass-through is canonical for research signals; only
 compute summaries needed for pipeline operation, indexing, or cheap sanity checks")
-is currently codified in AD0010 (raw_signals schema). It generalizes beyond Plan B
+is currently codified in 0010 (raw_signals schema). It generalizes beyond Plan B
 Epic 1. If it surfaces in Plan C as a recurring pattern, promote it to a standalone
 ADR.
 
@@ -93,15 +93,15 @@ ADR.
 ### Per-token `id` + `text` roughly doubles JSON artifact size vs `{p, plog}` only
 
 **Found in:** T10 (artifact schema freeze) — implementer note.
-**Disposition:** Pretty→compact JSON component landed in perf-tweaks `decdf6f`; drop-text-field component remains deferred pending AD0010 amendment + bake validation that downstream filtering still works on `id`-only tokens.
+**Disposition:** Pretty→compact JSON component landed in perf-tweaks `decdf6f`; drop-text-field component remains deferred pending 0010 amendment + bake validation that downstream filtering still works on `id`-only tokens.
 **Trigger to revisit:** Plan C reviews artifact storage layout, OR observed
 shard-disk pressure during a bake.
 
-**Partial resolution by perf-tweaks `decdf6f`:** the `to_vec_pretty` → `to_vec` swap removed ~3× pretty-print indentation bloat from the per-token raw_signals payload. The dropping-`text`-field half of the original finding is unchanged: per AD0010's pass-through rule, downstream consumers need both `id` and `text` to filter special tokens (`[BEG]`, `[END]`, `<|en|>`, etc.) which numerically include but lexically distinguish themselves from content tokens. Dropping `text` requires either (a) an AD0010 amendment that relaxes the pass-through rule for tokens, OR (b) a sparse-token mode that keeps `text` only for special tokens. Neither is in scope for the perf-tweaks worktree.
+**Partial resolution by perf-tweaks `decdf6f`:** the `to_vec_pretty` → `to_vec` swap removed ~3× pretty-print indentation bloat from the per-token raw_signals payload. The dropping-`text`-field half of the original finding is unchanged: per 0010's pass-through rule, downstream consumers need both `id` and `text` to filter special tokens (`[BEG]`, `[END]`, `<|en|>`, etc.) which numerically include but lexically distinguish themselves from content tokens. Dropping `text` requires either (a) an 0010 amendment that relaxes the pass-through rule for tokens, OR (b) a sparse-token mode that keeps `text` only for special tokens. Neither is in scope for the perf-tweaks worktree.
 
 T10's `RawToken` carries `id: i32` and `text: String` in addition to
 `p`/`plog`, matching T9's `TokenRaw` shape exactly. This is intentional per
-AD0010's pass-through rule — downstream consumers need both fields to
+0010's pass-through rule — downstream consumers need both fields to
 filter special tokens (`[BEG]`, `[END]`, `<|en|>`, etc.) which numerically
 include but lexically distinguish themselves from content tokens. The cost
 is a roughly 2× growth in per-video JSON size compared to the `{p, plog}`-
@@ -119,7 +119,7 @@ surfaces:
 2. **Sparse-token mode** — emit `id`+`text` only for tokens flagged as
    special (low `p` or matching the model's special-token id range), and
    the dense numeric pair `{p, plog}` for content tokens. Requires a
-   schema_version bump (`"1.1"` or `"2"`); covered by AD0010 comment-2's
+   schema_version bump (`"1.1"` or `"2"`); covered by 0010 comment-2's
    string-versioning rationale.
 
 Option 1 is cheaper structurally; option 2 keeps the wire format inspectable.

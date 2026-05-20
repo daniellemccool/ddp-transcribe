@@ -4,7 +4,7 @@ Active-scope review items targeted for Plan B Epic 3. See `../FOLLOWUPS.md`
 for the scope index across all epics; `../cosmetic-followups.md`,
 `../bake-findings.md`, `../archive/followups-resolved.md` for sibling
 categories. The unverified-hypothesis prefix rule
-(`**Hypothesis (unverified):**`) applies here per AD0020.
+(`**Hypothesis (unverified):**`) applies here per 0020.
 
 ---
 
@@ -118,6 +118,80 @@ serial happy path:
    yt-dlp flag. One-line defense: insert `"--".into()` immediately before
    `source_url.to_string()` in the `args` vector. Land this when Plan C wires
    resolved URLs into the fetcher pipeline.
+
+---
+
+### `pipeline_fakes.rs` is 1000 lines mixing concerns; over-narrated with phase commentary
+
+**Found in:** Operator test-suite review (2026-05-20).
+**Disposition:** Epic 3+ refactor work; not Phase 2 close scope. The tests are useful as-is; the file size and narration style are the problem.
+**Trigger to revisit:** Epic 3 planning kickoff; or when adding the next 200 lines to the file would push it over an unfortunate threshold.
+
+`tests/pipeline_fakes.rs` is nearly 1000 lines and mixes: fake types (FakeFetcher,
+FakeTranscriber), worker-level tests (fetch_worker_drains,
+transcribe_worker_processes_one_item), serial-path tests
+(pipeline_processes_one_video_to_succeeded, run_serial_classifies_*), pipelined
+tests (run_pipelined_drains_all_rows), stale-race tests
+(fetch_worker_increments_stale_after_failure_on_swept_claim,
+transcribe_worker_increments_stale_after_failure_on_swept_claim), and artifact
+assertions. The mixing makes the file hard to navigate.
+
+The file is also over-narrated with Phase 2 task references (T16, T17, T18), ADR
+citations, and "this design was added in commit X" commentary inside test bodies.
+That history belongs in commit messages and git blame — not in durable test specs.
+A test should read as a behavioral statement, not a Phase 2 implementation diary.
+
+Suggested refactor:
+
+```
+tests/pipeline_fakes/
+├── mod.rs            # re-exports + fixtures
+├── fakes.rs          # FakeFetcher, FakeTranscriber, FetchedItem constructors
+├── serial_tests.rs   # run_serial path coverage
+├── fetch_worker_tests.rs
+├── transcribe_worker_tests.rs
+└── pipelined_tests.rs  # run_pipelined orchestration
+```
+
+When splitting, strip the T-references and phase comments from test bodies. Each
+test should describe the behavior under test, not the project history that motivated
+it.
+
+---
+
+### Over-reliance on worker-level entry points in `pipeline_fakes`
+
+**Found in:** Operator test-suite review (2026-05-20).
+**Disposition:** Epic 3+ test-quality work; not Phase 2 close scope.
+**Trigger to revisit:** Epic 3 planning; or whenever a new worker-level test is being added (audit whether the same behavior could be expressed at run_pipelined level).
+
+The current test suite calls `fetch_worker(...)` and `transcribe_worker(...)` directly
+in many tests (`fetch_worker_drains_pending_rows_and_exits`,
+`transcribe_worker_processes_one_item_then_exits_on_channel_close`, etc.). Direct-worker
+tests are useful for failure injection (gated FakeFetcher exercising the Ok(0) race;
+FakeTranscriber returning specific errors), but they're not a clean statement of
+*user-visible* behavior — `uu-tiktok process` invokes `run_pipelined`, not the
+individual workers.
+
+A higher-level test using `run_pipelined` with controllable fakes (e.g., a FakeFetcher
+that fails N of M videos to exercise the retryable classification path; a multi-row
+fixture to exercise N=3 worker contention against the shared store mutex) could replace
+some worker-level tests while expressing behavior closer to what an operator observes.
+
+Audit suggested at Epic 3 kickoff:
+
+1. Inventory existing worker-level tests. For each, ask: does this exercise a path
+   that `run_pipelined` couldn't reach with appropriate fakes?
+2. Tests that exercise only happy-path or simple classification — candidates for
+   replacement by `run_pipelined`-level tests.
+3. Tests that exercise specific failure injection (e.g., the `gated_then_always_fails`
+   race tests) — keep at worker level because the orchestrator-level test can't
+   reliably reproduce the timing.
+4. Aim for a small number of focused worker-level tests + a richer set of
+   `run_pipelined` orchestration tests.
+
+This complements the `pipeline_fakes.rs` refactor entry above — when the file is
+split, the audit naturally happens during the split.
 
 ---
 

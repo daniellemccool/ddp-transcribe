@@ -25,7 +25,7 @@ Cost of (1) is one crate dep + ~5 attribute lines. Worth it if the tighter timin
 
 ## `adg comment` rewrites the rendered Comments section with only the latest entry
 
-**Found in:** T2 (cargo-deps amendment to AD0009 via `adg comment`).
+**Found in:** T2 (cargo-deps amendment to 0009 via `adg comment`).
 **Disposition:** Tool quirk; tracked but not blocking.
 **Trigger to revisit:** If future ADR amendments require the full comment history visible in the rendered body — e.g., a multi-step decision with several attributed clarifications.
 
@@ -35,6 +35,6 @@ new comment's anchor and line; prior comments remain in `index.yaml` but their
 `<a name="comment-N"></a>` anchors disappear from the body. `adg validate`
 accepts this state (it checks the anchors that ARE present, not that all
 indexed comments are anchored). Workaround for T2: manually restored
-comment-1's anchor in AD0009 before commit so the rendered body matches
+comment-1's anchor in 0009 before commit so the rendered body matches
 `index.yaml`'s comment list. If this pattern recurs in T3-T12, propose an
 upstream `adg` fix.

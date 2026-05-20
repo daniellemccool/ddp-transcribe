@@ -9,7 +9,7 @@ files: `docs/FOLLOWUPS.md` (active-scope code-quality entries),
 
 **Discipline:** entries that record unverified hypotheses must prefix the
 hypothesis with `**Hypothesis (unverified):**` so the next operator knows
-to verify before acting (per AD0020).
+to verify before acting (per 0020).
 
 ---
 
@@ -94,7 +94,7 @@ Verification on the A10 (`yt-dlp -v --list-impersonate-targets`):
 ## `set_no_timestamps(true)` causes content loss and repetition hallucinations across 30s window boundaries
 
 **Found in:** Perf-tweaks T10 bake on SRC A10 (commit `042f038` introduced; revert commit `368fe4b` on same branch backs it out; this entry routes the finding).
-**Disposition:** **Optimization invalid: semantic regression.** Reverted. Not a tunable; do not re-attempt with parameter adjustments or audio-side chunking — those workarounds reintroduce the same problem class. (Framing per codex-advisor review 2026-05-18: "keep timestamps enabled even if you do not serialize them"; chunk-boundary independence is the same family of issue AD0015 explicitly rejected for `whisper_full_parallel`.)
+**Disposition:** **Optimization invalid: semantic regression.** Reverted. Not a tunable; do not re-attempt with parameter adjustments or audio-side chunking — those workarounds reintroduce the same problem class. (Framing per codex-advisor review 2026-05-18: "keep timestamps enabled even if you do not serialize them"; chunk-boundary independence is the same family of issue 0015 explicitly rejected for `whisper_full_parallel`.)
 **Trigger to revisit:** only if whisper-rs / whisper.cpp ships a change that decouples `no_timestamps` from the seek-advancement control signal (i.e., a different mechanism for inferring speech boundaries when timestamp tokens are suppressed). Not a "Plan C might want this" item.
 
 **Hypothesis (unverified) at spec time:** Source-level inspection of `~/src/whisper.cpp/src/whisper.cpp` (logits-suppression block + the `if (single_segment || no_timestamps)` seek branch) suggested `no_timestamps=true` only suppresses timestamp tokens in the logits — content tokens would be preserved bit-for-bit, only the segment grouping would change (one segment per 30s window instead of multiple timestamp-split segments). The spec proposed an empirical bake to confirm this on real audio.
@@ -108,7 +108,7 @@ Token-count summary across all 20 videos: post had fewer tokens than pre on 19/2
 
 **Root cause (refined via codex-advisor review):** the timestamp token IS whisper.cpp's control signal for inferring where speech ends within a 30s decode window. `no_timestamps=true` suppresses the token in the logits step, which deletes that control signal entirely. The `seek_delta = 100*WHISPER_CHUNK_SIZE` branch is the *downstream consequence* — whisper.cpp falls back to a context-free fixed 30s stride because there's no longer a model-inferred boundary to seek to. Content that spans the resulting arbitrary cuts either disappears (partial trailing utterance) or triggers entropy-guard / temperature-fallback repetition cascades when the next-window prompt context loses alignment. The earlier framing — "seek_delta forces a fixed window jump" — was backwards: it's the loss of the control signal that's primary; the seek behavior is what falls out.
 
-**No safe workaround at our scale.** Audio-side chunking to ≤ 30s would reintroduce the same chunk-boundary problem class that AD0015 explicitly rejects for `whisper_full_parallel`. TikTok speech crosses arbitrary 30s cuts frequently. Sampling tweaks may reduce repetition rate but cannot restore missing boundary content. Recommendation (codex-advisor): keep timestamps enabled in `FullParams` even though we don't serialize them into the artifact JSON — the small inference-cost win is not worth the semantic regression.
+**No safe workaround at our scale.** Audio-side chunking to ≤ 30s would reintroduce the same chunk-boundary problem class that 0015 explicitly rejects for `whisper_full_parallel`. TikTok speech crosses arbitrary 30s cuts frequently. Sampling tweaks may reduce repetition rate but cannot restore missing boundary content. Recommendation (codex-advisor): keep timestamps enabled in `FullParams` even though we don't serialize them into the artifact JSON — the small inference-cost win is not worth the semantic regression.
 
 **Cross-reference:** revert commit on `feat/perf-tweaks` post-merge to main; `scripts/bake-t10-no-timestamps.sh` + `scripts/bake-t10-compare.sh` are the harness; raw bake artifacts were under `/tmp/bake-t10/{pre,post}/run{1,2}/transcripts/` (ephemeral; not preserved in-repo).
 

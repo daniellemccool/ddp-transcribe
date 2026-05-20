@@ -9,14 +9,14 @@ use serde::{Deserialize, Serialize};
 // Plan B Epic 1 (T10): TranscriptMetadata + raw_signals projection
 // ============================================================================
 //
-// Per AD0010 (raw_signals schema, schema_version): the per-video JSON artifact
+// Per 0010 (raw_signals schema, schema_version): the per-video JSON artifact
 // at `{transcripts_root}/{shard}/{video_id}.json` carries Plan A's existing
 // provenance fields (video_id, source_url, fetcher, transcript_source, model,
 // transcribed_at, language_detected, duration_s) PLUS an optional
 // `raw_signals` sub-object pass-through (schema_version, language,
 // lang_probs, segments[]).
 //
-// Module dependency direction (AD0016 worker-thread invariants):
+// Module dependency direction (0016 worker-thread invariants):
 // `src/transcribe.rs` MUST NOT import from this module. The transcribe layer
 // is the source-of-truth domain type; the artifacts layer is the consumer
 // that knows how to project domain types into JSON. The conversion lives on
@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 // T10 just freezes the artifact schema and makes the struct compile +
 // serialize correctly.
 
-/// On-wire raw_signals schema version. AD0010 + comment-2: this is a JSON
+/// On-wire raw_signals schema version. 0010 + comment-2: this is a JSON
 /// string ("1"), not an integer — string versioning admits additive minor
 /// revisions ("1.1") without forcing a re-parse of existing artifacts.
 pub const EXPECTED_RAW_SIGNALS_SCHEMA_VERSION: &str = "1";
@@ -62,13 +62,13 @@ pub struct TranscriptMetadata {
 }
 
 /// Pass-through raw confidence signals from whisper.cpp's C API.
-/// See AD0010 for the schema contract; T9's `TranscribeOutput` is the
+/// See 0010 for the schema contract; T9's `TranscribeOutput` is the
 /// source-of-truth domain type that this projection consumes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RawSignals {
     pub schema_version: String,
     pub language: String,
-    /// AD0010: serialize as `null` when absent (NOT omitted) — opt-in
+    /// 0010: serialize as `null` when absent (NOT omitted) — opt-in
     /// `--compute-lang-probs` consumers depend on the field always being
     /// present. No `skip_serializing_if` here.
     pub lang_probs: Option<Vec<(String, f32)>>,
@@ -84,7 +84,7 @@ pub struct RawSegment {
 /// Per-token raw confidence signals. Shape matches T9's `TokenRaw` 1:1 so
 /// the projection round-trips `id` + `text` losslessly — downstream
 /// consumers need both to filter special tokens (`[BEG]`, `[END]`, `<|en|>`,
-/// etc.) per AD0010's pass-through rule.
+/// etc.) per 0010's pass-through rule.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RawToken {
     pub id: i32,
@@ -95,7 +95,7 @@ pub struct RawToken {
 
 impl RawSignals {
     /// Project T9's `TranscribeOutput` domain type into the artifact-side
-    /// schema. AD0016: the conversion lives on the artifact side so the
+    /// schema. 0016: the conversion lives on the artifact side so the
     /// transcribe module stays independent of the artifact module.
     pub fn from_transcribe_output(output: &crate::transcribe::TranscribeOutput) -> Self {
         RawSignals {
@@ -254,7 +254,7 @@ mod tests {
         assert_eq!(rs["schema_version"], "1");
         assert_eq!(rs["language"], "en");
 
-        // AD0010: lang_probs MUST be present as `null` when not opted in
+        // 0010: lang_probs MUST be present as `null` when not opted in
         // (NOT omitted). serde_json::Value::Null serializes/deserializes
         // identically; we assert the key exists AND its value is JSON null
         // by checking `is_null()` on the looked-up value.

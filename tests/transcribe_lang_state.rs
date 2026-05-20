@@ -1,7 +1,7 @@
 //! Tier 2 test for T2 perf-tweaks: lazy lang_state allocation.
 //!
 //! Requires ./models/ggml-tiny.en.bin on disk; gated by test-helpers feature
-//! per AD0005 because it depends on a non-trivial fixture and uses the
+//! per 0005 because it depends on a non-trivial fixture and uses the
 //! test-only `WhisperEngine::lang_state_allocations()` accessor.
 
 #![cfg(feature = "test-helpers")]
@@ -15,15 +15,6 @@ fn tiny_model_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models/ggml-tiny.en.bin")
 }
 
-fn skip_if_no_model() -> bool {
-    if !tiny_model_path().exists() {
-        eprintln!("Skipping: ./models/ggml-tiny.en.bin not found");
-        true
-    } else {
-        false
-    }
-}
-
 fn engine_config() -> EngineConfig {
     EngineConfig {
         model_path: tiny_model_path(),
@@ -33,10 +24,8 @@ fn engine_config() -> EngineConfig {
 }
 
 #[tokio::test]
+#[ignore = "requires ./models/ggml-tiny.en.bin; run with `cargo test --features test-helpers -- --ignored`"]
 async fn lang_state_not_allocated_when_compute_lang_probs_never_true() {
-    if skip_if_no_model() {
-        return;
-    }
     let engine = WhisperEngine::new(&engine_config()).expect("engine loads");
 
     // Send three non-opt-in requests; counter must stay at 0.
@@ -57,10 +46,8 @@ async fn lang_state_not_allocated_when_compute_lang_probs_never_true() {
 }
 
 #[tokio::test]
+#[ignore = "requires ./models/ggml-tiny.en.bin; run with `cargo test --features test-helpers -- --ignored`"]
 async fn lang_state_allocated_exactly_once_across_opt_in_requests() {
-    if skip_if_no_model() {
-        return;
-    }
     let engine = WhisperEngine::new(&engine_config()).expect("engine loads");
 
     let opt_in = PerCallConfig {

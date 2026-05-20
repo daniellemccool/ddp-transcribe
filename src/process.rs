@@ -12,7 +12,7 @@ pub struct CommandSpec<'a> {
     pub args: Vec<String>,
     pub timeout: Duration,
     /// Last-N bytes of stderr retained in `CommandOutcome.stderr_excerpt`.
-    /// Bounded by construction (AD0021): the streaming reader maintains a
+    /// Bounded by construction (0021): the streaming reader maintains a
     /// `VecDeque<u8>` of size `stderr_capture_bytes` and drops leading bytes
     /// when full. Setting to 0 still drains stderr (so the child doesn't
     /// block on a full pipe) but discards bytes as they arrive; the excerpt
@@ -33,7 +33,7 @@ pub struct CommandOutcome {
     pub exit_code: i32,
     /// `None` when the caller set `stdout_capture_bytes == 0` (intentional
     /// discard); `Some(bounded Vec)` otherwise. The vec length is bounded
-    /// by `stdout_capture_bytes`. Per AD0002, `#[allow(dead_code)]` retained
+    /// by `stdout_capture_bytes`. Per 0002, `#[allow(dead_code)]` retained
     /// because the bin currently sets `stdout_capture_bytes: 0` at every
     /// call site (yt-dlp); the field is part of the lib API surface,
     /// exercised by the integration tests.
@@ -91,7 +91,7 @@ impl From<RunError> for FetchError {
 /// discard — bytes are still drained to prevent the child blocking on a
 /// full pipe, but not retained).
 ///
-/// AD0021 invariant: peak retained memory is bounded by `cap` regardless of
+/// 0021 invariant: peak retained memory is bounded by `cap` regardless of
 /// how much the child emits. The optional `peak_buffer_len` counter is for
 /// test instrumentation; production callers pass `None`.
 pub async fn read_bounded<R>(
@@ -169,7 +169,7 @@ pub async fn run(spec: CommandSpec<'_>) -> Result<CommandOutcome, RunError> {
     let mut stdout_pipe = child.stdout.take().expect("piped stdout");
     let mut stderr_pipe = child.stderr.take().expect("piped stderr");
 
-    // Bounded streaming reads (AD0021). Peak memory is bounded by
+    // Bounded streaming reads (0021). Peak memory is bounded by
     // `stdout_capture_bytes + stderr_capture_bytes` retention; transient
     // chunk-read buffers add O(8 KiB × 2) on top, plus tokio task overhead.
     let stdout_cap = spec.stdout_capture_bytes;

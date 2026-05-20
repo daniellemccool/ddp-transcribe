@@ -65,7 +65,7 @@ fn build_yt_dlp_args(video_id: &str, source_url: &str, video_dir: &Path) -> (Vec
         // T3 perf-tweaks: make the audio-only minimum-artifact contract
         // explicit. `-sn -dn` drop subtitle/data streams; `-map 0:a:0`
         // selects only the first audio stream; `-c:a pcm_s16le` pins the
-        // WAV codec; `-ar 16000 -ac 1` enforces AD0014. `-vn` and
+        // WAV codec; `-ar 16000 -ac 1` enforces 0014. `-vn` and
         // `-c:a pcm_s16le` are redundant with current yt-dlp/ffmpeg
         // defaults (yt-dlp already passes `-vn`; ffmpeg defaults WAV
         // output to pcm_s16le) — kept for explicitness and as defense
@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn build_args_enforces_audio_input_invariant() {
-        // AD0014: audio input is float32 PCM 16 kHz mono. The yt-dlp
+        // 0014: audio input is float32 PCM 16 kHz mono. The yt-dlp
         // postprocessor enforces 16 kHz mono at the WAV-extraction boundary.
         // T3 perf-tweaks: the postprocessor-args string also makes the
         // stream-selection contract explicit (drop video/subtitle/data
@@ -178,7 +178,7 @@ mod tests {
         assert!(
             args.iter()
                 .any(|a| a == "ffmpeg:-vn -sn -dn -map 0:a:0 -c:a pcm_s16le -ar 16000 -ac 1"),
-            "T3 + AD0014: postprocessor-args must drop non-audio streams, \
+            "T3 + 0014: postprocessor-args must drop non-audio streams, \
              map first audio, pin pcm_s16le + 16 kHz + mono"
         );
     }

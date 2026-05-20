@@ -14,7 +14,7 @@ legacy-outcome: true
 
 ## Context and Problem Statement
 
-`src/process.rs::run` previously read child stdout AND stderr each into unbounded `Vec<u8>` via `tokio::io::AsyncReadExt::read_to_end`, then sliced an 8 KiB tail of stderr via `ring_buffer_tail` for inclusion in `CommandOutcome::stderr_excerpt`. The `stderr_capture_bytes` field only bounded the *retained excerpt*, not the peak memory during read. A misbehaving subprocess emitting many gigabytes to stderr would allocate all of it before truncation. FOLLOWUPS T6 documented this gap; Plan B Epic 2 anticipated an ADR to close it (numbered AD0023 in the Epic 2 sketch, renumbered to AD0021 here because AD0018-AD0020 meta-process ADRs landed on main after the sketch was written).
+`src/process.rs::run` previously read child stdout AND stderr each into unbounded `Vec<u8>` via `tokio::io::AsyncReadExt::read_to_end`, then sliced an 8 KiB tail of stderr via `ring_buffer_tail` for inclusion in `CommandOutcome::stderr_excerpt`. The `stderr_capture_bytes` field only bounded the *retained excerpt*, not the peak memory during read. A misbehaving subprocess emitting many gigabytes to stderr would allocate all of it before truncation. FOLLOWUPS T6 documented this gap; Plan B Epic 2 anticipated an ADR to close it (numbered 0023 in the Epic 2 sketch, renumbered to 0021 here because 0018-0020 meta-process ADRs landed on main after the sketch was written).
 
 
 ## Considered Options
@@ -37,7 +37,7 @@ We decided for [Option 1](#option-1) because: Distinguishes 'captured but empty'
 
 - **Retained-output memory ceiling** is now `stdout_capture_bytes + stderr_capture_bytes` per subprocess (call-site controlled), not "tool exit + truncation." Total peak memory during a `run` call is `retained + O(read_chunk_size_stdout + read_chunk_size_stderr + tokio task overhead)` — the chunk buffers used by the streaming reader hold at most one `read()` worth of bytes each before draining into the `VecDeque<u8>`. "Bounded by construction" applies to the retained buffer, not to instantaneous transient allocations.
 - Call sites must explicitly opt in to stdout capture; `yt-dlp` and ffmpeg-postprocessor paths get `stdout_capture_bytes: 0` (no behavioral change — they did not read `outcome.stdout`).
-- Plan B Epic 2's T13 inherits this design. T13 may add symmetric stdout policy decisions (different defaults for specific tools) without authoring a new ADR; if it changes the design, it supersedes AD0021 with a new ADR per existing convention.
+- Plan B Epic 2's T13 inherits this design. T13 may add symmetric stdout policy decisions (different defaults for specific tools) without authoring a new ADR; if it changes the design, it supersedes 0021 with a new ADR per existing convention.
 - Test coverage in `tests/process_bounded_capture.rs` (5 tests, all passing) covers overflow tail preservation, stdout opt-in/opt-out, exit-code passthrough, and a direct `read_bounded` peak-memory-bounded assertion via an `Arc<AtomicUsize>` counter. Implementation landed in commit `9e84b54` immediately preceding this ADR.
 - Filename note: the on-disk slug uses `vecdeque` (lowercase, no `<u8>`) rather than the title's literal `VecDeque<u8>` because `<` and `>` are shell redirection metacharacters and break unquoted globs in scripts. The title in YAML frontmatter retains the precise type name.
 

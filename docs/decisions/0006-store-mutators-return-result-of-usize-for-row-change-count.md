@@ -14,7 +14,7 @@ legacy-outcome: true
 
 ## Context and Problem Statement
 
-T13's `process_watch_entry` needed to detect "was this video newly inserted or did it already exist" so it could increment `unique_videos_seen` correctly. The brief reached for `Store::get_video_for_test(...)` — a `#[cfg(any(test, feature = "test-helpers"))]` test helper per AD0005 — from production code, which breaks `cargo build` without the feature flag. We need a convention for how Store mutators communicate state-change outcomes to callers, applicable to T9's `upsert_video`/`upsert_watch_history`, T10's `mark_succeeded` (and Plan B's future `mark_failed_terminal` / `mark_failed_retryable` / `update_progress`), and any later mutator that callers need to distinguish "newly created" from "no-op."
+T13's `process_watch_entry` needed to detect "was this video newly inserted or did it already exist" so it could increment `unique_videos_seen` correctly. The brief reached for `Store::get_video_for_test(...)` — a `#[cfg(any(test, feature = "test-helpers"))]` test helper per 0005 — from production code, which breaks `cargo build` without the feature flag. We need a convention for how Store mutators communicate state-change outcomes to callers, applicable to T9's `upsert_video`/`upsert_watch_history`, T10's `mark_succeeded` (and Plan B's future `mark_failed_terminal` / `mark_failed_retryable` / `update_progress`), and any later mutator that callers need to distinguish "newly created" from "no-op."
 
 ## Considered Options
 
@@ -26,7 +26,7 @@ T13's `process_watch_entry` needed to detect "was this video newly inserted or d
 
 ## Decision Drivers
 
-Production code must NOT depend on `#[cfg(any(test, feature = "test-helpers"))]` library items per AD0005. Cheap to implement (no extra query roundtrip per mutation). Composes with rusqlite's native `Connection::execute` return type. Forward-compatible with Plan B's mark_failed_* mutators and any later mutator. Discoverable from the type signature so future implementers do not repeat the test-helper trap.
+Production code must NOT depend on `#[cfg(any(test, feature = "test-helpers"))]` library items per 0005. Cheap to implement (no extra query roundtrip per mutation). Composes with rusqlite's native `Connection::execute` return type. Forward-compatible with Plan B's mark_failed_* mutators and any later mutator. Discoverable from the type signature so future implementers do not repeat the test-helper trap.
 
 
 

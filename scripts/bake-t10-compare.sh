@@ -96,7 +96,7 @@ pre_segs  = segs(a)
 post_segs = segs(b)
 
 def text_field(meta):
-    # AD0008-era artifacts: top-level transcript text is written to a
+    # 0008-era artifacts: top-level transcript text is written to a
     # sibling .txt file, not inside the JSON. The JSON's text-bearing
     # path is the concatenation of token text (special tokens excluded
     # by the consumer). For equality purposes, the per-token check below

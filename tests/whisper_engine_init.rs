@@ -1,7 +1,7 @@
 //! WhisperEngine init smoke test.
 //!
 //! Requires ./models/ggml-tiny.en.bin on disk; gated by test-helpers feature
-//! per AD0005 because it depends on a non-trivial fixture.
+//! per 0005 because it depends on a non-trivial fixture.
 
 #![cfg(feature = "test-helpers")]
 
@@ -16,12 +16,8 @@ fn tiny_model_path() -> PathBuf {
 }
 
 #[tokio::test]
+#[ignore = "requires ./models/ggml-tiny.en.bin; run with `cargo test --features test-helpers -- --ignored`"]
 async fn engine_loads_tiny_en_model_successfully() {
-    if !tiny_model_path().exists() {
-        eprintln!("Skipping: ./models/ggml-tiny.en.bin not found. Run scripts/fetch-tiny-model.sh");
-        return;
-    }
-
     let config = EngineConfig {
         model_path: tiny_model_path(),
         gpu_device: 0,
@@ -79,12 +75,8 @@ fn silence_fixture_path() -> PathBuf {
 }
 
 #[tokio::test]
+#[ignore = "requires ./models/ggml-tiny.en.bin; run with `cargo test --features test-helpers -- --ignored`"]
 async fn transcribe_silence_returns_empty_or_short_text() {
-    if !tiny_model_path().exists() {
-        eprintln!("Skipping: model not on disk");
-        return;
-    }
-
     let config = EngineConfig {
         model_path: tiny_model_path(),
         gpu_device: 0,
@@ -123,12 +115,8 @@ async fn transcribe_silence_returns_empty_or_short_text() {
 }
 
 #[tokio::test]
+#[ignore = "requires ./models/ggml-tiny.en.bin; run with `cargo test --features test-helpers -- --ignored`"]
 async fn transcribe_respects_short_deadline() {
-    if !tiny_model_path().exists() {
-        eprintln!("Skipping: model not on disk");
-        return;
-    }
-
     let config = EngineConfig {
         model_path: tiny_model_path(),
         gpu_device: 0,
@@ -183,12 +171,8 @@ async fn transcribe_respects_short_deadline() {
 }
 
 #[tokio::test]
+#[ignore = "requires ./models/ggml-tiny.en.bin; run with `cargo test --features test-helpers -- --ignored`"]
 async fn lang_probs_present_when_opt_in() {
-    if !tiny_model_path().exists() {
-        eprintln!("Skipping: model not on disk");
-        return;
-    }
-
     let config = EngineConfig {
         model_path: tiny_model_path(),
         gpu_device: 0,
@@ -241,12 +225,8 @@ async fn lang_probs_present_when_opt_in() {
 }
 
 #[tokio::test]
+#[ignore = "requires ./models/ggml-tiny.en.bin; run with `cargo test --features test-helpers -- --ignored`"]
 async fn transcribe_populates_raw_signals_segments_and_tokens() {
-    if !tiny_model_path().exists() {
-        eprintln!("Skipping: model not on disk");
-        return;
-    }
-
     let config = EngineConfig {
         model_path: tiny_model_path(),
         gpu_device: 0,
