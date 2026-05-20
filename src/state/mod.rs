@@ -386,6 +386,64 @@ impl Store {
         tx.commit().context("commit mark_retryable_failure")?;
         Ok(changed)
     }
+
+    /// Flip a video row from `in_progress` to `failed_terminal`, recording
+    /// the terminal reason + message in the terminal_reason/terminal_message
+    /// columns. Same stale-claim predicate as the rest of the family
+    /// (0023). Returns the row-change count per 0006.
+    ///
+    /// **SURFACE ONLY in Epic 2 — no caller wires this.** Epic 3's classifier
+    /// dispatcher is the first caller (when failure classification distinguishes
+    /// VideoUnavailable / VideoNonExistent / similar terminal kinds from
+    /// transient classes that go through mark_retryable_failure). Landing the
+    /// surface in Epic 2 means Epic 3 is a classifier-add task, not a
+    /// mutator-add task — keeps Epic 3's diff focused on the new logic.
+    ///
+    /// 0002 cleanup discipline: `#[allow(dead_code)]` lives on this method
+    /// until Epic 3's first caller wires it. The closing task of Epic 3's
+    /// classifier work removes the attribute.
+    #[allow(dead_code)]
+    pub fn mark_terminal_failure(
+        &mut self,
+        video_id: &str,
+        worker_id: &str,
+        reason: &str,
+        message: &str,
+    ) -> Result<usize> {
+        let now = unix_now();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("begin immediate for mark_terminal_failure")?;
+
+        let changed = tx
+            .execute(
+                "UPDATE videos
+                 SET status = 'failed_terminal',
+                     terminal_reason = ?2,
+                     terminal_message = ?3,
+                     claimed_by = NULL,
+                     claimed_at = NULL,
+                     updated_at = ?4
+                 WHERE video_id = ?1
+                   AND status = 'in_progress'
+                   AND claimed_by = ?5",
+                params![video_id, reason, message, now, worker_id],
+            )
+            .with_context(|| format!("update videos for failed_terminal {}", video_id))?;
+
+        if changed > 0 {
+            let detail = serde_json::json!({ "reason": reason, "message": message }).to_string();
+            tx.execute(
+                "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
+                 VALUES (?1, ?2, 'failed_terminal', ?3, ?4)",
+                params![video_id, now, worker_id, detail],
+            )?;
+        }
+
+        tx.commit().context("commit mark_terminal_failure")?;
+        Ok(changed)
+    }
 }
 
 impl Store {

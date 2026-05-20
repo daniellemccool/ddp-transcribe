@@ -237,3 +237,98 @@ fn claim_then_mark_succeeded_then_reclaim_returns_none() -> Result<()> {
     assert!(second.is_none(), "round-trip: no pending rows left");
     Ok(())
 }
+
+#[test]
+fn mark_terminal_failure_flips_status_and_records_columns() -> anyhow::Result<()> {
+    use rusqlite::Connection;
+    use uu_tiktok::state::Store;
+
+    let tmp = tempfile::TempDir::new()?;
+    let path = tmp.path().join("state.sqlite");
+    let mut store = Store::open(&path)?;
+    store.upsert_video("vid_a", "https://example/a", false)?;
+    let _claim = store.claim_next("worker-1")?.expect("claim");
+
+    let changed = store.mark_terminal_failure(
+        "vid_a",
+        "worker-1",
+        "VideoUnavailable",
+        "yt-dlp returned 410 Gone",
+    )?;
+    assert_eq!(changed, 1);
+
+    let raw = Connection::open(&path)?;
+    let (status, tr, tm): (String, Option<String>, Option<String>) = raw.query_row(
+        "SELECT status, terminal_reason, terminal_message
+         FROM videos WHERE video_id = ?1",
+        ["vid_a"],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    assert_eq!(status, "failed_terminal");
+    assert_eq!(tr.as_deref(), Some("VideoUnavailable"));
+    assert_eq!(tm.as_deref(), Some("yt-dlp returned 410 Gone"));
+
+    // Core retry-safety invariant: claim slot cleared so the row can't be
+    // re-claimed against a stale worker_id. (Symmetric with the T6
+    // mark_retryable_failure happy-path test.)
+    let (claimed_by, claimed_at): (Option<String>, Option<i64>) = raw.query_row(
+        "SELECT claimed_by, claimed_at FROM videos WHERE video_id = ?1",
+        ["vid_a"],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    assert_eq!(
+        claimed_by, None,
+        "claimed_by must be NULL after terminal flip"
+    );
+    assert_eq!(
+        claimed_at, None,
+        "claimed_at must be NULL after terminal flip"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn mark_terminal_failure_with_stale_claim_returns_zero() -> anyhow::Result<()> {
+    use rusqlite::Connection;
+    use uu_tiktok::state::Store;
+
+    let tmp = tempfile::TempDir::new()?;
+    let path = tmp.path().join("state.sqlite");
+    let mut store = Store::open(&path)?;
+    store.upsert_video("vid_a", "https://example/a", false)?;
+    store.claim_next("worker-1")?.expect("claim");
+
+    let changed =
+        store.mark_terminal_failure("vid_a", "worker-OTHER", "VideoUnavailable", "spurious")?;
+    assert_eq!(changed, 0);
+
+    // Stale-claim must leave the row untouched (T6-review carry-forward).
+    let raw = Connection::open(&path)?;
+    let (status, tr, tm, cb): (String, Option<String>, Option<String>, Option<String>) = raw
+        .query_row(
+            "SELECT status, terminal_reason, terminal_message, claimed_by
+             FROM videos WHERE video_id = ?1",
+            ["vid_a"],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+    assert_eq!(
+        status, "in_progress",
+        "stale-claim must leave status unchanged"
+    );
+    assert_eq!(
+        tr, None,
+        "terminal_reason must not be written on stale claim"
+    );
+    assert_eq!(
+        tm, None,
+        "terminal_message must not be written on stale claim"
+    );
+    assert_eq!(
+        cb.as_deref(),
+        Some("worker-1"),
+        "original claim must be preserved"
+    );
+
+    Ok(())
+}
