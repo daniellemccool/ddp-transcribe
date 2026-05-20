@@ -241,3 +241,34 @@ all three stale-claim tests. Estimated ~30 lines of test code across
 Carried forward from codex-advisor review on commit `1d6b29c`;
 partially addressed by commit `0a8ad5a` (T7 only, per advisor's
 narrow-fix scope — reopening T5/T6 was explicitly out of scope).
+
+---
+
+### `sweep_stale_claims` hardening — threshold overflow, zero-threshold semantics, future-claimed_at coverage
+
+**Found in:** T8 spec-compliance review (Sonnet + codex-advisor delegation per 0018).
+**Disposition:** Defense-in-depth polish; defer to Epic 2 cleanup before Phase 2 close, OR Plan C if not surfaced sooner.
+**Trigger to revisit:** Phase 2 close cleanup, OR any task that calls `sweep_stale_claims` with a non-default threshold.
+
+Three small hardening items on the T8 mutator (none load-bearing
+against the brief; all approved as-is):
+
+1. `threshold.as_secs() as i64` truncates silently for absurd
+   Duration values. At the 30-min default it's irrelevant, but
+   `i64::try_from(threshold.as_secs()).unwrap_or(i64::MAX)` +
+   `saturating_sub` would make the method robust-by-construction.
+
+2. `threshold == 0` semantics are undocumented: it means
+   `claimed_at < now` (same-second claims survive the sweep).
+   Defensible but a doc-comment note OR a test pinning the
+   behavior would prevent caller confusion.
+
+3. Future-valued `claimed_at` rows are left untouched (correct
+   clock-skew behavior — `claimed_at < cutoff` is false when
+   `claimed_at > now`), but the test triplet doesn't cover this
+   case. A fourth test asserting "claimed_at in the future is
+   NOT swept" would lock the invariant down.
+
+All three are pure tightening — they don't change any current
+behavior; they document and test what the existing code already
+does correctly.

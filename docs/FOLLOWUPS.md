@@ -53,6 +53,7 @@ lines 120-148.
 - T5-Epic1: Worker-side closed-reply path silently swallows error → Epic 2 (tracing context)
 - T11-Epic1: `Config::whisper_use_gpu`/`whisper_threads` unused → Epic 2 (config rationalization sweep)
 - T7: Mutator test parity — backport `video_events` assertions to T5/T6; no-event-on-stale across all three → Epic 2 cleanup (before Phase 2 close)
+- T8: `sweep_stale_claims` hardening — `as i64` overflow, `threshold==0` semantics, future-`claimed_at` coverage → Epic 2 cleanup (before Phase 2 close) OR Plan C
 - Full Epic 2 entries: [followups/epic-2.md](followups/epic-2.md)
 
 **Epic 3 (failure classification taxonomy)**
