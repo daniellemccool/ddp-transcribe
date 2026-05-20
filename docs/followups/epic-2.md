@@ -202,3 +202,42 @@ sweep should:
 
 Epic 2 is the natural home — that's when the broader Plan A → Plan B
 state-machine and config rationalization lands.
+
+---
+
+### Mutator test parity — backport `video_events` assertions to T5/T6; no-event-on-stale across all three
+
+**Found in:** T7 spec-compliance review (Sonnet + codex-advisor delegation per 0018).
+**Disposition:** Epic 2 cleanup; resolve before Phase 2 close (Epic 2 ships).
+**Trigger to revisit:** When approaching Phase 2 close, OR whenever T5/T6 happy-path tests are otherwise edited.
+
+T7's review surfaced two coverage gaps in the symmetric mutator family
+(`mark_succeeded`, `mark_retryable_failure`, `mark_terminal_failure`):
+
+1. Only T7's happy-path test (after commit `0a8ad5a`) asserts the
+   `video_events` row exists with the expected `event_type`,
+   `worker_id`, and `detail_json` shape. T5 and T6 happy-path tests
+   exercise the UPDATE but never read the event row.
+
+2. None of the three stale-claim tests assert that NO `video_events`
+   row was inserted when the predicate rejected. The gating logic
+   (`if changed > 0`) is structurally simple and visible, but the
+   no-event invariant is part of the mutator contract and untested.
+
+Event INSERT shapes verified consistent across the three mutators:
+
+- `mark_succeeded` writes `(?1, ?2, 'succeeded', ?3, NULL)` —
+  worker_id at ?3, no detail.
+- `mark_retryable_failure` writes `(?1, ?2, 'failed_retryable',
+  ?3, ?4)` — worker_id + JSON detail with kind/message.
+- `mark_terminal_failure` writes `(?1, ?2, 'failed_terminal',
+  ?3, ?4)` — worker_id + JSON detail with reason/message.
+
+A backport pass should add the symmetric event-row assertions to
+T5/T6 happy-path tests and add no-event-on-stale-claim assertions to
+all three stale-claim tests. Estimated ~30 lines of test code across
+5 test functions. No source changes.
+
+Carried forward from codex-advisor review on commit `1d6b29c`;
+partially addressed by commit `0a8ad5a` (T7 only, per advisor's
+narrow-fix scope — reopening T5/T6 was explicitly out of scope).
