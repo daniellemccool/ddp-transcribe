@@ -118,3 +118,74 @@ fn migrate_is_idempotent_on_v2() -> Result<()> {
     assert_eq!(v, "2");
     Ok(())
 }
+
+#[test]
+fn migrate_pre_plan_a_db_without_meta_row_records_current_version() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let path = tmp.path().join("state.sqlite");
+
+    // Synthesize a pre-Plan-A DB: v1 schema but no meta row at all.
+    {
+        let conn = Connection::open(&path)?;
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA foreign_keys = ON;
+
+             CREATE TABLE IF NOT EXISTS videos (
+                 video_id            TEXT PRIMARY KEY NOT NULL,
+                 source_url          TEXT NOT NULL,
+                 canonical           INTEGER NOT NULL,
+                 status              TEXT NOT NULL CHECK (status IN
+                                       ('pending','in_progress','succeeded','failed_terminal','failed_retryable')),
+                 claimed_by          TEXT,
+                 claimed_at          INTEGER,
+                 attempt_count       INTEGER NOT NULL DEFAULT 0,
+                 succeeded_at        INTEGER,
+                 duration_s          REAL,
+                 language_detected   TEXT,
+                 fetcher             TEXT,
+                 transcript_source   TEXT,
+                 first_seen_at       INTEGER NOT NULL,
+                 updated_at          INTEGER NOT NULL
+             );
+
+             CREATE TABLE IF NOT EXISTS meta (
+                 key   TEXT PRIMARY KEY NOT NULL,
+                 value TEXT NOT NULL
+             );
+             -- no INSERT INTO meta — pre-Plan-A
+            ",
+        )?;
+    }
+
+    // Pre-migrate: confirm meta has no schema_version row.
+    {
+        let raw = Connection::open(&path)?;
+        let count: i64 = raw.query_row(
+            "SELECT COUNT(*) FROM meta WHERE key = 'schema_version'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(count, 0, "pre-condition: no meta.schema_version row");
+    }
+
+    run_migrate(&path)?;
+
+    // Post-migrate: confirm columns AND a recorded schema_version row exist.
+    {
+        let raw = Connection::open(&path)?;
+        let cols = columns_in(&raw, "videos");
+        assert!(cols.contains(&"last_retryable_kind".to_string()));
+        let v: String = raw.query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(v, "2");
+    }
+
+    // Round-trip with Store::open should succeed (the whole point of the migrate
+    // contract for this case).
+    let _store = Store::open(&path)?;
+    Ok(())
+}

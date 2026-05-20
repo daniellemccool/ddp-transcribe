@@ -80,10 +80,11 @@ pub fn run_migrate(path: &Path) -> Result<()> {
     }
 
     tx.execute(
-        "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+        "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![SCHEMA_VERSION],
     )
-    .context("bump meta.schema_version to current")?;
+    .context("upsert meta.schema_version to current")?;
 
     tx.commit().context("commit migrate transaction")?;
 
