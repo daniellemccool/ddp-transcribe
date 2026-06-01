@@ -39,7 +39,7 @@ Each JSON file is an array of section objects. The parser deserialises eagerly (
 
 **URL canonicalization** is applied to every entry before the URL is stored (`src/ingest.rs:70`). `src/canonical.rs:35` classifies each URL into one of three `Canonical` variants — `VideoId(String)`, `NeedsResolution(String)`, or `Invalid(String)` — extracting the 19-digit numeric video ID from canonical-form URLs.
 
-**Deduplication** is enforced by `INSERT OR IGNORE` at the database level. Both `upsert_video` and `upsert_watch_history` use `INSERT OR IGNORE`, so duplicate entries in the export (same `video_id` or same `(respondent_id, video_id)` pair) produce no second row; the return value of 0 rows-changed is counted as `watch_history_duplicates` (`src/ingest.rs:109–113`).
+**Deduplication** is enforced by `INSERT OR IGNORE` at the database level. Both `upsert_video` and `upsert_watch_history` use `INSERT OR IGNORE`, so duplicate entries in the export (same `video_id`, or same `(respondent_id, video_id)` pair) produce no second row. The `watch_history_duplicates` counter is incremented specifically from the watch-history upsert's 0-rows-changed return (`src/ingest.rs:109–113`); the `upsert_video` return value is not tracked.
 
 ### What becomes a row in state
 
@@ -123,7 +123,7 @@ After a yt-dlp invocation, the fetcher distinguishes two exit paths from `proces
 
 The fetcher does not extract audio itself via a separate subprocess. Audio extraction is delegated to yt-dlp's own ffmpeg post-processor through the `-x --audio-format wav --postprocessor-args` flags described above. By the time `YtDlpFetcher::acquire` returns, the artifact on disk is already a WAV file.
 
-The `Acquisition::AudioFile(PathBuf)` returned by `acquire` (`src/fetcher/mod.rs:12`) carries the path to this WAV. The transcribe worker passes it to `src/audio::decode_wav` (`src/audio.rs:43`), which validates the format (16 kHz, mono) and decodes the PCM samples to `Vec<f32>`. The format contract — 16 kHz mono float32 in `[-1.0, 1.0]` — is documented in [ADR 0014](../../decisions/0014-audio-input-invariant-float32-pcm-16khz-mono-via-hound.md); the conversion is the `/32768.0` normalisation at `src/audio.rs:74`. For what happens next, see [transcription.md](transcription.md).
+The `Acquisition::AudioFile(PathBuf)` returned by `acquire` (`src/fetcher/mod.rs:12`) carries the path to this WAV. The **fetch** worker decodes it via `src/audio::decode_wav` (`src/audio.rs:43`, called inside `fetch_and_decode` at `src/pipeline/mod.rs:158`), which validates the format (16 kHz, mono) and decodes the PCM samples to `Vec<f32>`; the decoded samples (not the WAV path) are what travel to the transcribe worker over the channel. The format contract — 16 kHz mono float32 in `[-1.0, 1.0]` — is documented in [ADR 0014](../../decisions/0014-audio-input-invariant-float32-pcm-16khz-mono-via-hound.md); the conversion is the `/32768.0` normalisation at `src/audio.rs:74`. For what happens next, see [transcription.md](transcription.md).
 
 ---
 

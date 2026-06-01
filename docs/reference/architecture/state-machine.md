@@ -104,7 +104,7 @@ Per [ADR 0024](../../decisions/0024-stale-claim-sweep-no-validation-no-attempt-c
 
 The sweep runs once at orchestrator startup — at the top of both `run_serial` (`src/pipeline/serial.rs:34`) and `run_pipelined` (`src/pipeline/pipelined.rs:504–505`) — before any `claim_next` call.
 
-The sweep does **not** bump `attempt_count` and does **not** validate that the worker actually died (ADR 0024). It uses a simple time-based predicate: `claimed_at < (now - threshold_secs)` (`src/state/mod.rs:501–503`). The motivating failure mode is a `kill -9` on the orchestrator process, which leaves rows in `in_progress` indefinitely; without the sweep, those rows block all future progress.
+The sweep does **not** bump `attempt_count` and does **not** validate that the worker actually died (ADR 0024). It uses a simple time-based predicate: `claimed_at < (now - threshold_secs)` (`src/state/mod.rs:501–503`). It also writes **no** `video_events` audit row — unlike `claim_next`, `mark_succeeded`, `mark_retryable_failure`, and `mark_terminal_failure` (the only sites that insert into `video_events`: `src/state/mod.rs:263`, `:329`, `:388`, `:453`), a swept recovery leaves no audit-log entry. The motivating failure mode is a `kill -9` on the orchestrator process, which leaves rows in `in_progress` indefinitely; without the sweep, those rows block all future progress.
 
 Redirect to ADR 0024 for the rationale against validation and attempt-count bumps.
 

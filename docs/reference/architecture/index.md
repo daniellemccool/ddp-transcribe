@@ -4,7 +4,7 @@ Onboarding reference for the uu-tiktok pipeline. Start here.
 
 ## 1. What this system is and who it serves
 
-uu-tiktok is a research pipeline that ingests a TikTok user's Data Donation Programme (DDP) export, fetches each video the donor watched, and transcribes the audio using `whisper.cpp`. The output is a directory of JSON transcript artifacts — one per watched video — with raw confidence signals preserved (per [ADR 0010](../../decisions/0010-json-artifact-raw-signals-schema-pass-through-with-schema-version.md)) so downstream researchers can apply their own quality thresholds.
+uu-tiktok is a research pipeline that ingests a TikTok user's Data Donation Programme (DDP) export, fetches each video the donor watched, and transcribes the audio using `whisper.cpp`. The output is a directory of transcript artifacts — a plain-text `.txt` and a JSON `.json` per watched video — with raw confidence signals preserved in the JSON (per [ADR 0010](../../decisions/0010-json-artifact-raw-signals-schema-pass-through-with-schema-version.md)) so downstream researchers can apply their own quality thresholds.
 
 **Who's who:**
 
@@ -18,7 +18,7 @@ uu-tiktok is a research pipeline that ingests a TikTok user's Data Donation Prog
 
 Alphabetical. Each entry: 1-2 sentence definition + the file where the concept is defined or implemented.
 
-- **artifact** — a JSON transcript file written to disk by the output writer; one per watched video. Shape and schema in `src/output/`.
+- **artifact** — the transcript files written to disk by the output writer; each watched video produces a `.txt` (plain transcript) and a `.json` (metadata + raw signals). Shape and schema in `src/output/`.
 - **claim** — an exclusive lock on a state row taken by a worker before processing it. Arbitrated by sqlite `BEGIN IMMEDIATE` (see [ADR 0026](../../decisions/0026-claim-contention-no-polling-for-plan-b-batch-drain-on-claim-next-none.md)). Defined in `src/state/mod.rs`.
 - **DDP (Data Donation Programme)** — TikTok's user-data export bundle. The input format the pipeline parses at ingest. See `src/ingest.rs`.
 - **donor** — the TikTok user whose DDP has been ingested into the pipeline.
@@ -26,7 +26,7 @@ Alphabetical. Each entry: 1-2 sentence definition + the file where the concept i
 - **hound** — Rust WAV-file library. Used for PCM I/O at the audio-prep boundary. See `src/audio.rs`.
 - **lifecycle state** — the column in the state table recording a row's current status: `pending`, `in_progress`, `succeeded`, `failed_retryable`, `failed_terminal`. Definition in `src/state/`.
 - **mark_succeeded** — the state mutator that flips a row from `in_progress` to `succeeded`, conditional on the caller's claim still being live (per [ADR 0008](../../decisions/0008-pipeline-writes-transcript-artifacts-before-mark-succeeded-for-crash-recovery-durability.md)). Defined in `src/state/mod.rs`.
-- **mpsc payload** — the message type sent from fetch workers to the transcribe worker over the bounded mpsc channel: `(Claim, Vec<f32>, PathBuf)`. Per [ADR 0027](../../decisions/0027-orchestrator-topology-n-3-fetch-1-transcribe-mpsc-payload-claim-vec-f32-pathbuf-capacity-2.md).
+- **mpsc payload** — the `FetchedItem` struct sent from fetch workers to the transcribe worker over the bounded mpsc channel: `claim`, `samples` (`Vec<f32>`), `samples_len`, `wav_path`, and `fetcher_name` (`src/pipeline/pipelined.rs:65`). Extends the `(Claim, Vec<f32>, PathBuf)` triple named in [ADR 0027](../../decisions/0027-orchestrator-topology-n-3-fetch-1-transcribe-mpsc-payload-claim-vec-f32-pathbuf-capacity-2.md) with `samples_len` and `fetcher_name`.
 - **retryable failure** — a failure that may succeed on a future attempt (e.g., network timeout). Distinct from terminal failure. Recorded with `mark_retryable_failure`, which sets `status = 'failed_retryable'` (per [ADR 0023](../../decisions/0023-minimum-mutator-signatures-kind-str-message-str-returning-result-usize-per-0006.md)).
 - **rusqlite** — Rust bindings to sqlite, with the `bundled` feature. The state machine is implemented on top of these.
 - **stale claim** — a claim row whose `claimed_at` is older than the configured threshold and whose owner is presumed gone (crash, kill -9). Cleaned up by the stale-claim sweep per [ADR 0024](../../decisions/0024-stale-claim-sweep-no-validation-no-attempt-count-bump-30-min-default-threshold.md).
