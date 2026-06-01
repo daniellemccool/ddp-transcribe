@@ -37,7 +37,7 @@ The schema is declared in `src/state/schema.rs`. Three application tables and on
 
 **`watch_history`** — one row per `(respondent_id, video_id, watched_at)` tuple; links a donor participant to their watch events. References `videos` via foreign key. (`src/state/schema.rs:36–44`)
 
-**`video_events`** — append-only audit log; one row per state transition (`claimed`, `succeeded`, `failed_retryable`, `failed_terminal`). References `videos`. (`src/state/schema.rs:46–55`)
+**`video_events`** — append-only audit log; one row per claim/success/failure transition (`claimed`, `succeeded`, `failed_retryable`, `failed_terminal`). The stale-sweep recovery (`in_progress`→`pending`) writes no event. References `videos`. (`src/state/schema.rs:46–55`)
 
 **`meta`** — key/value table holding `schema_version`. (`src/state/schema.rs:57–62`)
 
@@ -140,7 +140,7 @@ Per [ADR 0008](../../decisions/0008-pipeline-writes-transcript-artifacts-before-
 - **Crash before artifact write** — the row stays `in_progress`; stale sweep recovers it; the next attempt re-runs the full fetch + transcribe.
 - **Crash after `mark_succeeded`** — fully durable; both artifact and state row are committed.
 
-The artifact-write ordering is enforced in `transcribe_and_write` in `src/pipeline/mod.rs`. Full discussion of the artifact side of this invariant is in [`transcription.md`](transcription.md). Redirect crash-recovery rationale to ADR 0008.
+The artifact-write ordering is enforced in `write_artifacts_and_mark` in `src/pipeline/mod.rs` (the writes land before `mark_succeeded`; `transcribe_and_write` wraps it on the serial path). Full discussion of the artifact side of this invariant is in [`transcription.md`](transcription.md). Redirect crash-recovery rationale to ADR 0008.
 
 ## Failure classification
 
@@ -153,7 +153,7 @@ Failures are classified into retryable or terminal at the state-machine surface 
 
 On current main (post-Epic 2), the classifier is **string-kind only**: every error from the fetch path is passed to `mark_retryable_failure` with the literal placeholder kind `"Fetch"`, and every transcription error with `"Transcribe"`. `mark_terminal_failure` has no caller — the mutator surface exists but dispatch logic does not (`src/state/mod.rs:420`). A richer typed taxonomy (`RetryableKind`, `UnavailableReason`, `ClassifiedFailure`) and variant-driven routing are the Epic 3 charter. See [`orchestration.md`](orchestration.md) for the caller's perspective on failure handling.
 
-The two diagnostic columns written by each mutator are preserved across subsequent flips: `mark_retryable_failure` does not clear `terminal_reason`/`terminal_message`, and `mark_terminal_failure` does not clear `last_retryable_*` — so an operator inspecting any row retains the full failure history. (`src/state/mod.rs:347–352`, `src/state/mod.rs:414–419`)
+The two diagnostic columns written by each mutator are preserved across subsequent flips: `mark_retryable_failure` does not clear `terminal_reason`/`terminal_message`, and `mark_terminal_failure` does not clear `last_retryable_*` — so an operator inspecting any row sees both the most recent retryable and the most recent terminal diagnostics (the full per-transition history lives in `video_events`). (`src/state/mod.rs:347–352`, `src/state/mod.rs:414–419`)
 
 ## ADRs governing this subsystem
 

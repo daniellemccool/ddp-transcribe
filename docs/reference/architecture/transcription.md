@@ -97,7 +97,7 @@ The `extract_segments` function collects these into `Vec<SegmentRaw>` (`src/tran
 
 ## Output
 
-The output writer turns a completed transcription into a JSON artifact on disk. The artifact is written atomically and *before* the state row is flipped to succeeded (per [ADR 0008](../../decisions/0008-pipeline-writes-transcript-artifacts-before-mark-succeeded-for-crash-recovery-durability.md)) so a crash mid-write leaves the row in `in_progress` for retry rather than orphaning the artifact.
+The output writer turns a completed transcription into two artifacts on disk — a `.txt` transcript and a `.json` metadata file. Both are written atomically and *before* the state row is flipped to succeeded (per [ADR 0008](../../decisions/0008-pipeline-writes-transcript-artifacts-before-mark-succeeded-for-crash-recovery-durability.md)) so a crash mid-write leaves the row in `in_progress` for retry rather than orphaning the artifacts.
 
 ### Artifact shape
 
