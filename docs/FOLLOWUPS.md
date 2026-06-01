@@ -90,4 +90,5 @@ lines 120-148.
 - T7-Epic1: Revisit `SamplingStrategy::Greedy { best_of }` after T13 bake → unscoped tuning followup (see also `bake-findings.md`)
 - T8-Epic1: Diagnostic log when `lang_detect`'s top id disagrees with primary inference → unscoped diagnostic (see also `bake-findings.md`)
 - T13/T19/T16-Epic2: plan-brief library-API drift → Epic 3 planning kickoff (checklist adoption)
+- T08-arch-docs: architecture doc-set drift detection → standing maintenance (revise matching deepdive + index.md §4 at each epic's planning time if it touches a covered surface)
 - Full cross-epic entries: [followups/cross-epic.md](followups/cross-epic.md)

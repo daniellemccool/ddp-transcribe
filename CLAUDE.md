@@ -28,6 +28,7 @@ Feature-derived ADRs (0004, 0009–0017, plus Epic 2+ feature ADRs) live on feat
 - **Parallel work / conflict isolation:** `superpowers:using-git-worktrees`.
 - **Code review:** `superpowers:requesting-code-review` / `superpowers:receiving-code-review`; the three-tier protocol per 0018.
 - **Debugging:** `superpowers:systematic-debugging`.
+- **Onboarding / system orientation:** start at `docs/reference/architecture/index.md` — the architecture doc set (index + four lifecycle-stage deepdives).
 
 ## Project-local tools
 

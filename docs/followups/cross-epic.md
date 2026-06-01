@@ -139,3 +139,16 @@ Suggested forms:
 
 Epic 3 planning should adopt this checklist; treat as project-level discipline
 alongside ADR 0003's deviation-honesty norm.
+
+---
+
+### Architecture doc-set drift detection
+
+**Found in:** T08 (cross-cutting additions) — architecture doc set plan (2026-05-20).
+**Disposition:** Standing maintenance concern. The architecture doc set (`docs/reference/architecture/`) was written against post-Epic-2-close `main` and carries NO in-flight stamps (dropped by operator approval — the set was written post-close). No current-epic action required.
+**Trigger to revisit:** At each future epic's planning time, check whether the epic touches an architecture-doc-covered surface and add a "revise `docs/reference/architecture/<file>.md`" task (per `index.md` §6 drift-detection).
+
+Known forward-touch points:
+
+- **Epic 3 (failure-classification taxonomy)** will reshape `state-machine.md` and `orchestration.md`: typed `RetryableKind`/`UnavailableReason`/`ClassifiedFailure`, terminal-failure routing, and the `failed_retryable` retry path. Revise both deepdives and update `index.md` §4 (ADR map) for any ADRs added.
+- **Epic 4 (operator status subcommand)** will reshape `orchestration.md` §Batch validation contract: the ADR 0017 done-predicate is currently represented only by `compute_process_stats`; the Epic 4 `status` subcommand expands it. Revise `orchestration.md` and update `index.md` §4 accordingly.
