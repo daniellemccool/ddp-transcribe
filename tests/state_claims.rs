@@ -1,6 +1,6 @@
 use anyhow::Result;
+use ddp_transcribe::state::{Claim, Store, SuccessArtifacts};
 use tempfile::TempDir;
-use uu_tiktok::state::{Claim, Store, SuccessArtifacts};
 
 fn fresh_store_with(videos: &[(&str, &str)]) -> (TempDir, Store) {
     let tmp = TempDir::new().unwrap();
@@ -198,8 +198,8 @@ fn mark_succeeded_with_stale_claim_returns_zero_and_does_not_update() -> Result<
 
 #[test]
 fn mark_retryable_failure_flips_status_and_records_columns() -> anyhow::Result<()> {
+    use ddp_transcribe::state::Store;
     use rusqlite::Connection;
-    use uu_tiktok::state::Store;
 
     let tmp = tempfile::TempDir::new()?;
     let path = tmp.path().join("state.sqlite");
@@ -276,7 +276,7 @@ fn mark_retryable_failure_flips_status_and_records_columns() -> anyhow::Result<(
 
 #[test]
 fn mark_retryable_failure_with_stale_claim_returns_zero() -> anyhow::Result<()> {
-    use uu_tiktok::state::Store;
+    use ddp_transcribe::state::Store;
 
     let tmp = tempfile::TempDir::new()?;
     let path = tmp.path().join("state.sqlite");
@@ -352,8 +352,8 @@ fn claim_then_mark_succeeded_then_reclaim_returns_none() -> Result<()> {
 
 #[test]
 fn mark_terminal_failure_flips_status_and_records_columns() -> anyhow::Result<()> {
+    use ddp_transcribe::state::Store;
     use rusqlite::Connection;
-    use uu_tiktok::state::Store;
 
     let tmp = tempfile::TempDir::new()?;
     let path = tmp.path().join("state.sqlite");
@@ -429,8 +429,8 @@ fn mark_terminal_failure_flips_status_and_records_columns() -> anyhow::Result<()
 
 #[test]
 fn mark_terminal_failure_with_stale_claim_returns_zero() -> anyhow::Result<()> {
+    use ddp_transcribe::state::Store;
     use rusqlite::Connection;
-    use uu_tiktok::state::Store;
 
     let tmp = tempfile::TempDir::new()?;
     let path = tmp.path().join("state.sqlite");
@@ -485,9 +485,9 @@ fn mark_terminal_failure_with_stale_claim_returns_zero() -> anyhow::Result<()> {
 
 #[test]
 fn sweep_stale_claims_recovers_stale_row() -> anyhow::Result<()> {
+    use ddp_transcribe::state::Store;
     use rusqlite::Connection;
     use std::time::Duration;
-    use uu_tiktok::state::Store;
 
     let tmp = tempfile::TempDir::new()?;
     let path = tmp.path().join("state.sqlite");
@@ -555,8 +555,8 @@ fn sweep_stale_claims_recovers_stale_row() -> anyhow::Result<()> {
 
 #[test]
 fn sweep_stale_claims_leaves_fresh_claim_alone() -> anyhow::Result<()> {
+    use ddp_transcribe::state::Store;
     use std::time::Duration;
-    use uu_tiktok::state::Store;
 
     let tmp = tempfile::TempDir::new()?;
     let path = tmp.path().join("state.sqlite");
@@ -576,8 +576,8 @@ fn sweep_stale_claims_leaves_fresh_claim_alone() -> anyhow::Result<()> {
 
 #[test]
 fn sweep_stale_claims_is_idempotent() -> anyhow::Result<()> {
+    use ddp_transcribe::state::Store;
     use std::time::Duration;
-    use uu_tiktok::state::Store;
 
     let tmp = tempfile::TempDir::new()?;
     let path = tmp.path().join("state.sqlite");
@@ -603,9 +603,9 @@ fn sweep_stale_claims_is_idempotent() -> anyhow::Result<()> {
 /// when `claimed_at > now`, the predicate is false regardless of threshold.
 #[test]
 fn sweep_stale_claims_does_not_sweep_future_claimed_at() -> anyhow::Result<()> {
+    use ddp_transcribe::state::Store;
     use rusqlite::Connection;
     use std::time::Duration;
-    use uu_tiktok::state::Store;
 
     let tmp = tempfile::TempDir::new()?;
     let path = tmp.path().join("state.sqlite");
@@ -641,8 +641,8 @@ fn sweep_stale_claims_does_not_sweep_future_claimed_at() -> anyhow::Result<()> {
 /// `<=` (which would break claim semantics for same-second callers).
 #[test]
 fn sweep_stale_claims_with_zero_threshold_does_not_sweep_same_second_claim() -> anyhow::Result<()> {
+    use ddp_transcribe::state::Store;
     use std::time::Duration;
-    use uu_tiktok::state::Store;
 
     let tmp = tempfile::TempDir::new()?;
     let path = tmp.path().join("state.sqlite");

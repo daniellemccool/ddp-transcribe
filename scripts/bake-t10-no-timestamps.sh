@@ -60,7 +60,7 @@ run_side() {
     git checkout --quiet "$ref"
     cargo build --release --features cuda
 
-    local bin="$REPO/target/release/uu-tiktok"
+    local bin="$REPO/target/release/ddp-transcribe"
     local -a global=(
         --state-db    "$dir/state.sqlite"
         --inbox       "$dir/inbox"

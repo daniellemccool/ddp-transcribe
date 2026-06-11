@@ -16,8 +16,8 @@ set -euo pipefail
 
 STORAGE=/data/transcription-pipeline-storage
 NATIVE=/home/dmccool/src
-REPO_STORAGE="$STORAGE/uu-tiktok"
-REPO_NATIVE="$NATIVE/uu-tiktok"
+REPO_STORAGE="$STORAGE/ddp-transcribe"
+REPO_NATIVE="$NATIVE/ddp-transcribe"
 BRANCH="${1:-$(git -C "$REPO_STORAGE" symbolic-ref --short HEAD)}"
 
 if [[ ! -d "$REPO_STORAGE/.git" ]]; then
@@ -61,7 +61,7 @@ cat <<EOF
 mkdir -p $NATIVE/work/inbox $NATIVE/work/transcripts
 cp $REPO_NATIVE/tests/fixtures/ddp/news_orgs/*.json $NATIVE/work/inbox/   # if not already populated
 
-$REPO_NATIVE/target/release/uu-tiktok \\
+$REPO_NATIVE/target/release/ddp-transcribe \\
   --state-db $NATIVE/work/state.sqlite \\
   --inbox $NATIVE/work/inbox \\
   --transcripts $NATIVE/work/transcripts \\
@@ -69,13 +69,13 @@ $REPO_NATIVE/target/release/uu-tiktok \\
   --compute-lang-probs \\
   init
 
-$REPO_NATIVE/target/release/uu-tiktok \\
+$REPO_NATIVE/target/release/ddp-transcribe \\
   --state-db $NATIVE/work/state.sqlite \\
   --inbox $NATIVE/work/inbox \\
   --transcripts $NATIVE/work/transcripts \\
   ingest
 
-time $REPO_NATIVE/target/release/uu-tiktok \\
+time $REPO_NATIVE/target/release/ddp-transcribe \\
   --state-db $NATIVE/work/state.sqlite \\
   --inbox $NATIVE/work/inbox \\
   --transcripts $NATIVE/work/transcripts \\

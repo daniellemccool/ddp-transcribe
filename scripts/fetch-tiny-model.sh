@@ -14,4 +14,4 @@ fi
 
 echo "Downloading $MODEL_NAME (~75MB) to $MODEL_DIR..."
 curl -L -o "$MODEL_DIR/$MODEL_NAME" "$URL"
-echo "Done. Path to use in UU_TIKTOK_WHISPER_MODEL_PATH or default config: $MODEL_DIR/$MODEL_NAME"
+echo "Done. Path to use in DDP_TRANSCRIBE_WHISPER_MODEL or default config: $MODEL_DIR/$MODEL_NAME"

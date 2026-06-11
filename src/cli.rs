@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "uu-tiktok",
+    name = "ddp-transcribe",
     version,
     about = "TikTok donation pipeline (Plan A walking skeleton)"
 )]
@@ -18,28 +18,36 @@ pub struct Cli {
 
 #[derive(Parser, Debug, Clone)]
 pub struct GlobalArgs {
-    #[arg(long, value_enum, default_value_t = Profile::Dev, env = "UU_TIKTOK_PROFILE")]
+    #[arg(long, value_enum, default_value_t = Profile::Dev, env = "DDP_TRANSCRIBE_PROFILE")]
     pub profile: Profile,
 
-    #[arg(long, default_value = "./state.sqlite", env = "UU_TIKTOK_STATE_DB")]
+    #[arg(
+        long,
+        default_value = "./state.sqlite",
+        env = "DDP_TRANSCRIBE_STATE_DB"
+    )]
     pub state_db: PathBuf,
 
-    #[arg(long, default_value = "./inbox", env = "UU_TIKTOK_INBOX")]
+    #[arg(long, default_value = "./inbox", env = "DDP_TRANSCRIBE_INBOX")]
     pub inbox: PathBuf,
 
-    #[arg(long, default_value = "./transcripts", env = "UU_TIKTOK_TRANSCRIPTS")]
+    #[arg(
+        long,
+        default_value = "./transcripts",
+        env = "DDP_TRANSCRIBE_TRANSCRIPTS"
+    )]
     pub transcripts: PathBuf,
 
-    #[arg(long, value_enum, default_value_t = LogFormat::Human, env = "UU_TIKTOK_LOG_FORMAT")]
+    #[arg(long, value_enum, default_value_t = LogFormat::Human, env = "DDP_TRANSCRIBE_LOG_FORMAT")]
     pub log_format: LogFormat,
 
     /// Path to the whisper.cpp model file. Overrides the profile default.
-    #[arg(long, env = "UU_TIKTOK_WHISPER_MODEL")]
+    #[arg(long, env = "DDP_TRANSCRIBE_WHISPER_MODEL")]
     pub whisper_model: Option<PathBuf>,
 
     /// Compute per-language probability distribution per video.
     /// Costs one extra encoder pass per video; default false.
-    #[arg(long, env = "UU_TIKTOK_COMPUTE_LANG_PROBS", global = true)]
+    #[arg(long, env = "DDP_TRANSCRIBE_COMPUTE_LANG_PROBS", global = true)]
     pub compute_lang_probs: bool,
 
     /// Threshold for sweeping stale (process-crashed) claims back to pending.
@@ -47,7 +55,7 @@ pub struct GlobalArgs {
     /// 0024: 30-min default is well above bake worst-case (~25s).
     #[arg(
         long,
-        env = "UU_TIKTOK_STALE_CLAIM_THRESHOLD",
+        env = "DDP_TRANSCRIBE_STALE_CLAIM_THRESHOLD",
         value_parser = humantime::parse_duration
     )]
     pub stale_claim_threshold: Option<std::time::Duration>,
@@ -57,7 +65,7 @@ pub struct GlobalArgs {
     /// math; ~3.5× serial wallclock on news_orgs fixture). Must be ≥ 1.
     #[arg(
         long,
-        env = "UU_TIKTOK_DOWNLOAD_WORKERS",
+        env = "DDP_TRANSCRIBE_DOWNLOAD_WORKERS",
         value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
     )]
     pub download_workers: Option<usize>,
@@ -68,7 +76,7 @@ pub struct GlobalArgs {
     /// at default N=3 + capacity 2). Must be ≥ 1.
     #[arg(
         long,
-        env = "UU_TIKTOK_CHANNEL_CAPACITY",
+        env = "DDP_TRANSCRIBE_CHANNEL_CAPACITY",
         value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
     )]
     pub channel_capacity: Option<usize>,

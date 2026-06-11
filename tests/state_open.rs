@@ -1,5 +1,5 @@
+use ddp_transcribe::state::{Store, SCHEMA_VERSION};
 use tempfile::TempDir;
-use uu_tiktok::state::{Store, SCHEMA_VERSION};
 
 #[test]
 fn open_creates_schema_on_fresh_db() {

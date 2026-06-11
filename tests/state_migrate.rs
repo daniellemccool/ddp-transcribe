@@ -3,9 +3,9 @@
 //! Then run Store::open and confirm it succeeds (round-trip with T2's check).
 
 use anyhow::Result;
+use ddp_transcribe::state::{migrate::run_migrate, Store};
 use rusqlite::Connection;
 use tempfile::TempDir;
-use uu_tiktok::state::{migrate::run_migrate, Store};
 
 /// Synthesize a Plan A v1 schema (no Epic 2 columns) at `path`.
 fn synthesize_v1_db(path: &std::path::Path) -> Result<()> {

@@ -8,8 +8,8 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use uu_tiktok::errors::TranscribeError;
-use uu_tiktok::transcribe::{EngineConfig, PerCallConfig, WhisperEngine};
+use ddp_transcribe::errors::TranscribeError;
+use ddp_transcribe::transcribe::{EngineConfig, PerCallConfig, WhisperEngine};
 
 fn tiny_model_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models/ggml-tiny.en.bin")
@@ -84,7 +84,8 @@ async fn transcribe_silence_returns_empty_or_short_text() {
     };
     let engine = WhisperEngine::new(&config).expect("engine loads");
 
-    let samples = uu_tiktok::audio::decode_wav(&silence_fixture_path()).expect("decode fixture");
+    let samples =
+        ddp_transcribe::audio::decode_wav(&silence_fixture_path()).expect("decode fixture");
 
     let output = engine
         .transcribe(samples, PerCallConfig::default(), Duration::from_secs(60))
@@ -180,7 +181,8 @@ async fn lang_probs_present_when_opt_in() {
     };
     let engine = WhisperEngine::new(&config).expect("engine loads");
 
-    let samples = uu_tiktok::audio::decode_wav(&silence_fixture_path()).expect("decode fixture");
+    let samples =
+        ddp_transcribe::audio::decode_wav(&silence_fixture_path()).expect("decode fixture");
 
     // Without opt-in: lang_probs should be None
     let output_default = engine
@@ -238,7 +240,8 @@ async fn transcribe_populates_raw_signals_segments_and_tokens() {
     // For Epic 1's bake we'll add a real spoken-English fixture; for now,
     // silence may still produce one empty segment (whisper.cpp behavior).
     // The test asserts structural shape, not content.
-    let samples = uu_tiktok::audio::decode_wav(&silence_fixture_path()).expect("decode fixture");
+    let samples =
+        ddp_transcribe::audio::decode_wav(&silence_fixture_path()).expect("decode fixture");
 
     let output = engine
         .transcribe(samples, PerCallConfig::default(), Duration::from_secs(60))

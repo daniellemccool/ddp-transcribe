@@ -34,10 +34,10 @@ if [[ -f "$WORK/state.sqlite" ]]; then
 fi
 
 # Provenance: capture the exact commit SHA the bake ran against.
-git -C "$NATIVE/uu-tiktok" rev-parse HEAD > "$DEST/COMMIT_SHA"
-git -C "$NATIVE/uu-tiktok" status --short > "$DEST/COMMIT_STATUS" 2>&1 || true
+git -C "$NATIVE/ddp-transcribe" rev-parse HEAD > "$DEST/COMMIT_SHA"
+git -C "$NATIVE/ddp-transcribe" status --short > "$DEST/COMMIT_STATUS" 2>&1 || true
 echo "[archive] commit SHA + working-tree status → $DEST/"
 
 echo ""
 echo "[archive] complete. Results at: $DEST"
-echo "[archive] next: edit docs/SRC-BAKE-NOTES.md (in $NATIVE/uu-tiktok), commit, push."
+echo "[archive] next: edit docs/SRC-BAKE-NOTES.md (in $NATIVE/ddp-transcribe), commit, push."

@@ -1,9 +1,14 @@
-# uu-tiktok
+# ddp-transcribe
 
-Post-donation pipeline for a TikTok data-donation study: reads donated DDP
+Video-transcription pipeline for data-donation studies: reads donated DDP
 watch-history JSONs from an inbox folder, fetches each video's audio
 (`yt-dlp` + `ffmpeg`), transcribes it (`whisper.cpp`), and stores transcripts
 and state for downstream analysis. Single Rust binary, SQLite-backed.
+TikTok is the currently supported source.
+
+> **Formerly `uu-tiktok`.** Historical docs (ADRs, plans, bake notes under
+> `docs/`) use the old name and the old `UU_TIKTOK_*` env prefix; they are
+> dated records and have deliberately not been rewritten.
 
 > **Plan A — walking skeleton.** Only the `Dev` profile is wired. Known
 > Plan-A quirks when you test:
@@ -64,7 +69,7 @@ cargo test --features test-helpers --test e2e_real_tools -- --ignored --nocaptur
                                              # real tools + network; requires model at ./models/
 ```
 
-Override the e2e video URL with `UU_TIKTOK_E2E_URL=<url>`.
+Override the e2e video URL with `DDP_TRANSCRIBE_E2E_URL=<url>`.
 
 ## Commands
 
@@ -72,12 +77,12 @@ All subcommands accept the global flags below (or their env equivalents).
 
 | Flag              | Env                        | Default                       | Notes                                                                |
 |-------------------|----------------------------|-------------------------------|----------------------------------------------------------------------|
-| `--profile`       | `UU_TIKTOK_PROFILE`        | `dev`                         | Only `dev` is wired.                                                 |
-| `--state-db`      | `UU_TIKTOK_STATE_DB`       | `./state.sqlite`              |                                                                      |
-| `--inbox`         | `UU_TIKTOK_INBOX`          | `./inbox`                     | DDP JSONs read from here.                                            |
-| `--transcripts`   | `UU_TIKTOK_TRANSCRIPTS`    | `./transcripts`               | Artifacts written here.                                              |
-| `--log-format`    | `UU_TIKTOK_LOG_FORMAT`     | `human`                       | `human` or `json`.                                                   |
-| `--whisper-model` | `UU_TIKTOK_WHISPER_MODEL`  | `./models/ggml-tiny.en.bin`   | Path to whisper.cpp model file. `tiny.en` is English-only; for non-English audio use a multilingual model (e.g. `ggml-small.bin`). |
+| `--profile`       | `DDP_TRANSCRIBE_PROFILE`        | `dev`                         | Only `dev` is wired.                                                 |
+| `--state-db`      | `DDP_TRANSCRIBE_STATE_DB`       | `./state.sqlite`              |                                                                      |
+| `--inbox`         | `DDP_TRANSCRIBE_INBOX`          | `./inbox`                     | DDP JSONs read from here.                                            |
+| `--transcripts`   | `DDP_TRANSCRIBE_TRANSCRIPTS`    | `./transcripts`               | Artifacts written here.                                              |
+| `--log-format`    | `DDP_TRANSCRIBE_LOG_FORMAT`     | `human`                       | `human` or `json`.                                                   |
+| `--whisper-model` | `DDP_TRANSCRIBE_WHISPER_MODEL`  | `./models/ggml-tiny.en.bin`   | Path to whisper.cpp model file. `tiny.en` is English-only; for non-English audio use a multilingual model (e.g. `ggml-small.bin`). |
 
 Log verbosity is controlled by `RUST_LOG` (e.g. `RUST_LOG=debug`).
 

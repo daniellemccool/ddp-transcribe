@@ -1,4 +1,4 @@
-use uu_tiktok::canonical::{canonicalize_url, Canonical};
+use ddp_transcribe::canonical::{canonicalize_url, Canonical};
 
 #[test]
 fn canonicalizes_form_1_tiktokv_share_video() {
