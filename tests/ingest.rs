@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
+use ddp_transcribe::ingest::{ingest, IngestStats};
+use ddp_transcribe::state::Store;
 use tempfile::TempDir;
-use uu_tiktok::ingest::{ingest, IngestStats};
-use uu_tiktok::state::Store;
 
 /// Public-facing fixture: news-organisation videos only. Committed to the
 /// repo. Used by the always-running integration tests below.

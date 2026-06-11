@@ -1,5 +1,5 @@
+use ddp_transcribe::state::Store;
 use tempfile::TempDir;
-use uu_tiktok::state::Store;
 
 fn fresh_store() -> (TempDir, Store) {
     let tmp = TempDir::new().unwrap();

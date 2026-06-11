@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
 
-use uu_tiktok::process::{read_bounded, run, CommandSpec};
+use ddp_transcribe::process::{read_bounded, run, CommandSpec};
 
 const CAP: usize = 8 * 1024;
 

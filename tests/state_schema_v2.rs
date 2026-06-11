@@ -2,9 +2,9 @@
 //! SCHEMA_VERSION constant is "2", fresh DB records "2" in meta.
 
 use anyhow::Result;
+use ddp_transcribe::state::{Store, SCHEMA_VERSION};
 use rusqlite::Connection;
 use tempfile::TempDir;
-use uu_tiktok::state::{Store, SCHEMA_VERSION};
 
 fn columns_in(conn: &Connection, table: &str) -> Vec<String> {
     let mut stmt = conn

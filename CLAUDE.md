@@ -1,8 +1,8 @@
-# uu-tiktok — working disciplines
+# ddp-transcribe — working disciplines
 
 ## Project
 
-Pipeline that ingests TikTok DDP (Data Donation Programme) exports, fetches the donor's watched videos, and transcribes the audio with whisper.cpp. Current state on `main`: Plan B Epic 1 complete (embedded `whisper-rs` + raw confidence signals + CUDA bake on a single A10 dev workspace). Plan B Epic 2 (state machine + pipelined orchestrator) is the next epic; planning artifacts under `docs/superpowers/plans/`.
+Video-transcription pipeline for data-donation studies (formerly `uu-tiktok`; historical docs/ADRs use the old name and `UU_TIKTOK_*` env prefix). Ingests TikTok DDP (Data Donation Programme) exports — TikTok is the currently supported source — fetches the donor's watched videos, and transcribes the audio with whisper.cpp. Current state on `main`: Plan B Epics 1–2 complete (embedded `whisper-rs` + raw confidence signals + CUDA bake; state machine + pipelined orchestrator). Plan B Epic 3 (failure classification + operator-driven requeue) is planned; artifacts under `docs/superpowers/plans/`.
 
 ## Working disciplines (project-wide ADRs)
 

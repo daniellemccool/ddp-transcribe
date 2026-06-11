@@ -390,7 +390,7 @@ impl WhisperEngine {
         let lang_state_allocations_worker = std::sync::Arc::clone(&lang_state_allocations);
 
         let handle = thread::Builder::new()
-            .name("uu-tiktok-whisper-worker".to_string())
+            .name("ddp-transcribe-whisper-worker".to_string())
             .spawn(move || {
                 // whisper-rs 0.16.0: setters take &mut self and return &mut Self.
                 // use_gpu(true) is harmless on a CPU build — whisper.cpp falls back.

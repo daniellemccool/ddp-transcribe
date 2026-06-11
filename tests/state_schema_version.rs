@@ -1,10 +1,10 @@
 //! Schema-version handling on Store::open. Per 0022, mismatches are
-//! a typed error that directs the operator to `uu-tiktok migrate`.
+//! a typed error that directs the operator to `ddp-transcribe migrate`.
 
 use anyhow::Result;
+use ddp_transcribe::state::{StateError, Store};
 use rusqlite::Connection;
 use tempfile::TempDir;
-use uu_tiktok::state::{StateError, Store};
 
 fn open_raw(path: &std::path::Path) -> Connection {
     Connection::open(path).unwrap()
@@ -18,7 +18,7 @@ fn open_on_fresh_db_succeeds_and_records_version() -> Result<()> {
     let v = store
         .read_meta("schema_version")?
         .expect("recorded on first run");
-    assert_eq!(v, uu_tiktok::state::SCHEMA_VERSION);
+    assert_eq!(v, ddp_transcribe::state::SCHEMA_VERSION);
     Ok(())
 }
 
@@ -47,14 +47,14 @@ fn open_on_mismatched_version_returns_typed_error() -> Result<()> {
         .expect("error chain contains StateError");
     match state_err {
         StateError::SchemaVersionMismatch { expected, found } => {
-            assert_eq!(expected, uu_tiktok::state::SCHEMA_VERSION);
+            assert_eq!(expected, ddp_transcribe::state::SCHEMA_VERSION);
             assert_eq!(found, "0");
         }
     }
 
     let display = format!("{}", state_err);
     assert!(
-        display.contains("uu-tiktok migrate"),
+        display.contains("ddp-transcribe migrate"),
         "operator-readable instruction missing from Display: {}",
         display
     );

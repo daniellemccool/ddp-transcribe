@@ -6,11 +6,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tempfile::TempDir;
 
-use uu_tiktok::errors::TranscribeError;
-use uu_tiktok::fetcher::FakeFetcher;
-use uu_tiktok::pipeline::{run_serial, ProcessOptions};
-use uu_tiktok::state::Store;
-use uu_tiktok::transcribe::{PerCallConfig, SegmentRaw, TokenRaw, TranscribeOutput, Transcriber};
+use ddp_transcribe::errors::TranscribeError;
+use ddp_transcribe::fetcher::FakeFetcher;
+use ddp_transcribe::pipeline::{run_serial, ProcessOptions};
+use ddp_transcribe::state::Store;
+use ddp_transcribe::transcribe::{
+    PerCallConfig, SegmentRaw, TokenRaw, TranscribeOutput, Transcriber,
+};
 
 /// In-test `Transcriber` impl with two behaviors:
 /// - `Scripted(output)`: returns a scripted `TranscribeOutput` regardless of
@@ -440,7 +442,7 @@ async fn fetch_worker_drains_pending_rows_and_exits() -> anyhow::Result<()> {
     use tokio::sync::{mpsc, Mutex as TokioMutex};
     use tokio_util::sync::CancellationToken;
 
-    use uu_tiktok::pipeline::{fetch_worker, FetchedItem, ProcessOptions, SharedStore};
+    use ddp_transcribe::pipeline::{fetch_worker, FetchedItem, ProcessOptions, SharedStore};
 
     let tmp = TempDir::new()?;
     let mut store = Store::open(&tmp.path().join("state.sqlite"))?;
@@ -550,7 +552,7 @@ async fn fetch_worker_increments_stale_after_failure_on_swept_claim() -> anyhow:
     use tokio::sync::{mpsc, Mutex as TokioMutex};
     use tokio_util::sync::CancellationToken;
 
-    use uu_tiktok::pipeline::{fetch_worker, FetchedItem, ProcessOptions, SharedStore};
+    use ddp_transcribe::pipeline::{fetch_worker, FetchedItem, ProcessOptions, SharedStore};
 
     let tmp = TempDir::new()?;
     let mut store = Store::open(&tmp.path().join("state.sqlite"))?;
@@ -638,7 +640,7 @@ async fn transcribe_worker_processes_one_item_then_exits_on_channel_close() -> a
     use tokio::sync::{mpsc, Mutex as TokioMutex};
     use tokio_util::sync::CancellationToken;
 
-    use uu_tiktok::pipeline::{transcribe_worker, FetchedItem, ProcessOptions, SharedStore};
+    use ddp_transcribe::pipeline::{transcribe_worker, FetchedItem, ProcessOptions, SharedStore};
 
     let tmp = TempDir::new()?;
     std::fs::create_dir_all(tmp.path().join("transcripts"))?;
@@ -749,7 +751,7 @@ async fn transcribe_worker_exits_on_cancellation() -> anyhow::Result<()> {
     use tokio::sync::{mpsc, Mutex as TokioMutex};
     use tokio_util::sync::CancellationToken;
 
-    use uu_tiktok::pipeline::{transcribe_worker, FetchedItem, ProcessOptions, SharedStore};
+    use ddp_transcribe::pipeline::{transcribe_worker, FetchedItem, ProcessOptions, SharedStore};
 
     let tmp = TempDir::new()?;
     let store = Store::open(&tmp.path().join("state.sqlite"))?;
@@ -816,7 +818,7 @@ async fn transcribe_worker_increments_stale_after_failure_on_swept_claim() -> an
     use tokio::sync::{mpsc, Mutex as TokioMutex};
     use tokio_util::sync::CancellationToken;
 
-    use uu_tiktok::pipeline::{transcribe_worker, FetchedItem, ProcessOptions, SharedStore};
+    use ddp_transcribe::pipeline::{transcribe_worker, FetchedItem, ProcessOptions, SharedStore};
 
     let tmp = TempDir::new()?;
     std::fs::create_dir_all(tmp.path().join("transcripts"))?;
@@ -915,7 +917,7 @@ async fn run_pipelined_honors_max_videos_cap() -> anyhow::Result<()> {
     use std::sync::Arc;
     use tokio::sync::Mutex as TokioMutex;
 
-    use uu_tiktok::pipeline::{run_pipelined, ProcessOptions, SharedStore};
+    use ddp_transcribe::pipeline::{run_pipelined, ProcessOptions, SharedStore};
 
     let tmp = TempDir::new()?;
     std::fs::create_dir_all(tmp.path().join("transcripts"))?;
@@ -988,7 +990,7 @@ async fn run_pipelined_drains_all_rows_and_returns_stats() -> anyhow::Result<()>
     use std::sync::Arc;
     use tokio::sync::Mutex as TokioMutex;
 
-    use uu_tiktok::pipeline::{run_pipelined, ProcessOptions, SharedStore};
+    use ddp_transcribe::pipeline::{run_pipelined, ProcessOptions, SharedStore};
 
     let tmp = TempDir::new()?;
     std::fs::create_dir_all(tmp.path().join("transcripts"))?;

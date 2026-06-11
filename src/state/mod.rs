@@ -38,12 +38,12 @@ pub struct VideoRow {
 /// Per 0022, `Store::open` returns `SchemaVersionMismatch` when the on-disk
 /// `meta.schema_version` doesn't match the binary's `SCHEMA_VERSION`. The
 /// `Display` impl carries the operator-readable instruction directing them
-/// to `uu-tiktok migrate`.
+/// to `ddp-transcribe migrate`.
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
     #[error(
         "schema version mismatch: state.sqlite is at v{found}, this binary requires v{expected}. \
-         Run `uu-tiktok migrate` to upgrade the database, then retry."
+         Run `ddp-transcribe migrate` to upgrade the database, then retry."
     )]
     SchemaVersionMismatch { expected: String, found: String },
 }
@@ -68,7 +68,7 @@ impl Store {
 
         // Schema (idempotent — uses CREATE IF NOT EXISTS). The column set
         // declared here is the CURRENT schema version; older DBs miss the
-        // newer columns and must run `uu-tiktok migrate` (0022) before
+        // newer columns and must run `ddp-transcribe migrate` (0022) before
         // they can be opened.
         conn.execute_batch(schema::SCHEMA_SQL)
             .context("applying schema")?;

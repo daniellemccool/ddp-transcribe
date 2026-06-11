@@ -4,7 +4,7 @@
 //! Requires (per 0009, 0011):
 //! - yt-dlp on PATH
 //! - ffmpeg on PATH (yt-dlp's postprocessor — 16 kHz mono WAV per 0014)
-//! - ./models/ggml-tiny.en.bin on disk (or UU_TIKTOK_WHISPER_MODEL=PATH)
+//! - ./models/ggml-tiny.en.bin on disk (or DDP_TRANSCRIBE_WHISPER_MODEL=PATH)
 //! - clang/libclang installed (whisper-rs's whisper-rs-sys binds via bindgen)
 //! - cmake on PATH (whisper-rs's build script invokes it)
 //! - a working C/C++ toolchain (gcc or clang, plus libstdc++)
@@ -21,8 +21,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use ddp_transcribe::output::artifacts::EXPECTED_RAW_SIGNALS_SCHEMA_VERSION;
 use tempfile::TempDir;
-use uu_tiktok::output::artifacts::EXPECTED_RAW_SIGNALS_SCHEMA_VERSION;
 
 #[test]
 #[ignore]
@@ -36,7 +36,7 @@ fn end_to_end_one_known_url() {
     // with a known long-lived public TikTok video; document the choice in README.
     let respondent_file =
         inbox.join("assignment=1_task=1_participant=test_source=tiktok_key=1-tiktok.json");
-    let url = std::env::var("UU_TIKTOK_E2E_URL")
+    let url = std::env::var("DDP_TRANSCRIBE_E2E_URL")
         .unwrap_or_else(|_| "https://www.tiktokv.com/share/video/7234567890123456789/".into());
     let payload = format!(
         r#"[
@@ -48,7 +48,7 @@ fn end_to_end_one_known_url() {
     );
     std::fs::write(&respondent_file, payload).unwrap();
 
-    let bin = PathBuf::from(env!("CARGO_BIN_EXE_uu-tiktok"));
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_ddp-transcribe"));
     let db = tmp.path().join("state.sqlite");
 
     let run = |args: &[&str]| {
@@ -58,8 +58,8 @@ fn end_to_end_one_known_url() {
             .args(["--transcripts", transcripts.to_str().unwrap()])
             .args(args)
             .status()
-            .expect("uu-tiktok runs");
-        assert!(status.success(), "uu-tiktok {:?} failed", args);
+            .expect("ddp-transcribe runs");
+        assert!(status.success(), "ddp-transcribe {:?} failed", args);
     };
 
     run(&["init"]);

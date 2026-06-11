@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use uu_tiktok::transcribe::{EngineConfig, PerCallConfig, WhisperEngine};
+use ddp_transcribe::transcribe::{EngineConfig, PerCallConfig, WhisperEngine};
 
 fn tiny_model_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models/ggml-tiny.en.bin")

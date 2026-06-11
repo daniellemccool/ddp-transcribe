@@ -186,7 +186,7 @@ async fn main() -> Result<()> {
             let path = &cfg.state_db;
             if !path.exists() {
                 anyhow::bail!(
-                    "migrate: state.sqlite not found at {}. Run `uu-tiktok init` first.",
+                    "migrate: state.sqlite not found at {}. Run `ddp-transcribe init` first.",
                     path.display()
                 );
             }
