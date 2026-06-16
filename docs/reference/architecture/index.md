@@ -110,6 +110,7 @@ Every ADR currently in `docs/decisions/`, grouped by the subsystem it governs. C
 | ADR | Title | Notes |
 |-----|-------|-------|
 | 0011 | Spin-down operational practice for dev workspace | Dev-workspace lifecycle; lives outside the architecture doc. |
+| 0032 | Transcription hot path on boot disk; volume seed-at-provision/sink-at-downtime | SRC batch-deployment storage model (1M-video target); outside the architecture doc. |
 
 ## 5. Where to look for X
 
