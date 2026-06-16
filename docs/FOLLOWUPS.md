@@ -57,6 +57,7 @@ lines 120-148.
 - T5-Epic1: `From<AudioDecodeError> for TranscribeError` maps to Bug → Epic 3 (classification taxonomy)
 - Epic2-review: `pipeline_fakes.rs` mixing concerns + over-narrated → Epic 3 (file split + strip phase comments)
 - Epic2-review: over-reliance on worker-level entry points in `pipeline_fakes` → Epic 3 (audit vs run_pipelined)
+- Tier5-deploy: real yt-dlp failure fixtures (10231 terminal; "IP blocked" NOT reliably retryable); share-link canonicalization hypothesis → Epic 3 (stderr capture + classifier corroboration)
 - Full Epic 3 entries: [followups/epic-3.md](followups/epic-3.md)
 
 **Epic 4 (operator-facing commands / timestamps)**
