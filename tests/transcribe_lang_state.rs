@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Tier 2 test for T2 perf-tweaks: lazy lang_state allocation.
 //!
 //! Requires ./models/ggml-tiny.en.bin on disk; gated by test-helpers feature

@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Confirm the v2 schema: new nullable columns present on `videos`,
 //! SCHEMA_VERSION constant is "2", fresh DB records "2" in meta.
 
@@ -8,7 +10,7 @@ use tempfile::TempDir;
 
 fn columns_in(conn: &Connection, table: &str) -> Vec<String> {
     let mut stmt = conn
-        .prepare(&format!("PRAGMA table_info({})", table))
+        .prepare(&format!("PRAGMA table_info({table})"))
         .unwrap();
     stmt.query_map([], |r| r.get::<_, String>(1))
         .unwrap()
@@ -37,9 +39,7 @@ fn fresh_db_has_new_nullable_columns() -> Result<()> {
     ] {
         assert!(
             cols.contains(&expected.to_string()),
-            "expected column `{}` in videos: have {:?}",
-            expected,
-            cols
+            "expected column `{expected}` in videos: have {cols:?}"
         );
     }
 

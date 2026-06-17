@@ -5,8 +5,10 @@ use anyhow::{Context, Result};
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use serde::Deserialize;
 
+use rusqlite::Transaction;
+
 use crate::canonical::{canonicalize_url, Canonical};
-use crate::state::Store;
+use crate::state::{upsert_video_tx, upsert_watch_history_tx, Store};
 
 #[derive(Debug, Default, Clone)]
 pub struct IngestStats {
@@ -31,6 +33,12 @@ pub fn ingest(inbox: &Path, store: &mut Store) -> Result<IngestStats> {
     let mut stats = IngestStats::default();
     let mut unique_videos: HashSet<String> = HashSet::new();
 
+    // Batch writes per file: the read + JSON parse happen OUTSIDE the write
+    // transaction, then one transaction wraps that file's row upserts and commits
+    // before the next file. This keeps the SQLite write-lock window off filesystem
+    // I/O, lets partial progress survive a later malformed file, and still amortizes
+    // the per-row commit cost. `prepare_cached` lives on the connection, so the two
+    // statements stay prepared across files. INSERT-OR-IGNORE keeps re-runs idempotent.
     for path in walk_json_files(inbox)? {
         let respondent_id = parse_respondent_id_from_filename(&path)
             .with_context(|| format!("parsing respondent_id from {}", path.display()))?;
@@ -39,11 +47,12 @@ pub fn ingest(inbox: &Path, store: &mut Store) -> Result<IngestStats> {
         let sections: Vec<Section> = serde_json::from_slice(&raw)
             .with_context(|| format!("parsing JSON from {}", path.display()))?;
 
+        let tx = store.transaction()?;
         for section in sections {
             if let Some(rows) = section.tiktok_watch_history {
                 for entry in rows {
                     process_watch_entry(
-                        store,
+                        &tx,
                         &respondent_id,
                         &entry,
                         &mut stats,
@@ -52,6 +61,8 @@ pub fn ingest(inbox: &Path, store: &mut Store) -> Result<IngestStats> {
                 }
             }
         }
+        tx.commit()
+            .with_context(|| format!("committing ingest transaction for {}", path.display()))?;
 
         stats.files_processed += 1;
     }
@@ -61,7 +72,7 @@ pub fn ingest(inbox: &Path, store: &mut Store) -> Result<IngestStats> {
 }
 
 fn process_watch_entry(
-    store: &mut Store,
+    tx: &Transaction<'_>,
     respondent_id: &str,
     entry: &WatchEntry,
     stats: &mut IngestStats,
@@ -90,23 +101,20 @@ fn process_watch_entry(
         }
     };
 
-    let watched_at = match parse_watched_at(&entry.date) {
-        Some(t) => t,
-        None => {
-            tracing::warn!(
-                respondent = respondent_id,
-                date = entry.date.as_str(),
-                "could not parse Date; skipping row"
-            );
-            stats.date_parse_failures += 1;
-            return Ok(());
-        }
+    let Some(watched_at) = parse_watched_at(&entry.date) else {
+        tracing::warn!(
+            respondent = respondent_id,
+            date = entry.date.as_str(),
+            "could not parse Date; skipping row"
+        );
+        stats.date_parse_failures += 1;
+        return Ok(());
     };
 
     unique_videos.insert(video_id.clone());
-    store.upsert_video(&video_id, &entry.link, true)?;
+    upsert_video_tx(tx, &video_id, &entry.link, true)?;
 
-    let inserted = store.upsert_watch_history(respondent_id, &video_id, watched_at, true)?;
+    let inserted = upsert_watch_history_tx(tx, respondent_id, &video_id, watched_at, true)?;
     stats.watch_history_rows_processed += 1;
     if inserted == 0 {
         stats.watch_history_duplicates += 1;
@@ -152,10 +160,7 @@ pub fn parse_respondent_id_from_filename(path: &Path) -> Result<String> {
         }
     }
 
-    anyhow::bail!(
-        "filename {} does not contain a `participant=` segment",
-        stem
-    )
+    anyhow::bail!("filename {stem} does not contain a `participant=` segment")
 }
 
 #[derive(Debug, Deserialize)]

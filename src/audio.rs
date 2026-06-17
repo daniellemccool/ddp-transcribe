@@ -71,7 +71,7 @@ pub fn decode_wav(path: &Path) -> Result<Vec<f32>, AudioDecodeError> {
             }
             reader
                 .samples::<i16>()
-                .map(|r| r.map(|s| s as f32 / 32768.0))
+                .map(|r| r.map(|s| f32::from(s) / 32768.0))
                 .collect::<Result<_, _>>()
                 .map_err(|e| AudioDecodeError::Read {
                     path: path_str.clone(),
@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_int_bits() {
-        let tmp = write_int_wav(16000, 1, 24, &[0i32 as i16; 100]);
+        let tmp = write_int_wav(16000, 1, 24, &[0i16; 100]);
         let err = decode_wav(tmp.path()).expect_err("24-bit int should be rejected");
         assert!(matches!(
             err,

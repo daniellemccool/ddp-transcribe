@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! End-to-end real-tools test for Plan B Epic 1. Exercises the embedded
 //! whisper-rs pipeline against a real TikTok URL via yt-dlp.
 //!
@@ -41,10 +43,9 @@ fn end_to_end_one_known_url() {
     let payload = format!(
         r#"[
             {{"tiktok_watch_history": [
-                {{"Date": "2024-01-01 00:00:00", "Link": "{}"}}
+                {{"Date": "2024-01-01 00:00:00", "Link": "{url}"}}
             ], "deleted row count": "0"}}
-        ]"#,
-        url
+        ]"#
     );
     std::fs::write(&respondent_file, payload).unwrap();
 
@@ -59,7 +60,7 @@ fn end_to_end_one_known_url() {
             .args(args)
             .status()
             .expect("ddp-transcribe runs");
-        assert!(status.success(), "ddp-transcribe {:?} failed", args);
+        assert!(status.success(), "ddp-transcribe {args:?} failed");
     };
 
     run(&["init"]);

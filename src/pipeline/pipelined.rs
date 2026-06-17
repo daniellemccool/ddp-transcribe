@@ -150,13 +150,10 @@ pub async fn fetch_worker(
                 c
             }
         };
-        let claim = match claim {
-            Some(c) => c,
-            None => {
-                // 0026: drain semantics. Worker exits on None.
-                tracing::info!(worker = %worker_id, "fetch_worker: queue drained; exiting");
-                return Ok(());
-            }
+        let Some(claim) = claim else {
+            // 0026: drain semantics. Worker exits on None.
+            tracing::info!(worker = %worker_id, "fetch_worker: queue drained; exiting");
+            return Ok(());
         };
 
         // Inline fetch + decode (T15 helper). Errors here are application
@@ -304,7 +301,7 @@ pub async fn transcribe_worker(
         // cancellation. Per 0025 this is the propagation entry point.
         let item = tokio::select! {
             biased;
-            _ = token.cancelled() => {
+            () = token.cancelled() => {
                 tracing::info!(worker = %worker_id, "transcribe_worker: cancellation observed; exiting");
                 return Ok(());
             }
@@ -341,7 +338,7 @@ pub async fn transcribe_worker(
         };
         let transcribe_result = tokio::select! {
             biased;
-            _ = token.cancelled() => {
+            () = token.cancelled() => {
                 tracing::info!(worker = %worker_id, video_id = %claim.video_id.as_str(), "transcribe_worker: cancellation during transcribe; exiting");
                 return Ok(());
             }
@@ -630,6 +627,8 @@ fn compute_process_stats(store: &Store) -> Result<ProcessStats> {
         .conn()
         .prepare("SELECT status, COUNT(*) FROM videos GROUP BY status")
         .context("preparing status-count query")?;
+    // COUNT(*) is non-negative and far below usize::MAX.
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     let rows = stmt
         .query_map([], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize))

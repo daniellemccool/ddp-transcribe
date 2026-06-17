@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use anyhow::Result;
 use ddp_transcribe::state::{Claim, Store, SuccessArtifacts};
 use tempfile::TempDir;
@@ -121,12 +123,12 @@ fn concurrent_claim_serializes_via_begin_immediate() -> Result<()> {
     let handle_a = thread::spawn(move || -> anyhow::Result<Option<Claim>> {
         let mut store = Store::open(&path_a)?;
         barrier_a.wait();
-        Ok(store.claim_next("worker-A")?)
+        store.claim_next("worker-A")
     });
     let handle_b = thread::spawn(move || -> anyhow::Result<Option<Claim>> {
         let mut store = Store::open(&path_b)?;
         barrier_b.wait();
-        Ok(store.claim_next("worker-B")?)
+        store.claim_next("worker-B")
     });
 
     let result_a = handle_a.join().expect("thread A panicked")?;

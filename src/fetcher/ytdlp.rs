@@ -41,7 +41,7 @@ impl YtDlpFetcher {
 /// download), then any best (defense against extractor changes).
 fn build_yt_dlp_args(video_id: &str, source_url: &str, video_dir: &Path) -> (Vec<String>, PathBuf) {
     let output_template = format!("{}/{}.%(ext)s", video_dir.display(), video_id);
-    let wav_path = video_dir.join(format!("{}.wav", video_id));
+    let wav_path = video_dir.join(format!("{video_id}.wav"));
     let args = vec![
         "--no-playlist".into(),
         "--no-warnings".into(),
@@ -84,7 +84,7 @@ fn build_yt_dlp_args(video_id: &str, source_url: &str, video_dir: &Path) -> (Vec
 impl VideoFetcher for YtDlpFetcher {
     async fn acquire(&self, video_id: &str, source_url: &str) -> Result<Acquisition, FetchError> {
         // Per-video tmp dir keeps yt-dlp's intermediate files contained.
-        let video_dir = self.work_dir.join(format!("ytdlp-{}", video_id));
+        let video_dir = self.work_dir.join(format!("ytdlp-{video_id}"));
         std::fs::create_dir_all(&video_dir).map_err(|e| {
             FetchError::NetworkError(format!(
                 "creating yt-dlp work dir {}: {}",

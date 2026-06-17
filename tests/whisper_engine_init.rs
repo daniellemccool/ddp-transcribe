@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! WhisperEngine init smoke test.
 //!
 //! Requires ./models/ggml-tiny.en.bin on disk; gated by test-helpers feature

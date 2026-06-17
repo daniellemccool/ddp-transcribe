@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use ddp_transcribe::state::Store;
 use tempfile::TempDir;
 

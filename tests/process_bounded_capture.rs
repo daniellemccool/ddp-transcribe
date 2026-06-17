@@ -1,3 +1,9 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::cast_possible_truncation
+)]
+
 //! Tier 2 tests for bounded subprocess capture (T5 perf-tweaks; 0021).
 //!
 //! Exercise the bounded streaming reader via real subprocesses (echo, sleep,
@@ -140,10 +146,7 @@ async fn read_bounded_peak_len_never_exceeds_cap() {
     let final_peak = peak.load(Ordering::Relaxed);
     assert!(
         final_peak <= CAP,
-        "peak_buffer_len must be bounded by cap; got {}, cap {}, payload size {}",
-        final_peak,
-        CAP,
-        payload_len
+        "peak_buffer_len must be bounded by cap; got {final_peak}, cap {CAP}, payload size {payload_len}"
     );
     assert!(
         final_peak > 0,

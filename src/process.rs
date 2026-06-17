@@ -76,10 +76,10 @@ impl From<RunError> for FetchError {
         match err {
             RunError::Timeout { tool, duration } => FetchError::ToolTimeout { tool, duration },
             RunError::Spawn { tool, source } => {
-                FetchError::NetworkError(format!("failed to spawn {}: {}", tool, source))
+                FetchError::NetworkError(format!("failed to spawn {tool}: {source}"))
             }
             RunError::Io { tool, source } => {
-                FetchError::NetworkError(format!("io error reading {} output: {}", tool, source))
+                FetchError::NetworkError(format!("io error reading {tool} output: {source}"))
             }
         }
     }
@@ -108,13 +108,9 @@ where
     let mut chunk = [0u8; CHUNK];
 
     if cap == 0 {
-        // Discard mode: drain but don't retain.
-        loop {
-            match reader.read(&mut chunk).await? {
-                0 => return Ok(None),
-                _ => continue,
-            }
-        }
+        // Discard mode: drain to EOF but don't retain.
+        while reader.read(&mut chunk).await? != 0 {}
+        return Ok(None);
     }
 
     let mut deque: std::collections::VecDeque<u8> = std::collections::VecDeque::with_capacity(cap);
@@ -166,7 +162,11 @@ pub async fn run(spec: CommandSpec<'_>) -> Result<CommandOutcome, RunError> {
             source,
         })?;
 
+    // Construction-time invariant: stdout/stderr were set to Stdio::piped() on the
+    // spawned command above, so take() returns Some.
+    #[allow(clippy::expect_used)]
     let mut stdout_pipe = child.stdout.take().expect("piped stdout");
+    #[allow(clippy::expect_used)]
     let mut stderr_pipe = child.stderr.take().expect("piped stderr");
 
     // Bounded streaming reads (0021). Peak memory is bounded by
@@ -196,6 +196,11 @@ pub async fn run(spec: CommandSpec<'_>) -> Result<CommandOutcome, RunError> {
 
     match result {
         Ok(Ok((stdout, stderr_bytes, status))) => {
+            // NOTE: `code()` is None when the child was killed by a signal; collapsing
+            // to -1 loses the signal number that failure classification will want.
+            // Reshaping CommandOutcome to carry the signal is deferred to Epic 3 and
+            // already tracked in docs/FOLLOWUPS.md (Epic 3, T6 "status.code().unwrap_or(-1)
+            // loses signal info").
             let exit_code = status.code().unwrap_or(-1);
             let stderr_excerpt = stderr_bytes
                 .map(|v| String::from_utf8_lossy(&v).into_owned())
@@ -273,7 +278,7 @@ mod tests {
         let result = run(spec).await;
         match result {
             Err(RunError::Timeout { tool, .. }) => assert_eq!(tool, "sleep"),
-            other => panic!("expected timeout, got {:?}", other),
+            other => panic!("expected timeout, got {other:?}"),
         }
     }
 
@@ -290,7 +295,7 @@ mod tests {
         let result = run(spec).await;
         match result {
             Err(RunError::Spawn { .. }) => {}
-            other => panic!("expected Spawn error, got {:?}", other),
+            other => panic!("expected Spawn error, got {other:?}"),
         }
     }
 }

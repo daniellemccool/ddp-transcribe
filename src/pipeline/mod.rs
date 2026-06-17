@@ -293,6 +293,9 @@ pub(crate) fn write_artifacts_and_mark(
     // duration_s derives from the 0014 audio invariant (16 kHz mono):
     // samples_len / 16_000. Caller captured samples_len before the
     // transcribe call moved the Vec.
+    // Precision loss is acceptable: this is a reported duration metric, not a value
+    // we round-trip or compare for equality.
+    #[allow(clippy::cast_precision_loss)]
     let duration_s = Some(samples_len as f64 / 16_000.0);
 
     let shard_dir = opts.transcripts_root.join(shard(&claim.video_id));

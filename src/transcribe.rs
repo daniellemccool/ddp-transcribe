@@ -95,6 +95,8 @@ fn extract_segments(state: &whisper_rs::WhisperState) -> Result<Vec<SegmentRaw>,
             "whisper-rs returned negative n_segments: {n_segments}"
         ));
     }
+    // n_segments is guaranteed >= 0 by the check above, so the cast cannot lose sign.
+    #[allow(clippy::cast_sign_loss)]
     let mut segments_raw = Vec::with_capacity(n_segments as usize);
 
     for i in 0..n_segments {
@@ -119,6 +121,8 @@ fn extract_segments(state: &whisper_rs::WhisperState) -> Result<Vec<SegmentRaw>,
                 "whisper-rs returned negative n_tokens at segment {i}: {n_tokens}"
             ));
         }
+        // n_tokens is guaranteed >= 0 by the check above, so the cast cannot lose sign.
+        #[allow(clippy::cast_sign_loss)]
         let mut tokens_raw = Vec::with_capacity(n_tokens as usize);
 
         for j in 0..n_tokens {
@@ -148,7 +152,7 @@ fn extract_segments(state: &whisper_rs::WhisperState) -> Result<Vec<SegmentRaw>,
             // split-points). Better than erroring out and losing the artifact.
             let text = tok
                 .to_str_lossy()
-                .map(|s| s.into_owned())
+                .map(std::borrow::Cow::into_owned)
                 .unwrap_or_default();
 
             tokens_raw.push(TokenRaw {
@@ -315,7 +319,12 @@ pub enum WhisperInitError {
 /// worker loop for why we hand-roll this instead of using
 /// `FullParams::set_abort_callback_safe`.
 unsafe extern "C" fn abort_trampoline(user_data: *mut std::ffi::c_void) -> bool {
-    let cb = unsafe { &mut *(user_data as *mut Box<dyn FnMut() -> bool>) };
+    // SAFETY: `user_data` is the pointer produced by `Box::into_raw(Box::new(cb))`
+    // where `cb: Box<dyn FnMut() -> bool>` (see the set_abort_callback site below).
+    // whisper.cpp hands it back unchanged on each callback and the Box outlives
+    // inference (it is reclaimed via Box::from_raw only after `state.full` returns),
+    // so the reborrow is to a live, unaliased value.
+    let cb = unsafe { &mut *user_data.cast::<Box<dyn FnMut() -> bool>>() };
     cb()
 }
 
@@ -580,10 +589,17 @@ impl WhisperEngine {
                         should_abort
                     }));
                     let abort_user_data = Box::into_raw(abort_box);
+                    // SAFETY: `abort_trampoline` reinterprets the user-data pointer as
+                    // `*mut Box<dyn FnMut() -> bool>`, which is exactly what
+                    // `Box::into_raw(abort_box)` produced just above. The pointer stays
+                    // valid until reclaimed via `Box::from_raw` after `state.full`
+                    // returns (both exit paths below reclaim exactly once), so
+                    // whisper.cpp never invokes the trampoline with a dangling pointer.
                     unsafe {
                         params.set_abort_callback(Some(abort_trampoline));
-                        params
-                            .set_abort_callback_user_data(abort_user_data as *mut std::ffi::c_void);
+                        params.set_abort_callback_user_data(
+                            abort_user_data.cast::<std::ffi::c_void>(),
+                        );
                     }
 
                     // Compute lang_probs only when opt-in. Pays an extra encoder
@@ -621,32 +637,47 @@ impl WhisperEngine {
                         // when we reach this point. `expect` documents the
                         // invariant; if this panics, the lazy branch's
                         // continue-on-error didn't fire.
+                        // Construction-time invariant: the lazy-alloc branch above sets
+                        // lang_state to Some whenever compute_lang_probs is true.
+                        #[allow(clippy::expect_used)]
                         let lang_state = lang_state
                             .as_mut()
                             .expect("lazy alloc branch above guarantees Some(_)");
                         match lang_state.pcm_to_mel(&req.samples, 4) {
-                            Ok(()) => match lang_state.lang_detect(0, 4) {
-                                Ok((_lang_id, probs_vec)) => {
-                                    let mut paired = Vec::with_capacity(probs_vec.len());
-                                    for (id, p) in probs_vec.iter().enumerate() {
-                                        if let Some(code) = whisper_rs::get_lang_str(id as i32) {
-                                            paired.push((code.to_string(), *p));
-                                        }
+                            Ok(()) => {
+                                match lang_state.lang_detect(0, 4) {
+                                    Ok((_lang_id, probs_vec)) => {
+                                        // id is a whisper language index (< ~100); the i32
+                                        // cast is always in range.
+                                        #[allow(
+                                        clippy::cast_possible_truncation,
+                                        clippy::cast_possible_wrap
+                                    )]
+                                    let mut paired: Vec<(String, f32)> = probs_vec
+                                        .iter()
+                                        .enumerate()
+                                        .filter_map(|(id, p)| {
+                                            // Drop non-finite probabilities (consistent
+                                            // with the finiteness checks on segment/token
+                                            // signals) and any id without a language code.
+                                            let code = whisper_rs::get_lang_str(id as i32)?;
+                                            p.is_finite().then(|| (code.to_string(), *p))
+                                        })
+                                        .collect();
+                                        // Sort descending by probability. total_cmp gives a total
+                                        // order over f32 (no partial_cmp().unwrap_or(...) fallback);
+                                        // non-finite probs were already filtered out above.
+                                        paired.sort_by(|a, b| b.1.total_cmp(&a.1));
+                                        Some(paired)
                                     }
-                                    // Sort descending by probability for
-                                    // operator-readable JSON output.
-                                    paired.sort_by(|a, b| {
-                                        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                                    });
-                                    Some(paired)
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "lang_detect failed: {e}; emitting null lang_probs"
+                                        );
+                                        None
+                                    }
                                 }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "lang_detect failed: {e}; emitting null lang_probs"
-                                    );
-                                    None
-                                }
-                            },
+                            }
                             Err(e) => {
                                 tracing::warn!("pcm_to_mel failed: {e}; emitting null lang_probs");
                                 None
@@ -666,7 +697,7 @@ impl WhisperEngine {
                         // Reclaim the abort closure box even on the early-exit
                         // path; whisper.cpp's abort_callback won't fire here
                         // (state.full not yet called) so this is safe.
-                        let _ = unsafe { Box::from_raw(abort_user_data) };
+                        drop(unsafe { Box::from_raw(abort_user_data) });
                         let _ = req.reply.send(Err(TranscribeError::Cancelled));
                         continue;
                     }
@@ -704,9 +735,15 @@ impl WhisperEngine {
                             let mut text = String::new();
                             for i in 0..n_segments {
                                 if let Some(seg) = state.get_segment(i) {
-                                    if let Ok(s) = seg.to_str() {
-                                        text.push_str(s);
-                                    }
+                                    // to_str_lossy mirrors the token path (substitute
+                                    // replacement chars rather than silently dropping a
+                                    // non-UTF-8 segment); on a hard WhisperError default
+                                    // to "" exactly as the token extraction does.
+                                    let seg_text = seg
+                                        .to_str_lossy()
+                                        .map(std::borrow::Cow::into_owned)
+                                        .unwrap_or_default();
+                                    text.push_str(&seg_text);
                                 }
                             }
 
@@ -752,10 +789,13 @@ impl WhisperEngine {
         match init_rx.recv() {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
+                // Best-effort reap: the worker already reported this init error over
+                // the channel; its JoinHandle result is not separately actionable.
                 let _ = handle.join();
                 return Err(e);
             }
             Err(_) => {
+                // Worker died before sending an init result; reap it, surface below.
                 let _ = handle.join();
                 return Err(WhisperInitError::ModelLoad {
                     path: config.model_path.display().to_string(),
@@ -820,6 +860,10 @@ impl WhisperEngine {
     /// wiring) and by integration tests. No `dead_code` suppression
     /// needed.
     pub fn transcriber_handle(&self) -> std::sync::Arc<dyn Transcriber> {
+        // Internal API invariant: request_tx is Some until shutdown() takes it;
+        // calling this accessor afterward is a programmer error, not a runtime or
+        // external-input condition.
+        #[allow(clippy::expect_used)]
         let request_tx = self
             .request_tx
             .as_ref()
@@ -844,6 +888,8 @@ impl WhisperEngine {
         // the worker stays parked in blocking_recv and the join hangs forever.
         drop(self.request_tx.take());
         if let Some(handle) = self.handle.take() {
+            // Discard the join result: a worker panic surfaces in its own logs, and
+            // teardown must stay infallible (it also runs from Drop).
             let _ = handle.join();
         }
     }

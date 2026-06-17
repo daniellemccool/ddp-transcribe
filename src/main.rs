@@ -1,3 +1,6 @@
+// See lib.rs: scope the unwrap/expect restriction allow to `cfg(test)` only.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 use anyhow::{Context, Result};
 use clap::Parser;
 
