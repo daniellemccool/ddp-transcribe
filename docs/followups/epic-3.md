@@ -159,6 +159,54 @@ it.
 
 ---
 
+### Real yt-dlp failure corpus from the PI 65k donation (Tier 5 deploy)
+
+**Found in:** Tier 5 catalog-item validation — the PI's 65,024-video TikTok
+donation run on the 2×A10 SRC workspace.
+**Disposition:** Ground-truth fixtures + classifier requirements for Epic 3's
+stderr-capture (Task 1) and the terminal-vs-retryable taxonomy.
+**Trigger to revisit:** Epic 3 kickoff (stderr fixture capture / `RetryableKind`
++ `UnavailableReason` classification).
+
+Current `main` stores only the generic `subprocess yt-dlp exited with status 1`
+in `last_retryable_message` — yt-dlp's stderr (the actual reason) is dropped, so
+the state DB cannot classify failures. ~14% of fetches fail on the PI data,
+interleaved with ~86% success and no rate-limit cliff (→ per-video attrition,
+not throttling).
+
+Two hand-labeled fixtures (real, cannot be synthesized — preserve the IDs):
+
+- `7636789808341323039` (`tiktok.com/@foxnews/video/…`): yt-dlp →
+  `Video not available, status code 10231`. **TERMINAL** (content removed);
+  `10231` is a concrete terminal status code to key on.
+- `7038657312860491014` (`tiktokv.com/share/video/…`): yt-dlp →
+  `Your IP address is blocked from accessing this post`, **but** independently
+  confirmed unavailable from a residential NL browser ("momenteel niet
+  beschikbaar"). So this is **TERMINAL despite the misleading API message**.
+
+**Classifier requirement (load-bearing):** TikTok's "Your IP address is blocked
+from accessing this post" is NOT a reliable retryable signal — it is also
+returned for genuinely deleted videos. A naive "blocked → retryable, try later"
+rule would retry dead videos forever. The classifier must corroborate (e.g. a
+status-code map; treat `10231` and message-only "blocked" as likely-terminal
+unless evidence says otherwise). Genuine datacenter-IP/geo blocks (retryable
+from another egress) do exist and are indistinguishable from terminal "blocked"
+by message text alone — that ambiguity is the core problem the taxonomy resolves.
+
+**Hypothesis (unverified):** share-link URLs (`tiktokv.com/share/video/<id>`)
+redirect to an empty-username `tiktok.com/@/video/<id>` form, which may fail
+independent of whether the video is alive. If a non-trivial fraction of the 65k
+are share-form links and that form reliably fails, it inflates the failure rate
+for a fixable reason (a `canonical.rs` normalization to `@<user>/video/<id>`).
+Distinct from — but adjacent to — the Plan C short-link resolution noted in the
+`YtDlpFetcher::acquire` entry above. Unprovable on the dead samples here; needs a
+share-form URL whose video is still live to isolate the effect.
+
+**Harvest the full corpus** from any post-run workspace:
+`sqlite3 ~/ddp-state/state.sqlite "SELECT source_url, last_retryable_message FROM videos WHERE status='failed_retryable';"`
+
+---
+
 ### Over-reliance on worker-level entry points in `pipeline_fakes`
 
 **Found in:** Operator test-suite review (2026-05-20).
