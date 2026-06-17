@@ -76,7 +76,7 @@ mod tests {
             tool: "yt-dlp",
             duration: Duration::from_secs(300),
         };
-        let msg = format!("{}", err);
+        let msg = format!("{err}");
         assert!(msg.contains("yt-dlp"));
         assert!(msg.contains("300"));
     }
@@ -87,7 +87,7 @@ mod tests {
             exit_code: 1,
             stderr_excerpt: "out of memory".into(),
         };
-        let msg = format!("{}", err);
+        let msg = format!("{err}");
         assert!(msg.contains("status 1"));
         assert!(msg.contains("out of memory"));
     }

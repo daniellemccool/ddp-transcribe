@@ -12,7 +12,9 @@ fn unix_now() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
+        // Saturating, infallible conversion: seconds-since-epoch fit i64 for ~292
+        // billion years, but try_from avoids the lossy-cast lint and any wrap.
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or(0)
 }
 
@@ -132,8 +134,8 @@ impl Store {
     pub fn pragma_string(&self, name: &str) -> Result<String> {
         let value: String = self
             .conn
-            .query_row(&format!("PRAGMA {}", name), [], |row| row.get(0))
-            .with_context(|| format!("reading PRAGMA {}", name))?;
+            .query_row(&format!("PRAGMA {name}"), [], |row| row.get(0))
+            .with_context(|| format!("reading PRAGMA {name}"))?;
         Ok(value)
     }
 
@@ -156,6 +158,12 @@ impl Store {
     /// Returns the number of rows actually inserted (1 for new, 0 for an
     /// idempotent re-upsert of an existing row). Symmetric with
     /// `upsert_watch_history`.
+    ///
+    /// Single-statement convenience wrapper retained for the integration tests
+    /// (`tests/state_ingest.rs`); the production `ingest` walk uses the batched
+    /// transaction path ([`Store::transaction`] + [`upsert_video_tx`]). The tests
+    /// link the lib, but the bin no longer calls this, hence `dead_code` per 0002.
+    #[allow(dead_code)]
     pub fn upsert_video(
         &mut self,
         video_id: &str,
@@ -166,16 +174,15 @@ impl Store {
         let changed = self
             .conn
             .execute(
-                "INSERT OR IGNORE INTO videos
-                 (video_id, source_url, canonical, status,
-                  first_seen_at, updated_at)
-                 VALUES (?1, ?2, ?3, 'pending', ?4, ?4)",
-                params![video_id, source_url, canonical as i64, now],
+                UPSERT_VIDEO_SQL,
+                params![video_id, source_url, i64::from(canonical), now],
             )
-            .with_context(|| format!("upserting video {}", video_id))?;
+            .with_context(|| format!("upserting video {video_id}"))?;
         Ok(changed)
     }
 
+    /// Convenience sibling of [`Store::upsert_video`]; see its note re: 0002.
+    #[allow(dead_code)]
     pub fn upsert_watch_history(
         &mut self,
         respondent_id: &str,
@@ -186,19 +193,74 @@ impl Store {
         let changed = self
             .conn
             .execute(
-                "INSERT OR IGNORE INTO watch_history
-                 (respondent_id, video_id, watched_at, in_window)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![respondent_id, video_id, watched_at, in_window as i64],
+                UPSERT_WATCH_HISTORY_SQL,
+                params![respondent_id, video_id, watched_at, i64::from(in_window)],
             )
             .with_context(|| {
                 format!(
-                    "upserting watch_history (respondent={}, video={}, watched_at={})",
-                    respondent_id, video_id, watched_at
+                    "upserting watch_history (respondent={respondent_id}, video={video_id}, watched_at={watched_at})"
                 )
             })?;
         Ok(changed)
     }
+
+    /// Open a transaction for the batch ingest path. `ingest` opens one transaction
+    /// per input file (after that file is read and parsed) and commits it before the
+    /// next file, instead of paying a per-row commit. Pair with [`upsert_video_tx`] /
+    /// [`upsert_watch_history_tx`], which reuse `prepare_cached` statements across
+    /// transactions on the same connection.
+    pub(crate) fn transaction(&mut self) -> Result<rusqlite::Transaction<'_>> {
+        self.conn.transaction().context("begin ingest transaction")
+    }
+}
+
+/// Shared INSERT-OR-IGNORE SQL so the `&mut self` convenience methods and the
+/// transaction-scoped batch helpers below cannot drift.
+const UPSERT_VIDEO_SQL: &str = "INSERT OR IGNORE INTO videos
+                 (video_id, source_url, canonical, status,
+                  first_seen_at, updated_at)
+                 VALUES (?1, ?2, ?3, 'pending', ?4, ?4)";
+const UPSERT_WATCH_HISTORY_SQL: &str = "INSERT OR IGNORE INTO watch_history
+                 (respondent_id, video_id, watched_at, in_window)
+                 VALUES (?1, ?2, ?3, ?4)";
+
+/// Transaction-scoped upsert for the batch ingest path. `prepare_cached` prepares
+/// the statement once and reuses it for every row in the walk. Shares
+/// [`UPSERT_VIDEO_SQL`] with [`Store::upsert_video`].
+pub(crate) fn upsert_video_tx(
+    tx: &rusqlite::Transaction<'_>,
+    video_id: &str,
+    source_url: &str,
+    canonical: bool,
+) -> Result<usize> {
+    let now = unix_now();
+    let changed = tx
+        .prepare_cached(UPSERT_VIDEO_SQL)
+        .context("preparing upsert_video")?
+        .execute(params![video_id, source_url, i64::from(canonical), now])
+        .with_context(|| format!("upserting video {video_id}"))?;
+    Ok(changed)
+}
+
+/// Transaction-scoped sibling of [`upsert_video_tx`]; shares
+/// [`UPSERT_WATCH_HISTORY_SQL`] with [`Store::upsert_watch_history`].
+pub(crate) fn upsert_watch_history_tx(
+    tx: &rusqlite::Transaction<'_>,
+    respondent_id: &str,
+    video_id: &str,
+    watched_at: i64,
+    in_window: bool,
+) -> Result<usize> {
+    let changed = tx
+        .prepare_cached(UPSERT_WATCH_HISTORY_SQL)
+        .context("preparing upsert_watch_history")?
+        .execute(params![respondent_id, video_id, watched_at, i64::from(in_window)])
+        .with_context(|| {
+            format!(
+                "upserting watch_history (respondent={respondent_id}, video={video_id}, watched_at={watched_at})"
+            )
+        })?;
+    Ok(changed)
 }
 
 /// Represents a successfully claimed video row, returned by `claim_next`.
@@ -318,7 +380,7 @@ impl Store {
                     worker_id,
                 ],
             )
-            .with_context(|| format!("update videos for succeeded {}", video_id))?;
+            .with_context(|| format!("update videos for succeeded {video_id}"))?;
 
         // Only insert the event row if the UPDATE matched — symmetry with the
         // mutator's row-change count. 0008 invariant: artifacts are durable
@@ -380,7 +442,7 @@ impl Store {
                    AND claimed_by = ?5",
                 params![video_id, kind, message, now, worker_id],
             )
-            .with_context(|| format!("update videos for failed_retryable {}", video_id))?;
+            .with_context(|| format!("update videos for failed_retryable {video_id}"))?;
 
         if changed > 0 {
             let detail = serde_json::json!({ "kind": kind, "message": message }).to_string();
@@ -445,7 +507,7 @@ impl Store {
                    AND claimed_by = ?5",
                 params![video_id, reason, message, now, worker_id],
             )
-            .with_context(|| format!("update videos for failed_terminal {}", video_id))?;
+            .with_context(|| format!("update videos for failed_terminal {video_id}"))?;
 
         if changed > 0 {
             let detail = serde_json::json!({ "reason": reason, "message": message }).to_string();

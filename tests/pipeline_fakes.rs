@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -414,7 +416,7 @@ async fn run_serial_classifies_transcribe_failure_as_retryable_and_continues() -
             "video {vid}: same placeholder kind regardless of which arm failed"
         );
         assert!(
-            rm.as_ref().map_or(false, |m| !m.is_empty()),
+            rm.as_ref().is_some_and(|m| !m.is_empty()),
             "video {vid}: last_retryable_message populated"
         );
         assert_eq!(
@@ -609,9 +611,10 @@ async fn fetch_worker_increments_stale_after_failure_on_swept_claim() -> anyhow:
     // Drain the channel. No FetchedItem should ever arrive (every fetch
     // fails); the worker exits when claim_next returns None (row is now
     // failed_retryable after iteration 2's successful flip).
-    while let Some(_item) = rx.recv().await {
-        panic!("no successful fetch expected; FakeFetcher always fails");
-    }
+    assert!(
+        rx.recv().await.is_none(),
+        "no successful fetch expected; FakeFetcher always fails"
+    );
 
     let worker_result = worker_handle.await.expect("join");
     assert!(
@@ -701,8 +704,7 @@ async fn transcribe_worker_processes_one_item_then_exits_on_channel_close() -> a
         Arc::new(opts),
     ));
 
-    let result = worker_handle.await.expect("join")?;
-    assert_eq!(result, ());
+    worker_handle.await.expect("join")?;
 
     // Confirm vid_a is now succeeded.
     let guard = shared.lock().await;

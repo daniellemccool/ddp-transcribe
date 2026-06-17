@@ -51,8 +51,7 @@ pub fn run_migrate(path: &Path) -> Result<()> {
         .is_some_and(|n| n > SCHEMA_VERSION.parse::<u32>().unwrap_or(0))
     {
         anyhow::bail!(
-            "migrate: DB is at v{found}, binary expects v{}. Downgrade not supported.",
-            SCHEMA_VERSION
+            "migrate: DB is at v{found}, binary expects v{SCHEMA_VERSION}. Downgrade not supported."
         );
     }
 
@@ -73,10 +72,7 @@ pub fn run_migrate(path: &Path) -> Result<()> {
         )
         .context("v1→v2: ALTER TABLE videos ADD COLUMN ×4")?;
     } else {
-        anyhow::bail!(
-            "migrate: don't know how to upgrade from v{found} to v{}",
-            SCHEMA_VERSION
-        );
+        anyhow::bail!("migrate: don't know how to upgrade from v{found} to v{SCHEMA_VERSION}");
     }
 
     tx.execute(

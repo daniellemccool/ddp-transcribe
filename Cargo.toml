@@ -33,6 +33,32 @@ default = []
 cuda = ["whisper-rs/cuda"]
 test-helpers = []
 
+# Idiomatic-Rust gate (clippy --all-targets -- -D warnings). Curated explicit set
+# rather than the `pedantic` group: pedantic is a one-time audit, not a good
+# permanent merge gate (it turns prose/style nits into blockers). We gate only the
+# lints that protect correctness or that we want mechanically normalized. Doc-prose
+# lints (doc_markdown, missing_errors_doc, missing_panics_doc) and must_use_candidate
+# are deliberately NOT enabled. `unwrap_used`/`expect_used` are scoped away from test
+# code via crate-root `cfg_attr(any(test, feature="test-helpers"), allow(...))` in
+# lib.rs/main.rs and an unconditional `allow` header in each tests/*.rs.
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+uninlined_format_args = "warn"
+manual_let_else = "warn"
+cast_lossless = "warn"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+cast_precision_loss = "warn"
+ptr_as_ptr = "warn"
+redundant_closure_for_method_calls = "warn"
+needless_continue = "warn"
+ignored_unit_patterns = "warn"
+needless_raw_string_hashes = "warn"
+# large_futures intentionally NOT gated: it fires on the once-per-video subprocess
+# future (~34 KB) and in test code; boxing would add an allocation for no real win.
+
 [[test]]
 name = "state_ingest"
 required-features = ["test-helpers"]

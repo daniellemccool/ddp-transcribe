@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Schema-version handling on Store::open. Per 0022, mismatches are
 //! a typed error that directs the operator to `ddp-transcribe migrate`.
 
@@ -52,11 +54,10 @@ fn open_on_mismatched_version_returns_typed_error() -> Result<()> {
         }
     }
 
-    let display = format!("{}", state_err);
+    let display = format!("{state_err}");
     assert!(
         display.contains("ddp-transcribe migrate"),
-        "operator-readable instruction missing from Display: {}",
-        display
+        "operator-readable instruction missing from Display: {display}"
     );
 
     Ok(())

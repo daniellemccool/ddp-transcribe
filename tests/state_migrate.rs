@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::type_complexity)]
+
 //! Migration test: synthesize a v1 DB (no new Epic 2 columns; meta.schema_version='1'),
 //! run the migrate function, confirm v2 columns are present and meta.schema_version='2'.
 //! Then run Store::open and confirm it succeeds (round-trip with T2's check).
@@ -45,7 +47,7 @@ fn synthesize_v1_db(path: &std::path::Path) -> Result<()> {
 
 fn columns_in(conn: &Connection, table: &str) -> Vec<String> {
     let mut stmt = conn
-        .prepare(&format!("PRAGMA table_info({})", table))
+        .prepare(&format!("PRAGMA table_info({table})"))
         .unwrap();
     stmt.query_map([], |r| r.get::<_, String>(1))
         .unwrap()

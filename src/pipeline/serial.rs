@@ -43,9 +43,8 @@ pub async fn run_serial(
     // would double-count, exiting early. `claimed = succeeded +
     // stale_after_success + failed` post-loop.
     while stats.claimed < max {
-        let claim = match store.claim_next(&opts.worker_id)? {
-            Some(c) => c,
-            None => break,
+        let Some(claim) = store.claim_next(&opts.worker_id)? else {
+            break;
         };
         stats.claimed += 1;
 

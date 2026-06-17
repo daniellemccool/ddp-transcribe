@@ -77,6 +77,9 @@ impl FakeFetcher {
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
+// Test scaffolding: a poisoned `canned` mutex only happens if a test panicked while
+// holding it, so expect() (surfacing that as a panic here) is correct.
+#[allow(clippy::expect_used)]
 #[async_trait]
 impl VideoFetcher for FakeFetcher {
     async fn acquire(&self, video_id: &str, _source_url: &str) -> Result<Acquisition, FetchError> {
@@ -93,16 +96,14 @@ impl VideoFetcher for FakeFetcher {
 
         if self.always_fails {
             return Err(FetchError::NetworkError(format!(
-                "FakeFetcher::always_fails synthetic failure for {}",
-                video_id
+                "FakeFetcher::always_fails synthetic failure for {video_id}"
             )));
         }
         let map = self.canned.lock().expect("canned mutex");
         match map.get(video_id) {
             Some(path) => Ok(Acquisition::AudioFile(path.clone())),
             None => Err(FetchError::ParseError(format!(
-                "FakeFetcher has no canned response for {}",
-                video_id
+                "FakeFetcher has no canned response for {video_id}"
             ))),
         }
     }

@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use ddp_transcribe::state::{Store, SCHEMA_VERSION};
 use tempfile::TempDir;
 
@@ -46,8 +48,7 @@ fn read_meta_returns_none_for_missing_key() {
         .expect("read_meta succeeds even when key is absent");
     assert!(
         result.is_none(),
-        "expected None for missing key, got {:?}",
-        result
+        "expected None for missing key, got {result:?}"
     );
 }
 

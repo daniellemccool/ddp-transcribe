@@ -68,9 +68,7 @@ mod tests {
         for (bucket, n) in &counts {
             assert!(
                 (50..=150).contains(n),
-                "bucket {} has {} items, outside 50..=150",
-                bucket,
-                n
+                "bucket {bucket} has {n} items, outside 50..=150"
             );
         }
         assert_eq!(counts.len(), 100, "expected 100 distinct buckets");
