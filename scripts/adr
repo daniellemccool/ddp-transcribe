@@ -29,9 +29,12 @@ Subcommands:
                                            Optional <id> (1-9999, zero-padded to 0NNN) for
                                            deterministic assignment; fails on collision.
   edit <id> [--force] < body               replace body via stdin (--force for non-proposed)
-  decide <id> <option-name-or-index> [<r>] mark as accepted with the chosen option;
-                                           <option> accepts the bullet text OR a 1-based index
-  supersede <new> <old> [<reason>]         bidirectional supersession
+  decide <id> <option-name-or-index> [<r>] [--force]
+                                           mark as accepted with the chosen option;
+                                           <option> accepts the bullet text OR a 1-based index.
+                                           --force overwrites an authored Decision Outcome.
+  supersede <new> <old> [<reason>] [--force]
+                                           bidirectional supersession
   comment <id> <text>                      append a comment; author from $ADR_AUTHOR or git
   tag <id> <tag>...                        add one or more tags
   link <src> <dst> <tag> [<rev>]           add a custom link, optional reverse tag
@@ -43,6 +46,11 @@ The body for `edit` is a complete MADR body with `## Context and Problem
 Statement`, `## Considered Options`, and `## Decision Outcome` sections.
 The H1 (`# <title>`) is optional — if omitted, adg prepends one from the
 decision's stored title.
+
+For decide/supersede, a leading non-flag positional is the rationale; any
+argument starting with `-` (e.g. --force) passes through to `adg`. So
+`adr decide 5 2 --force` (no rationale) and `adr decide 5 2 "why" --force`
+both work.
 
 For flag detail on any underlying command, see `adg <cmd> --help`.
 USAGE
@@ -67,23 +75,32 @@ case "$cmd" in
         adg edit --id "$id" --from-stdin --model "$MODEL" "$@"
         ;;
     decide)
-        id="${1:?usage: adr decide <id> <option> [<rationale>]}"
-        option="${2:?usage: adr decide <id> <option> [<rationale>]}"
-        rationale="${3:-}"
+        id="${1:?usage: adr decide <id> <option> [<rationale>] [adg flags...]}"
+        option="${2:?usage: adr decide <id> <option> [<rationale>] [adg flags...]}"
+        shift 2
+        # A leading non-flag positional is the rationale; the first '-' arg
+        # onward (e.g. --force) passes through to `adg decide`. This works
+        # whether or not a rationale is supplied.
+        rationale=""
+        if [[ $# -gt 0 && "$1" != -* ]]; then rationale="$1"; shift; fi
         if [[ -n "$rationale" ]]; then
-            adg decide --id "$id" --option "$option" --rationale "$rationale" --model "$MODEL"
+            adg decide --id "$id" --option "$option" --rationale "$rationale" --model "$MODEL" "$@"
         else
-            adg decide --id "$id" --option "$option" --model "$MODEL"
+            adg decide --id "$id" --option "$option" --model "$MODEL" "$@"
         fi
         ;;
     supersede)
-        new_id="${1:?usage: adr supersede <new> <old> [<rationale>]}"
-        old_id="${2:?usage: adr supersede <new> <old> [<rationale>]}"
-        rationale="${3:-}"
+        new_id="${1:?usage: adr supersede <new> <old> [<rationale>] [adg flags...]}"
+        old_id="${2:?usage: adr supersede <new> <old> [<rationale>] [adg flags...]}"
+        shift 2
+        # Same shape as decide: optional leading positional rationale, then
+        # any '-' flags pass through to `adg supersede`.
+        rationale=""
+        if [[ $# -gt 0 && "$1" != -* ]]; then rationale="$1"; shift; fi
         if [[ -n "$rationale" ]]; then
-            adg supersede --new "$new_id" --old "$old_id" --rationale "$rationale" --model "$MODEL"
+            adg supersede --new "$new_id" --old "$old_id" --rationale "$rationale" --model "$MODEL" "$@"
         else
-            adg supersede --new "$new_id" --old "$old_id" --model "$MODEL"
+            adg supersede --new "$new_id" --old "$old_id" --model "$MODEL" "$@"
         fi
         ;;
     comment)
