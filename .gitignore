@@ -30,6 +30,11 @@ testnotes.txt
 docs/archive/*
 !docs/archive/followups-resolved.md
 
+# Operator-local working area — us-specific material that must NOT hit the
+# public repo: SRC runbooks, bake checklists/notes, dev plans, scratch. Kept
+# in-tree because this is where we operate; never committed.
+docs/local/
+
 # Real-looking test fixtures kept on disk for ad-hoc development but
 # never committed. Synthetic-only fixtures are tracked under their own
 # subdirectories.
