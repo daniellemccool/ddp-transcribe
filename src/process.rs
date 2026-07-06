@@ -40,6 +40,10 @@ pub struct CommandOutcome {
     #[allow(dead_code)]
     pub stdout: Option<Vec<u8>>,
     pub stderr_excerpt: String,
+    /// Unix signal that killed the child, when it did not exit normally
+    /// (`ExitStatus::code() == None`). Distinguishes OOM-kill (SIGKILL)
+    /// from segfault (SIGSEGV) from operator interrupt (SIGINT).
+    pub signal: Option<i32>,
     #[allow(dead_code)]
     pub elapsed: Duration,
 }
@@ -67,20 +71,18 @@ pub enum RunError {
     },
 }
 
-// Plan A coarse mapping: Spawn (environmental, e.g. binary missing) and Io
-// (system pipe error) both map to NetworkError, which is semantically wrong.
-// Plan B's failure classification (RetryableKind / UnavailableReason) will
-// need to revisit this — see docs/FOLLOWUPS.md.
 impl From<RunError> for FetchError {
     fn from(err: RunError) -> Self {
         match err {
             RunError::Timeout { tool, duration } => FetchError::ToolTimeout { tool, duration },
-            RunError::Spawn { tool, source } => {
-                FetchError::NetworkError(format!("failed to spawn {tool}: {source}"))
-            }
-            RunError::Io { tool, source } => {
-                FetchError::NetworkError(format!("io error reading {tool} output: {source}"))
-            }
+            RunError::Spawn { tool, source } => FetchError::ToolNotFound {
+                tool,
+                detail: source.to_string(),
+            },
+            RunError::Io { tool, source } => FetchError::SystemIo {
+                tool,
+                detail: source.to_string(),
+            },
         }
     }
 }
@@ -196,11 +198,13 @@ pub async fn run(spec: CommandSpec<'_>) -> Result<CommandOutcome, RunError> {
 
     match result {
         Ok(Ok((stdout, stderr_bytes, status))) => {
-            // NOTE: `code()` is None when the child was killed by a signal; collapsing
-            // to -1 loses the signal number that failure classification will want.
-            // Reshaping CommandOutcome to carry the signal is deferred to Epic 3 and
-            // already tracked in docs/FOLLOWUPS.md (Epic 3, T6 "status.code().unwrap_or(-1)
-            // loses signal info").
+            #[cfg(unix)]
+            let signal = {
+                use std::os::unix::process::ExitStatusExt;
+                status.signal()
+            };
+            #[cfg(not(unix))]
+            let signal: Option<i32> = None;
             let exit_code = status.code().unwrap_or(-1);
             let stderr_excerpt = stderr_bytes
                 .map(|v| String::from_utf8_lossy(&v).into_owned())
@@ -210,6 +214,7 @@ pub async fn run(spec: CommandSpec<'_>) -> Result<CommandOutcome, RunError> {
                 exit_code,
                 stdout,
                 stderr_excerpt,
+                signal,
                 elapsed,
             })
         }
@@ -296,6 +301,30 @@ mod tests {
         match result {
             Err(RunError::Spawn { .. }) => {}
             other => panic!("expected Spawn error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_error_spawn_maps_to_tool_not_found() {
+        let e = RunError::Spawn {
+            tool: "yt-dlp",
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"),
+        };
+        match FetchError::from(e) {
+            FetchError::ToolNotFound { tool, .. } => assert_eq!(tool, "yt-dlp"),
+            other => panic!("Spawn must map to ToolNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_error_io_maps_to_system_io() {
+        let e = RunError::Io {
+            tool: "yt-dlp",
+            source: std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe"),
+        };
+        match FetchError::from(e) {
+            FetchError::SystemIo { tool, .. } => assert_eq!(tool, "yt-dlp"),
+            other => panic!("Io must map to SystemIo, got {other:?}"),
         }
     }
 }

@@ -85,12 +85,9 @@ impl VideoFetcher for YtDlpFetcher {
     async fn acquire(&self, video_id: &str, source_url: &str) -> Result<Acquisition, FetchError> {
         // Per-video tmp dir keeps yt-dlp's intermediate files contained.
         let video_dir = self.work_dir.join(format!("ytdlp-{video_id}"));
-        std::fs::create_dir_all(&video_dir).map_err(|e| {
-            FetchError::NetworkError(format!(
-                "creating yt-dlp work dir {}: {}",
-                video_dir.display(),
-                e
-            ))
+        std::fs::create_dir_all(&video_dir).map_err(|e| FetchError::WorkDirCreate {
+            path: video_dir.clone(),
+            detail: e.to_string(),
         })?;
 
         let (args, wav_path) = build_yt_dlp_args(video_id, source_url, &video_dir);
@@ -109,15 +106,13 @@ impl VideoFetcher for YtDlpFetcher {
             return Err(FetchError::ToolFailed {
                 tool: "yt-dlp",
                 exit_code: outcome.exit_code,
+                signal: outcome.signal,
                 stderr_excerpt: outcome.stderr_excerpt,
             });
         }
 
         if !wav_path.exists() {
-            return Err(FetchError::ParseError(format!(
-                "yt-dlp succeeded but expected file {} not found",
-                wav_path.display()
-            )));
+            return Err(FetchError::MissingOutput { path: wav_path });
         }
 
         Ok(Acquisition::AudioFile(wav_path))
