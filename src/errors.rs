@@ -36,14 +36,19 @@ pub enum FetchError {
     #[error("tool succeeded but expected output {path} is missing")]
     MissingOutput { path: std::path::PathBuf },
 
-    /// 0002: Deferred to Epic 3's failure-classification taxonomy; Task 03 will
-    /// dispatch network failures through RetryableKind.
+    // 0002: no production construction sites remain after Task 02's error
+    // split (WorkDirCreate/MissingOutput/ToolNotFound/SystemIo took over the
+    // acquire-path uses), but both variants are still constructed today by
+    // `FakeFetcher::acquire` (src/fetcher/mod.rs, gated
+    // `cfg(any(test, feature = "test-helpers"))`) — NetworkError for
+    // `always_fails`, ParseError for a missing canned response — backing the
+    // T9 continue-on-failure and T16 stale-after-failure pipeline tests.
+    // dead_code fires because cfg-gated construction doesn't count for the
+    // bin's dead-code analysis. Check FakeFetcher before reshaping these.
     #[allow(dead_code)]
     #[error("network error during fetch: {0}")]
     NetworkError(String),
 
-    /// 0002: Deferred to Epic 3's failure-classification taxonomy; Task 03 will
-    /// dispatch parse failures through UnavailableReason.
     #[allow(dead_code)]
     #[error("failed to parse fetcher output: {0}")]
     ParseError(String),
