@@ -45,7 +45,6 @@ lines 120-148.
 
 **Epic 2 (concurrent fetch + state-machine)**
 - T5-Epic1: Worker-side closed-reply path silently swallows error → Epic 2 (tracing context)
-- T16: `fetch_worker` cancellation latency bounded by largest await, not by `token.cancel()` → Epic 2 close OR Epic 3 graceful-shutdown
 - T17: sync `write_artifacts_and_mark` inside `tokio::sync::Mutex` guard inside async fn can stall under `TOKIO_WORKER_THREADS=1` → Epic 2 close OR Epic 5 ops-hygiene
 - Full Epic 2 entries: [followups/epic-2.md](followups/epic-2.md)
 
@@ -58,6 +57,8 @@ lines 120-148.
 - Epic2-review: `pipeline_fakes.rs` mixing concerns + over-narrated → Epic 3 (file split + strip phase comments)
 - Epic2-review: over-reliance on worker-level entry points in `pipeline_fakes` → Epic 3 (audit vs run_pipelined)
 - Tier5-deploy: real yt-dlp failure fixtures (10231 terminal; "IP blocked" NOT reliably retryable); share-link canonicalization hypothesis → Epic 3 (stderr capture + classifier corroboration)
+- T16-Epic2: `fetch_worker` cancellation latency bounded by largest await → Epic 3 (dispatch-rewiring task; claimed by spec b55783e)
+- Epic2-process: plan-brief library-API drift checklist → Epic 3 (plan expansion; adopted by spec b55783e)
 - Full Epic 3 entries: [followups/epic-3.md](followups/epic-3.md)
 
 **Epic 4 (operator-facing commands / timestamps)**
@@ -90,6 +91,5 @@ lines 120-148.
 - T13-Epic1: 0013 backend assertion must be `cfg(feature="cuda")`-gated → audited 2026-05-18, NOT confirmed; deferred to Epic 5 cleanup
 - T7-Epic1: Revisit `SamplingStrategy::Greedy { best_of }` after T13 bake → unscoped tuning followup (see also `bake-findings.md`)
 - T8-Epic1: Diagnostic log when `lang_detect`'s top id disagrees with primary inference → unscoped diagnostic (see also `bake-findings.md`)
-- T13/T19/T16-Epic2: plan-brief library-API drift → Epic 3 planning kickoff (checklist adoption)
 - T08-arch-docs: architecture doc-set drift detection → standing maintenance (revise matching deepdive + index.md §4 at each epic's planning time if it touches a covered surface)
 - Full cross-epic entries: [followups/cross-epic.md](followups/cross-epic.md)

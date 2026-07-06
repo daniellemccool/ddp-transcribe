@@ -243,6 +243,60 @@ split, the audit naturally happens during the split.
 
 ---
 
+### `fetch_worker` cancellation latency bounded by largest await, not by `token.cancel()`
+
+**Found in:** T16 codex review (Sonnet + codex-advisor delegation per 0018), surfaced again in T18 Opus deep review.
+**Disposition:** Claimed by the Epic 3 design spec (`docs/superpowers/specs/2026-07-07-epic-3-failure-classification-design.md`, b55783e) — rides along with the dispatch-rewiring task, fix option (a). Re-targeted from Epic 2 close scope.
+**Trigger to revisit:** Epic 3 dispatch-rewiring task expansion.
+
+`fetch_worker` polls `token.is_cancelled()` only at loop top. The hot
+await is `fetcher.acquire()` (multi-second; up to `cfg.ytdlp_timeout =
+300s` default). When `token.cancel()` fires, the worker continues until
+`acquire()` returns naturally. `CancellationToken::cancel()` does NOT
+drop the worker future; `kill_on_drop` on the yt-dlp subprocess only
+fires when the future is actually dropped.
+
+Two fix options for a future task:
+
+- **(a)** Wrap `fetcher.acquire()` in
+  `tokio::select! { _ = token.cancelled() => Err(Cancelled), r = fetcher.acquire(...) => r }`.
+  Mirrors T18 fixup's transcribe-side wrap (`a66d38b`). Future-drop fires
+  `kill_on_drop` on the subprocess.
+- **(b)** The orchestrator's first-error path could call
+  `join_set.abort_all()` after a grace period to force future-drop.
+  Faster but loses graceful-cleanup chance for in-flight fetches.
+
+Worst-case observable: ~5 min shutdown latency on Bug-class errors with
+stuck fetches. Best case: <100ms.
+
+---
+
+### Plan-brief library-API drift (T13/T19/T16 caught at implementation time)
+
+**Found in:** T13 (`features = ["sync"]`), T19 (`clap::value_parser!(usize).range(1..)`), T16 (stale-test design via pre-claim with different worker_id) — three consecutive Phase 2 tasks where the plan-brief's library-API claim or test-design suggestion didn't match the actually-installed crate behavior, requiring the implementer to detect, deviate, and disclose per ADR 0003.
+**Disposition:** Adopted by the Epic 3 design spec (b55783e) as plan-write-time discipline. Re-targeted from cross-epic. Archive once the checklist has demonstrably been applied during Epic 3's plan expansion.
+**Trigger to revisit:** Epic 3 plan expansion (apply the checklist below to every task brief).
+
+Pattern: plan authors assume APIs based on memory or older crate versions.
+Three independent catches in one epic suggests the plan-write-time checklist
+should include a "verify each library-API claim against the actually-installed
+crate version" step.
+
+Suggested forms:
+
+- During plan write, run `cargo doc --open` for each library mentioned and
+  spot-check the actual API surface.
+- For `Cargo.toml` claims (features, exact versions), check `Cargo.lock` for
+  the resolved version + read its `Cargo.toml` from the cargo registry
+  (`~/.cargo/registry/src/`).
+- For test-design suggestions, hand-trace the production code semantics
+  (caller ownership, predicate conditions) before publishing the suggested test.
+
+Epic 3 planning should adopt this checklist; treat as project-level discipline
+alongside ADR 0003's deviation-honesty norm.
+
+---
+
 ### `From<AudioDecodeError> for TranscribeError` maps to Bug for Epic 1 fail-fast
 
 **Found in:** T5 (engine shell) — codex-advisor code-quality review.

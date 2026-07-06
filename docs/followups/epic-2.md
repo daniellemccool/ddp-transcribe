@@ -24,34 +24,6 @@ caller is visible in logs.
 
 ---
 
-### `fetch_worker` cancellation latency bounded by largest await, not by `token.cancel()`
-
-**Found in:** T16 codex review (Sonnet + codex-advisor delegation per 0018), surfaced again in T18 Opus deep review.
-**Disposition:** Phase 2 close scope OR Epic 3 graceful-shutdown work.
-**Trigger to revisit:** If operator-observable shutdown latency on Bug-class errors becomes a complaint, OR when Epic 3's failure-classification work touches `fetch_worker`.
-
-`fetch_worker` polls `token.is_cancelled()` only at loop top. The hot
-await is `fetcher.acquire()` (multi-second; up to `cfg.ytdlp_timeout =
-300s` default). When `token.cancel()` fires, the worker continues until
-`acquire()` returns naturally. `CancellationToken::cancel()` does NOT
-drop the worker future; `kill_on_drop` on the yt-dlp subprocess only
-fires when the future is actually dropped.
-
-Two fix options for a future task:
-
-- **(a)** Wrap `fetcher.acquire()` in
-  `tokio::select! { _ = token.cancelled() => Err(Cancelled), r = fetcher.acquire(...) => r }`.
-  Mirrors T18 fixup's transcribe-side wrap (`a66d38b`). Future-drop fires
-  `kill_on_drop` on the subprocess.
-- **(b)** The orchestrator's first-error path could call
-  `join_set.abort_all()` after a grace period to force future-drop.
-  Faster but loses graceful-cleanup chance for in-flight fetches.
-
-Worst-case observable: ~5 min shutdown latency on Bug-class errors with
-stuck fetches. Best case: <100ms.
-
----
-
 ### sync `write_artifacts_and_mark` inside `tokio::sync::Mutex` guard inside async fn can stall under `TOKIO_WORKER_THREADS=1`
 
 **Found in:** T17 codex review.
