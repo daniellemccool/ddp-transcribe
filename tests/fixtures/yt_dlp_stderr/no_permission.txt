@@ -1,0 +1,2 @@
+fetching 7441650893101026593: subprocess `yt-dlp` exited with status 1: ERROR: [TikTok] 7441650893101026593: You do not have permission to view this post. Log into an account that has access. Use --cookies-from-browser or --cookies for the authentication. See  https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp  for how to manually pass cookies
+

@@ -8,6 +8,7 @@
 pub mod audio;
 pub mod canonical;
 pub mod errors;
+pub mod failure;
 pub mod fetcher;
 pub mod ingest;
 pub mod output;

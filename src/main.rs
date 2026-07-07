@@ -9,6 +9,7 @@ mod canonical;
 mod cli;
 mod config;
 mod errors;
+mod failure;
 mod fetcher;
 mod ingest;
 mod output;
