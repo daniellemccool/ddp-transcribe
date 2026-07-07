@@ -30,6 +30,7 @@ pub enum Disposition {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawRule {
     pattern: String,
     label: String,
@@ -37,6 +38,7 @@ struct RawRule {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawFallback {
     label: String,
     disposition: Disposition,
@@ -95,7 +97,7 @@ impl ClassificationTable {
         }
         let mut by_label: HashMap<String, Disposition> = HashMap::new();
         for (i, r) in raw.rules.iter().enumerate() {
-            if r.pattern.is_empty() {
+            if r.pattern.trim().is_empty() {
                 bail!("classification: rule {} has an empty pattern", i + 1);
             }
             if r.label.trim().is_empty() {
@@ -109,6 +111,15 @@ impl ClassificationTable {
                         r.disposition
                     );
                 }
+            }
+        }
+        if let Some(&prev) = by_label.get(&raw.fallback.label) {
+            if prev != raw.fallback.disposition {
+                bail!(
+                    "classification: fallback label {:?} maps to two dispositions ({prev:?} vs {:?})",
+                    raw.fallback.label,
+                    raw.fallback.disposition
+                );
             }
         }
         by_label
@@ -427,6 +438,45 @@ disposition = "terminal"
              [[rule]]\npattern = \"p\"\nlabel = \"X\"\ndisposition = \"retryable\"\n"
         )
         .is_err());
+        // Whitespace-only pattern (first-match-wins poison: it would shadow
+        // every later rule for any message containing a space).
+        assert!(ClassificationTable::from_toml_str(&base(
+            "[[rule]]\npattern = \"   \"\nlabel = \"X\"\ndisposition = \"retryable\"\n"
+        ))
+        .is_err());
+        // Unknown field inside a [[rule]] (a misspelled key must not be
+        // silently dropped).
+        assert!(ClassificationTable::from_toml_str(&base(
+            "[[rule]]\npattern = \"p\"\nlabel = \"X\"\ndisposition = \"retryable\"\npriority = 1\n"
+        ))
+        .is_err());
+        // Unknown field inside the fallback block.
+        assert!(ClassificationTable::from_toml_str(
+            "schema = 1\nfallback = { label = \"F\", disposition = \"retryable\", extra = 1 }\n\
+             [[rule]]\npattern = \"p\"\nlabel = \"X\"\ndisposition = \"retryable\"\n"
+        )
+        .is_err());
+        // Fallback label collides with a rule label under a DIFFERENT
+        // disposition — disposition_of() would disagree with what classify()
+        // returns for unmatched messages.
+        assert!(ClassificationTable::from_toml_str(
+            "schema = 1\nfallback = { label = \"X\", disposition = \"retryable\" }\n\
+             [[rule]]\npattern = \"p\"\nlabel = \"X\"\ndisposition = \"terminal\"\n"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn fallback_label_shared_with_same_disposition_rule_is_accepted() {
+        // Same label, SAME disposition: accepted — and disposition_of()
+        // resolves the fallback label consistently with classify().
+        let t = ClassificationTable::from_toml_str(
+            "schema = 1\nfallback = { label = \"X\", disposition = \"retryable\" }\n\
+             [[rule]]\npattern = \"p\"\nlabel = \"X\"\ndisposition = \"retryable\"\n",
+        )
+        .expect("same-disposition duplicate must be accepted");
+        assert_eq!(t.disposition_of("X"), Some(Disposition::Retryable));
+        assert_eq!(t.classify("no match here").label, "X");
     }
 
     #[test]
