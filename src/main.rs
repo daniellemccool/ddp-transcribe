@@ -73,6 +73,7 @@ async fn main() -> Result<()> {
         cli::Command::Process {
             max_videos,
             cookies_file,
+            retries,
         } => {
             let store = state::Store::open(&cfg.state_db).context("opening state DB")?;
             std::fs::create_dir_all(&cfg.transcripts).context("creating transcripts dir")?;
@@ -119,12 +120,29 @@ async fn main() -> Result<()> {
             );
             let shared: pipeline::SharedStore = std::sync::Arc::new(tokio::sync::Mutex::new(store));
 
-            // Epic 4a: the active classification policy. `--classification`
-            // file override arrives in Task 06 — compiled default only here.
-            let classification = std::sync::Arc::new(
-                classification::ClassificationTable::compiled_default()
-                    .context("loading classification policy")?,
+            // Epic 4a: the active classification policy — the operator's
+            // `--classification` TOML (validated, hard-fail) or the
+            // evidence-derived compiled default.
+            let table = match &cfg.classification_path {
+                Some(p) => {
+                    let text = std::fs::read_to_string(p)
+                        .with_context(|| format!("reading classification file {}", p.display()))?;
+                    classification::ClassificationTable::from_toml_str(&text).with_context(
+                        || format!("validating classification file {}", p.display()),
+                    )?
+                }
+                None => classification::ClassificationTable::compiled_default()
+                    .context("loading compiled-default classification policy")?,
+            };
+            tracing::info!(
+                source = %cfg.classification_path.as_deref().map_or_else(
+                    || "compiled-default".to_string(),
+                    |p| p.display().to_string()
+                ),
+                rules = table.rule_count(),
+                "classification policy active"
             );
+            let classification = std::sync::Arc::new(table);
 
             let opts = pipeline::ProcessOptions {
                 worker_id: format!("{}-{}", hostname_or_default(), std::process::id()),
@@ -137,6 +155,7 @@ async fn main() -> Result<()> {
                 channel_capacity: cfg.channel_capacity,
                 cookies_file,
                 classification: std::sync::Arc::clone(&classification),
+                retries,
             };
 
             // ────────────────────────────────────────────────────────────
@@ -195,6 +214,10 @@ async fn main() -> Result<()> {
                 // see them in the process-complete line.
                 stale_after_success = stats.stale_after_success,
                 stale_after_failure = stats.stale_after_failure,
+                // Epic 4a: capped-retry outcome counters.
+                requeued_for_retry = stats.requeued_for_retry,
+                exhausted_retries = stats.exhausted_retries,
+                parked_for_cookies = stats.parked_for_cookies,
                 "process complete"
             );
             if stats.claimed == 0 {

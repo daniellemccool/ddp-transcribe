@@ -45,6 +45,11 @@ pub struct GlobalArgs {
     #[arg(long, env = "DDP_TRANSCRIBE_WHISPER_MODEL")]
     pub whisper_model: Option<PathBuf>,
 
+    /// Path to a classification-policy TOML (Epic 4a). Absent → the
+    /// evidence-derived compiled default.
+    #[arg(long, env = "DDP_TRANSCRIBE_CLASSIFICATION")]
+    pub classification: Option<PathBuf>,
+
     /// Compute per-language probability distribution per video.
     /// Costs one extra encoder pass per video; default false.
     #[arg(long, env = "DDP_TRANSCRIBE_COMPUTE_LANG_PROBS", global = true)]
@@ -99,6 +104,10 @@ pub enum Command {
         /// sensitive/login-gated videos (ADR 0035). Never sent on first attempts.
         #[arg(long, env = "DDP_TRANSCRIBE_COOKIES_FILE")]
         cookies_file: Option<PathBuf>,
+        /// Automatic in-batch retry budget per video (lifetime attempts =
+        /// retries + 1). Default 1.
+        #[arg(long, default_value_t = 1)]
+        retries: i64,
     },
     /// Upgrade a pre-Epic-2 (v1) state.sqlite to the current schema version.
     /// Idempotent: no-op if already at the current version.

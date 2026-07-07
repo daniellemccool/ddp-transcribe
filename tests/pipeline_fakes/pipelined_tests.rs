@@ -46,6 +46,7 @@ async fn run_pipelined_honors_max_videos_cap() -> anyhow::Result<()> {
         first_call_gate: tokio::sync::Mutex::new(None),
         canned_stderr: std::sync::Mutex::new(None),
         received_opts: std::sync::Mutex::new(Vec::new()),
+        fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
     let transcriber: Arc<dyn Transcriber> = Arc::new(FakeTranscriber::echo());
 
@@ -63,6 +64,7 @@ async fn run_pipelined_honors_max_videos_cap() -> anyhow::Result<()> {
             ddp_transcribe::classification::ClassificationTable::compiled_default()
                 .expect("default table"),
         ),
+        retries: 1,
     };
 
     let stats = run_pipelined(Arc::clone(&shared), fetcher, transcriber, opts).await?;
@@ -129,6 +131,7 @@ async fn run_pipelined_drains_all_rows_and_returns_stats() -> anyhow::Result<()>
         first_call_gate: tokio::sync::Mutex::new(None),
         canned_stderr: std::sync::Mutex::new(None),
         received_opts: std::sync::Mutex::new(Vec::new()),
+        fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
     let transcriber: Arc<dyn Transcriber> = Arc::new(FakeTranscriber::echo());
 
@@ -146,6 +149,7 @@ async fn run_pipelined_drains_all_rows_and_returns_stats() -> anyhow::Result<()>
             ddp_transcribe::classification::ClassificationTable::compiled_default()
                 .expect("default table"),
         ),
+        retries: 1,
     };
 
     let stats = run_pipelined(Arc::clone(&shared), fetcher, transcriber, opts).await?;

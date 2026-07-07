@@ -53,6 +53,7 @@ async fn transcribe_worker_processes_one_item_then_exits_on_channel_close() -> a
             ddp_transcribe::classification::ClassificationTable::compiled_default()
                 .expect("default table"),
         ),
+        retries: 1,
     };
 
     let (tx, rx) = mpsc::channel::<FetchedItem>(2);
@@ -84,6 +85,9 @@ async fn transcribe_worker_processes_one_item_then_exits_on_channel_close() -> a
         Arc::clone(&shared),
         Arc::clone(&stats_stale_after_failure),
         Arc::clone(&stats_stale_after_success),
+        Arc::new(AtomicUsize::new(0)), // requeued_for_retry
+        Arc::new(AtomicUsize::new(0)), // exhausted_retries
+        Arc::new(AtomicUsize::new(0)), // parked_for_cookies
         Arc::new(opts),
     ));
 
@@ -159,6 +163,7 @@ async fn transcribe_worker_exits_on_cancellation() -> anyhow::Result<()> {
             ddp_transcribe::classification::ClassificationTable::compiled_default()
                 .expect("default table"),
         ),
+        retries: 1,
     };
 
     let (_tx, rx) = mpsc::channel::<FetchedItem>(2);
@@ -170,6 +175,9 @@ async fn transcribe_worker_exits_on_cancellation() -> anyhow::Result<()> {
         Arc::clone(&shared),
         Arc::clone(&stats_stale_after_failure),
         Arc::clone(&stats_stale_after_success),
+        Arc::new(AtomicUsize::new(0)), // requeued_for_retry
+        Arc::new(AtomicUsize::new(0)), // exhausted_retries
+        Arc::new(AtomicUsize::new(0)), // parked_for_cookies
         Arc::new(opts),
     ));
 
@@ -246,6 +254,7 @@ async fn transcribe_worker_increments_stale_after_failure_on_swept_claim() -> an
             ddp_transcribe::classification::ClassificationTable::compiled_default()
                 .expect("default table"),
         ),
+        retries: 1,
     };
 
     let (tx, rx) = mpsc::channel::<FetchedItem>(2);
@@ -272,6 +281,9 @@ async fn transcribe_worker_increments_stale_after_failure_on_swept_claim() -> an
         Arc::clone(&shared),
         Arc::clone(&stats_stale_after_failure),
         Arc::clone(&stats_stale_after_success),
+        Arc::new(AtomicUsize::new(0)), // requeued_for_retry
+        Arc::new(AtomicUsize::new(0)), // exhausted_retries
+        Arc::new(AtomicUsize::new(0)), // parked_for_cookies
         Arc::new(opts),
     ));
 

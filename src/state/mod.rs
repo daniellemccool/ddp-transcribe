@@ -305,8 +305,9 @@ pub struct Claim {
 
 /// Outcome of `record_fetch_failure`'s one-transaction decision (Epic 4a):
 /// where did the failed row land, and did anything change at all.
-// 0002: consumed by Epic 4a T06 (worker dispatch); lift when it lands.
-#[allow(dead_code)]
+// 0002: `#[allow(dead_code)]` lifted in Epic 4a T06 — the pipelined workers
+// (via the shared record-failure helper) and `record_fetch_failure_serial`
+// match on every variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureRecordOutcome {
     /// Row went back to 'pending' (end of queue via T05 ordering).
@@ -473,6 +474,14 @@ impl Store {
     // T9 wired this into `run_serial`'s error arm with a placeholder kind
     // ("FetchOrTranscribe" per 0023); Epic 3 T07 replaced the placeholder
     // with typed classifier dispatch (`RetryableKind::tag()`).
+    //
+    // 0002: Epic 4a T06 switched every pipeline caller (fetch_worker,
+    // transcribe_worker, run_serial) to `record_fetch_failure`, so the bin
+    // no longer reaches this mutator. Integration tests
+    // (`tests/state_claims.rs`, `tests/triage.rs`, `tests/state_triage.rs`)
+    // still exercise it directly, hence dead_code-suppressed rather than
+    // deleted; revisit at the Epic 4a triage retirement (Task 08).
+    #[allow(dead_code)]
     pub fn mark_retryable_failure(
         &mut self,
         video_id: &str,
@@ -537,8 +546,9 @@ impl Store {
     /// 0006 note: the `Result<usize>` row-count contract is honored
     /// internally — each UPDATE's row count drives the outcome; the typed
     /// enum IS the row-count information, made unambiguous for the caller.
-    // 0002: consumed by Epic 4a T06 (worker dispatch); lift when it lands.
-    #[allow(dead_code)]
+    // 0002: `#[allow(dead_code)]` lifted in Epic 4a T06 — first callers:
+    // fetch_worker + transcribe_worker (via the shared pipelined
+    // record-failure helper) and run_serial's `record_fetch_failure_serial`.
     #[allow(clippy::too_many_arguments)] // one logical decision; every arg participates
     pub fn record_fetch_failure(
         &mut self,

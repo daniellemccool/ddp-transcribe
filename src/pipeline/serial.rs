@@ -14,7 +14,7 @@ use super::{
 use crate::errors::TranscribeError;
 use crate::failure::{classify_transcribe_error, labels, ClassifiedFailure};
 use crate::fetcher::VideoFetcher;
-use crate::state::{Claim, Store};
+use crate::state::{Claim, FailureRecordOutcome, Store};
 use crate::transcribe::Transcriber;
 
 // 0002: T18 swapped main.rs's Process arm to `run_pipelined`, so this
@@ -98,6 +98,8 @@ pub async fn run_serial(
                             .with_context(|| {
                                 format!("mark_terminal_failure for {}", claim.video_id)
                             })?;
+                        // Epic 4a: run-side terminal-by-label census.
+                        *stats.terminal_by_label.entry(label.clone()).or_insert(0) += 1;
                     }
                     Some(ClassifiedFailure::Bug { ctx }) => {
                         return Err(anyhow!(
@@ -106,22 +108,20 @@ pub async fn run_serial(
                             ctx.message()
                         ));
                     }
-                    // Epic 4a T06 consumes requires_cookie via record_fetch_failure.
                     Some(ClassifiedFailure::Retryable {
                         label,
-                        requires_cookie: _,
+                        requires_cookie,
                         ctx,
                     }) => {
-                        store
-                            .mark_retryable_failure(
-                                &claim.video_id,
-                                &opts.worker_id,
-                                &label,
-                                &ctx.message(),
-                            )
-                            .with_context(|| {
-                                format!("mark_retryable_failure for {}", claim.video_id)
-                            })?;
+                        record_fetch_failure_serial(
+                            store,
+                            &mut stats,
+                            &claim,
+                            &opts,
+                            &label,
+                            &ctx.message(),
+                            requires_cookie,
+                        )?;
                     }
                     None => {
                         // Not a fetch-phase error — transcribe-side anyhow.
@@ -148,38 +148,35 @@ pub async fn run_serial(
                             Some(ClassifiedFailure::Unavailable { .. }) => {
                                 unreachable!("classify_transcribe_error never produces Unavailable")
                             }
-                            // Epic 4a T06 consumes requires_cookie via record_fetch_failure.
                             Some(ClassifiedFailure::Retryable {
                                 label,
-                                requires_cookie: _,
+                                requires_cookie,
                                 ctx,
                             }) => {
-                                store
-                                    .mark_retryable_failure(
-                                        &claim.video_id,
-                                        &opts.worker_id,
-                                        &label,
-                                        &ctx.message(),
-                                    )
-                                    .with_context(|| {
-                                        format!("mark_retryable_failure for {}", claim.video_id)
-                                    })?;
+                                record_fetch_failure_serial(
+                                    store,
+                                    &mut stats,
+                                    &claim,
+                                    &opts,
+                                    &label,
+                                    &ctx.message(),
+                                    requires_cookie,
+                                )?;
                             }
                             None => {
                                 // Genuinely unclassifiable chain (neither a
                                 // FetchPhaseError nor a TranscribeError root)
                                 // — default-cautious.
                                 let msg = format!("{e:#}");
-                                store
-                                    .mark_retryable_failure(
-                                        &claim.video_id,
-                                        &opts.worker_id,
-                                        labels::TRANSCRIBE_OTHER,
-                                        &msg,
-                                    )
-                                    .with_context(|| {
-                                        format!("mark_retryable_failure for {}", claim.video_id)
-                                    })?;
+                                record_fetch_failure_serial(
+                                    store,
+                                    &mut stats,
+                                    &claim,
+                                    &opts,
+                                    labels::TRANSCRIBE_OTHER,
+                                    &msg,
+                                    false,
+                                )?;
                             }
                         }
                     }
@@ -189,6 +186,51 @@ pub async fn run_serial(
     }
 
     Ok(stats)
+}
+
+/// Serial-path `record_fetch_failure` dispatch + local-stats increment.
+///
+/// The pipelined workers share `pipelined.rs`'s atomic-counter helper, but
+/// `run_serial` aggregates into direct [`ProcessStats`] fields (no atomics),
+/// so it keeps its own copy per the adjudicated review decision — the two
+/// mechanisms don't share a counter shape. Outcome→field mapping matches the
+/// pipelined helper: `Requeued`/`Exhausted`/`ParkedForCookies` bump the named
+/// counter; `StaleClaim` bumps `stale_after_failure` (+ warn) — nothing was
+/// recorded, symmetric to the success-side stale routing.
+fn record_fetch_failure_serial(
+    store: &mut Store,
+    stats: &mut ProcessStats,
+    claim: &Claim,
+    opts: &ProcessOptions,
+    label: &str,
+    message: &str,
+    requires_cookie: bool,
+) -> Result<()> {
+    let outcome = store
+        .record_fetch_failure(
+            &claim.video_id,
+            &opts.worker_id,
+            label,
+            message,
+            opts.retries + 1,
+            requires_cookie,
+            opts.cookies_file.is_some(),
+        )
+        .with_context(|| format!("record_fetch_failure for {}", claim.video_id))?;
+    match outcome {
+        FailureRecordOutcome::Requeued => stats.requeued_for_retry += 1,
+        FailureRecordOutcome::Exhausted => stats.exhausted_retries += 1,
+        FailureRecordOutcome::ParkedForCookies => stats.parked_for_cookies += 1,
+        FailureRecordOutcome::StaleClaim => {
+            stats.stale_after_failure += 1;
+            tracing::warn!(
+                worker = %opts.worker_id,
+                video_id = claim.video_id.as_str(),
+                "record_fetch_failure: stale claim (swept + re-claimed elsewhere)"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Drive a single claim through phases 1-4. Thin caller over the shared
@@ -288,6 +330,7 @@ mod tests {
             first_call_gate: tokio::sync::Mutex::new(None),
             canned_stderr: Mutex::new(None),
             received_opts: Mutex::new(Vec::new()),
+            fail_first_n: Mutex::new(HashMap::new()),
         };
         let transcriber = ScriptedTranscriber {
             output: TranscribeOutput {
@@ -332,6 +375,7 @@ mod tests {
                 crate::classification::ClassificationTable::compiled_default()
                     .expect("default table"),
             ),
+            retries: 1,
         };
 
         // Use the same Claim returned by claim_next — process_one needs

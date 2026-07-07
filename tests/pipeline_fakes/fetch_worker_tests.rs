@@ -49,6 +49,7 @@ async fn fetch_worker_drains_pending_rows_and_exits() -> anyhow::Result<()> {
         first_call_gate: tokio::sync::Mutex::new(None),
         canned_stderr: std::sync::Mutex::new(None),
         received_opts: std::sync::Mutex::new(Vec::new()),
+        fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
     };
 
     let shared: SharedStore = Arc::new(TokioMutex::new(store));
@@ -70,6 +71,7 @@ async fn fetch_worker_drains_pending_rows_and_exits() -> anyhow::Result<()> {
             ddp_transcribe::classification::ClassificationTable::compiled_default()
                 .expect("default table"),
         ),
+        retries: 1,
     };
 
     let worker_handle = tokio::spawn(fetch_worker(
@@ -78,6 +80,10 @@ async fn fetch_worker_drains_pending_rows_and_exits() -> anyhow::Result<()> {
         Arc::new(fetcher),
         tx,
         Arc::clone(&stats_stale_after_failure),
+        Arc::new(AtomicUsize::new(0)), // requeued_for_retry
+        Arc::new(AtomicUsize::new(0)), // exhausted_retries
+        Arc::new(AtomicUsize::new(0)), // parked_for_cookies
+        Arc::new(tokio::sync::Mutex::new(std::collections::BTreeMap::new())), // terminal_by_label
         Arc::clone(&claims_counter),
         Arc::new(opts),
     ));
@@ -168,6 +174,7 @@ async fn fetch_worker_increments_stale_after_failure_on_swept_claim() -> anyhow:
             ddp_transcribe::classification::ClassificationTable::compiled_default()
                 .expect("default table"),
         ),
+        retries: 1,
     };
 
     let counter_handle = Arc::clone(&stats_stale_after_failure);
@@ -178,6 +185,10 @@ async fn fetch_worker_increments_stale_after_failure_on_swept_claim() -> anyhow:
         Arc::new(fetcher),
         tx,
         counter_handle,
+        Arc::new(AtomicUsize::new(0)), // requeued_for_retry
+        Arc::new(AtomicUsize::new(0)), // exhausted_retries
+        Arc::new(AtomicUsize::new(0)), // parked_for_cookies
+        Arc::new(tokio::sync::Mutex::new(std::collections::BTreeMap::new())), // terminal_by_label
         Arc::clone(&claims_counter),
         Arc::new(opts),
     ));
@@ -317,6 +328,7 @@ async fn fetch_worker_threads_cookies_on_sensitive_login_gated_retry() -> anyhow
         first_call_gate: tokio::sync::Mutex::new(None),
         canned_stderr: std::sync::Mutex::new(None),
         received_opts: std::sync::Mutex::new(Vec::new()),
+        fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
 
     let (tx, mut rx) = mpsc::channel::<FetchedItem>(2);
@@ -334,6 +346,7 @@ async fn fetch_worker_threads_cookies_on_sensitive_login_gated_retry() -> anyhow
             ddp_transcribe::classification::ClassificationTable::compiled_default()
                 .expect("default table"),
         ),
+        retries: 1,
     });
 
     let worker = tokio::spawn(fetch_worker(
@@ -341,8 +354,12 @@ async fn fetch_worker_threads_cookies_on_sensitive_login_gated_retry() -> anyhow
         store.clone(),
         Arc::clone(&fetcher) as Arc<dyn VideoFetcher>,
         tx,
-        Arc::new(AtomicUsize::new(0)),
-        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)), // stale_after_failure
+        Arc::new(AtomicUsize::new(0)), // requeued_for_retry
+        Arc::new(AtomicUsize::new(0)), // exhausted_retries
+        Arc::new(AtomicUsize::new(0)), // parked_for_cookies
+        Arc::new(tokio::sync::Mutex::new(std::collections::BTreeMap::new())), // terminal_by_label
+        Arc::new(AtomicUsize::new(0)), // claims_counter
         opts,
     ));
 
@@ -357,5 +374,269 @@ async fn fetch_worker_threads_cookies_on_sensitive_login_gated_retry() -> anyhow
         "cookies must ride on the SensitiveLoginGated retry"
     );
 
+    Ok(())
+}
+
+/// Epic 4a T06: a retryable fetch failure requeues the row to 'pending'
+/// (end of queue, T05 ordering) and the SAME batch re-claims and recovers
+/// it. `fails_n_times_then_succeeds(1, ..)` fails once with a NoDataBlocks
+/// (retryable) stderr, then returns the canned WAV. With `retries: 1` the
+/// lifetime cap is 2 attempts, so the requeue is allowed and the recovery
+/// lands in-batch. Driven through `run_pipelined` (the retry loop needs the
+/// full claim→fail→requeue→re-claim→succeed cycle; `download_workers: 1`
+/// keeps it deterministic).
+#[tokio::test]
+async fn retry_requeues_then_recovers_in_same_batch() -> anyhow::Result<()> {
+    use std::sync::Arc;
+    use tokio::sync::Mutex as TokioMutex;
+
+    use ddp_transcribe::pipeline::{run_pipelined, ProcessOptions, SharedStore};
+    use ddp_transcribe::transcribe::Transcriber;
+
+    use crate::fakes::{fails_n_times_then_succeeds, FakeTranscriber};
+
+    let tmp = TempDir::new()?;
+    std::fs::create_dir_all(tmp.path().join("transcripts"))?;
+
+    let mut store = Store::open(&tmp.path().join("state.sqlite"))?;
+    store.upsert_video("vid_a", "https://example/a", false)?;
+    let wav = tmp.path().join("vid_a.wav");
+    std::fs::copy(silence_fixture(), &wav)?;
+    drop(store);
+
+    let store = Store::open(&tmp.path().join("state.sqlite"))?;
+    let shared: SharedStore = Arc::new(TokioMutex::new(store));
+    let fetcher = Arc::new(fails_n_times_then_succeeds(
+        1,
+        "vid_a",
+        wav,
+        "ERROR: [TikTok] vid_a: Did not get any data blocks; please try again later.",
+    ));
+    let transcriber: Arc<dyn Transcriber> = Arc::new(FakeTranscriber::echo());
+
+    let opts = ProcessOptions {
+        worker_id: "orchestrator".into(),
+        transcripts_root: tmp.path().join("transcripts"),
+        max_videos: None,
+        compute_lang_probs: false,
+        transcribe_timeout: Duration::from_secs(5),
+        stale_claim_threshold: Duration::from_secs(60),
+        download_workers: 1,
+        channel_capacity: 2,
+        cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
+        retries: 1,
+    };
+
+    let stats = run_pipelined(Arc::clone(&shared), fetcher, transcriber, opts).await?;
+    assert_eq!(stats.requeued_for_retry, 1, "one in-batch requeue");
+    assert_eq!(stats.succeeded, 1, "row recovered on the retry");
+
+    let guard = shared.lock().await;
+    let row = guard.get_video_for_test("vid_a")?.expect("row");
+    assert_eq!(row.status, "succeeded");
+    assert_eq!(row.attempt_count, 2, "two real attempts: fail then succeed");
+    Ok(())
+}
+
+/// Epic 4a T06: a retryable failure that never clears exhausts the lifetime
+/// attempt cap and lands in `failed_retryable` (the "exhausted, adjudicate"
+/// pool). `fails_n_times_then_succeeds(5, ..)` under `retries: 1` (cap = 2)
+/// gets exactly two real attempts — one requeue, then the cap-exhausted
+/// park — never reaching the 3rd scripted failure.
+#[tokio::test]
+async fn retry_exhausts_into_failed_retryable() -> anyhow::Result<()> {
+    use std::sync::Arc;
+    use tokio::sync::Mutex as TokioMutex;
+
+    use ddp_transcribe::pipeline::{run_pipelined, ProcessOptions, SharedStore};
+    use ddp_transcribe::transcribe::Transcriber;
+
+    use crate::fakes::{fails_n_times_then_succeeds, FakeTranscriber};
+
+    let tmp = TempDir::new()?;
+    std::fs::create_dir_all(tmp.path().join("transcripts"))?;
+
+    let mut store = Store::open(&tmp.path().join("state.sqlite"))?;
+    store.upsert_video("vid_a", "https://example/a", false)?;
+    let wav = tmp.path().join("vid_a.wav");
+    std::fs::copy(silence_fixture(), &wav)?;
+    drop(store);
+
+    let store = Store::open(&tmp.path().join("state.sqlite"))?;
+    let shared: SharedStore = Arc::new(TokioMutex::new(store));
+    let fetcher = Arc::new(fails_n_times_then_succeeds(
+        5,
+        "vid_a",
+        wav,
+        "ERROR: [TikTok] vid_a: Did not get any data blocks; please try again later.",
+    ));
+    let transcriber: Arc<dyn Transcriber> = Arc::new(FakeTranscriber::echo());
+
+    let opts = ProcessOptions {
+        worker_id: "orchestrator".into(),
+        transcripts_root: tmp.path().join("transcripts"),
+        max_videos: None,
+        compute_lang_probs: false,
+        transcribe_timeout: Duration::from_secs(5),
+        stale_claim_threshold: Duration::from_secs(60),
+        download_workers: 1,
+        channel_capacity: 2,
+        cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
+        retries: 1,
+    };
+
+    let stats = run_pipelined(Arc::clone(&shared), fetcher, transcriber, opts).await?;
+    assert_eq!(stats.requeued_for_retry, 1, "one requeue before exhaustion");
+    assert_eq!(
+        stats.exhausted_retries, 1,
+        "second failure exhausts the cap"
+    );
+    assert_eq!(stats.succeeded, 0);
+
+    let guard = shared.lock().await;
+    let row = guard.get_video_for_test("vid_a")?.expect("row");
+    assert_eq!(row.status, "failed_retryable");
+    assert_eq!(
+        row.attempt_count, 2,
+        "cap honored: exactly two attempts, never the 3rd scripted failure"
+    );
+    Ok(())
+}
+
+/// Epic 4a T06: a `requires-cookie` (SensitiveLoginGated) failure with no
+/// cookies configured PARKS the row in `failed_retryable` without burning
+/// retry budget (a cookie-less retry is a guaranteed refail). A follow-up
+/// run with `--cookies-file` re-claims the parked row (seeded back to
+/// pending, kind preserved) and the fetcher records the cookie path attached
+/// on that retry claim (ADR 0035 kind gate).
+#[tokio::test]
+async fn requires_cookie_parks_without_cookies_and_requeues_with() -> anyhow::Result<()> {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
+    use tokio::sync::Mutex as TokioMutex;
+
+    use ddp_transcribe::fetcher::VideoFetcher;
+    use ddp_transcribe::pipeline::{run_pipelined, ProcessOptions, SharedStore};
+    use ddp_transcribe::transcribe::Transcriber;
+
+    use crate::fakes::FakeTranscriber;
+
+    let sensitive = "ERROR: [TikTok] vid_a: This post may not be comfortable for some \
+         audiences. Log in for access. Use --cookies-from-browser or --cookies for the \
+         authentication.";
+
+    let tmp = TempDir::new()?;
+    std::fs::create_dir_all(tmp.path().join("transcripts"))?;
+    let db = tmp.path().join("state.sqlite");
+
+    let mut store = Store::open(&db)?;
+    store.upsert_video("vid_a", "https://example/a", false)?;
+    drop(store);
+
+    let table = || {
+        std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        )
+    };
+
+    // Run 1: no cookies configured → the requires-cookie failure parks the
+    // row (does NOT requeue, even though the budget is untouched).
+    let shared: SharedStore = Arc::new(TokioMutex::new(Store::open(&db)?));
+    let failing = Arc::new(FakeFetcher::fails_with_stderr(sensitive));
+    let transcriber: Arc<dyn Transcriber> = Arc::new(FakeTranscriber::echo());
+    let opts = ProcessOptions {
+        worker_id: "orchestrator".into(),
+        transcripts_root: tmp.path().join("transcripts"),
+        max_videos: None,
+        compute_lang_probs: false,
+        transcribe_timeout: Duration::from_secs(5),
+        stale_claim_threshold: Duration::from_secs(60),
+        download_workers: 1,
+        channel_capacity: 2,
+        cookies_file: None,
+        classification: table(),
+        retries: 1,
+    };
+    let stats = run_pipelined(Arc::clone(&shared), failing, transcriber, opts).await?;
+    assert_eq!(stats.parked_for_cookies, 1, "parked, not requeued");
+    assert_eq!(stats.requeued_for_retry, 0, "budget must NOT be spent");
+    {
+        let guard = shared.lock().await;
+        let row = guard.get_video_for_test("vid_a")?.expect("row");
+        assert_eq!(row.status, "failed_retryable");
+        assert_eq!(
+            row.last_retryable_kind.as_deref(),
+            Some("SensitiveLoginGated")
+        );
+    }
+
+    // Seed the parked row back to pending (kind preserved) via raw UPDATE —
+    // the sweep-free natural flow that makes it claimable with cookies.
+    {
+        let raw = rusqlite::Connection::open(&db)?;
+        let changed = raw.execute(
+            "UPDATE videos SET status='pending', last_retryable_kind='SensitiveLoginGated' \
+             WHERE video_id='vid_a'",
+            [],
+        )?;
+        assert_eq!(changed, 1, "row re-seeded to pending");
+    }
+
+    // Run 2: cookies configured + a fetcher that succeeds → the retry claim
+    // (kind SensitiveLoginGated) carries the cookie path per ADR 0035.
+    let cookie_path = PathBuf::from("/secret/tiktok-cookies.txt");
+    let wav = tmp.path().join("vid_a.wav");
+    std::fs::copy(silence_fixture(), &wav)?;
+    let succeeding = Arc::new(FakeFetcher {
+        canned: StdMutex::new(HashMap::from([("vid_a".to_string(), wav)])),
+        always_fails: false,
+        first_call_gate: tokio::sync::Mutex::new(None),
+        canned_stderr: StdMutex::new(None),
+        received_opts: StdMutex::new(Vec::new()),
+        fail_first_n: StdMutex::new(HashMap::new()),
+    });
+    let transcriber2: Arc<dyn Transcriber> = Arc::new(FakeTranscriber::echo());
+    let opts2 = ProcessOptions {
+        worker_id: "orchestrator".into(),
+        transcripts_root: tmp.path().join("transcripts"),
+        max_videos: None,
+        compute_lang_probs: false,
+        transcribe_timeout: Duration::from_secs(5),
+        stale_claim_threshold: Duration::from_secs(60),
+        download_workers: 1,
+        channel_capacity: 2,
+        cookies_file: Some(cookie_path.clone()),
+        classification: table(),
+        retries: 1,
+    };
+    let stats2 = run_pipelined(
+        Arc::clone(&shared),
+        Arc::clone(&succeeding) as Arc<dyn VideoFetcher>,
+        transcriber2,
+        opts2,
+    )
+    .await?;
+    assert_eq!(stats2.succeeded, 1, "row recovers with cookies");
+
+    let recorded = succeeding
+        .received_opts
+        .lock()
+        .expect("received_opts mutex");
+    assert_eq!(recorded.len(), 1, "exactly one acquire in run 2");
+    assert_eq!(
+        recorded[0].cookies_file.as_deref(),
+        Some(cookie_path.as_path()),
+        "cookies must ride on the SensitiveLoginGated retry claim"
+    );
     Ok(())
 }

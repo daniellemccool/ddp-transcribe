@@ -69,6 +69,10 @@ pub struct FakeFetcher {
     /// Epic 3 T08's cookie-routing tests assert what the worker actually
     /// threaded through, rather than re-deriving the policy decision.
     pub received_opts: std::sync::Mutex<Vec<FetchOpts>>,
+    /// Epic 4a test hook: per-video count of failures to emit BEFORE
+    /// succeeding (each failed acquire decrements). 0/absent = the canned
+    /// behavior applies immediately. Failure text comes from `canned_stderr`.
+    pub fail_first_n: std::sync::Mutex<std::collections::HashMap<String, u32>>,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -83,6 +87,7 @@ impl FakeFetcher {
             first_call_gate: tokio::sync::Mutex::new(None),
             canned_stderr: std::sync::Mutex::new(None),
             received_opts: std::sync::Mutex::new(Vec::new()),
+            fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -98,6 +103,7 @@ impl FakeFetcher {
             first_call_gate: tokio::sync::Mutex::new(None),
             canned_stderr: std::sync::Mutex::new(Some(stderr.to_string())),
             received_opts: std::sync::Mutex::new(Vec::new()),
+            fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -113,6 +119,7 @@ impl FakeFetcher {
             first_call_gate: tokio::sync::Mutex::new(Some(gate.clone())),
             canned_stderr: std::sync::Mutex::new(None),
             received_opts: std::sync::Mutex::new(Vec::new()),
+            fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
         };
         (fetcher, gate)
     }
@@ -149,21 +156,56 @@ impl VideoFetcher for FakeFetcher {
             gate.notified().await;
         }
 
+        // Epic 4a fails-N-then-succeeds gate. For a managed video, fail the
+        // first N acquires (using `canned_stderr` as the failure text, or a
+        // generic fallback), then let the row graduate to the canned success
+        // below. Placed BEFORE the `canned_stderr` always-fail check so an
+        // exhausted managed video isn't re-failed by it — that check is then
+        // guarded (`managed`) to skip managed videos.
+        let managed = {
+            let mut gate = self.fail_first_n.lock().expect("fail_first_n lock");
+            match gate.get_mut(video_id) {
+                Some(n) if *n > 0 => {
+                    *n -= 1;
+                    let stderr = self
+                        .canned_stderr
+                        .lock()
+                        .expect("canned_stderr lock")
+                        .clone()
+                        .unwrap_or_else(|| "transient fake failure".to_string());
+                    return Err(FetchError::ToolFailed {
+                        tool: "yt-dlp",
+                        exit_code: 1,
+                        signal: None,
+                        stderr_excerpt: stderr,
+                    });
+                }
+                // Budget spent → managed; skip the always-fail paths below so
+                // the canned success can run.
+                Some(_) => true,
+                None => false,
+            }
+        };
+
         // Checked before `always_fails` so `fails_with_stderr` doesn't need
         // to also flip `always_fails` — the two modes are mutually
-        // exclusive in practice (see the constructors above).
-        let canned_err = self
-            .canned_stderr
-            .lock()
-            .expect("canned_stderr mutex")
-            .clone();
-        if let Some(stderr_excerpt) = canned_err {
-            return Err(FetchError::ToolFailed {
-                tool: "yt-dlp",
-                exit_code: 1,
-                signal: None,
-                stderr_excerpt,
-            });
+        // exclusive in practice (see the constructors above). Skipped for
+        // fail_first_n-managed videos so a fails-N-then-succeeds fetcher can
+        // reach the canned success once its budget is spent.
+        if !managed {
+            let canned_err = self
+                .canned_stderr
+                .lock()
+                .expect("canned_stderr mutex")
+                .clone();
+            if let Some(stderr_excerpt) = canned_err {
+                return Err(FetchError::ToolFailed {
+                    tool: "yt-dlp",
+                    exit_code: 1,
+                    signal: None,
+                    stderr_excerpt,
+                });
+            }
         }
 
         if self.always_fails {
@@ -203,6 +245,7 @@ mod tests {
             first_call_gate: tokio::sync::Mutex::new(None),
             canned_stderr: std::sync::Mutex::new(None),
             received_opts: std::sync::Mutex::new(Vec::new()),
+            fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
         };
         let result = fake
             .acquire("7234567890123456789", "url", &FetchOpts::default())

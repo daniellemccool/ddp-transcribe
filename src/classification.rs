@@ -177,9 +177,8 @@ impl ClassificationTable {
         &self.source
     }
 
-    // 0002: consumed by Epic 4a T01/T07 tests only so far; no production
-    // caller yet. Lift when a future task reads it from main().
-    #[allow(dead_code)]
+    // 0002: `#[allow(dead_code)]` lifted in Epic 4a T06 — main()'s Process
+    // arm logs `rule_count()` on the "classification policy active" line.
     pub fn rule_count(&self) -> usize {
         self.rules.len()
     }
@@ -188,8 +187,8 @@ impl ClassificationTable {
 /// The compiled-in default policy. Every rule carries its evidence citation;
 /// this text is also what lands in `batch_runs.policy_toml` when no
 /// `--classification` override is given.
-// 0002: consumed by Epic 4a T06 (CLI wiring); lift when it lands.
-#[allow(dead_code)]
+// 0002: `#[allow(dead_code)]` lifted in Epic 4a T06 — `compiled_default()`
+// (bin-live after CLI wiring) parses this const.
 pub const DEFAULT_TABLE_TOML: &str = r#"# ddp-transcribe classification policy (compiled default)
 # Ordered, first-match-wins, exact case-sensitive substrings. Evidence:
 # 65k pilot corpus + oEmbed probe census 2026-07-07 (n=7,087); ADR 0033

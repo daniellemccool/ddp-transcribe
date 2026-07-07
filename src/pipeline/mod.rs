@@ -92,6 +92,12 @@ pub struct ProcessOptions {
     /// operator's `--classification` file, validated at startup. Shared
     /// read-only with every worker.
     pub classification: std::sync::Arc<crate::classification::ClassificationTable>,
+    /// Epic 4a: automatic retry budget. A video gets at most `retries`
+    /// automatic requeues (lifetime cap = retries + 1 total attempts,
+    /// compared against attempt_count which claim_next bumps at claim
+    /// time). Default 1 — pilot evidence: one retry recovers the dominant
+    /// recoverable class (NoDataBlocks re-fetch 10/10 OK).
+    pub retries: i64,
 }
 
 #[derive(Debug, Default)]
@@ -123,6 +129,16 @@ pub struct ProcessStats {
     /// because `run_serial` doesn't run a mid-loop sweep. Phase 2's
     /// concurrent workers reach it via the swept-claim race.
     pub stale_after_failure: usize,
+    /// Epic 4a: rows a worker sent back to 'pending' for an in-batch retry.
+    pub requeued_for_retry: usize,
+    /// Epic 4a: rows whose failure exhausted the attempt cap this run.
+    pub exhausted_retries: usize,
+    /// Epic 4a: requires-cookie rows parked because no cookies-file was
+    /// configured for this run.
+    pub parked_for_cookies: usize,
+    /// Epic 4a: inline write-offs this run, keyed by label — the census's
+    /// run-side terminal-by-label breakdown (attrition documentation).
+    pub terminal_by_label: std::collections::BTreeMap<String, usize>,
 }
 
 /// Outcome of a single `process_one` call. `StaleAfterSuccess` is the

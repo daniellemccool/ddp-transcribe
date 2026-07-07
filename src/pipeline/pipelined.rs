@@ -6,12 +6,14 @@
 //! `JoinSet` + `CancellationToken` shutdown order per 0025 and flip the
 //! `--pipelined` branch in `main.rs`.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use tokio::sync::mpsc;
+use tokio::sync::Mutex as TokioMutex;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -22,8 +24,67 @@ use super::{
 use crate::errors::TranscribeError;
 use crate::failure::{classify_transcribe_error, ClassifiedFailure};
 use crate::fetcher::VideoFetcher;
-use crate::state::{Claim, Store};
+use crate::state::{Claim, FailureRecordOutcome, Store};
 use crate::transcribe::{PerCallConfig, Transcriber};
+
+/// Shared aggregation of a per-video terminal write-off count keyed by
+/// label, folded into `ProcessStats::terminal_by_label` after the workers
+/// drain. Only `fetch_worker` writes to it (the sole producer of
+/// `Unavailable`).
+type TerminalByLabel = Arc<TokioMutex<BTreeMap<String, usize>>>;
+
+/// Shared outcome-dispatch for `Store::record_fetch_failure`, used by BOTH
+/// `fetch_worker` and `transcribe_worker`.
+///
+/// The two pipelined workers reach `record_fetch_failure` from the same
+/// `Retryable` verdict and aggregate through the same `Arc<AtomicUsize>`
+/// counter shape, so the outcome→counter mapping lives here once rather
+/// than duplicated per-worker (analogous to [`handle_mutator_result`]) —
+/// duplication would invite dispatch skew. `serial.rs` keeps its own copy
+/// (its stats are direct struct fields, not atomics).
+///
+/// - `Requeued` → `requeued_for_retry += 1` (row back to 'pending').
+/// - `Exhausted` → `exhausted_retries += 1` (cap reached; parked).
+/// - `ParkedForCookies` → `parked_for_cookies += 1` (requires-cookie, no
+///   cookies configured this run).
+/// - `StaleClaim` → `stale_after_failure += 1` (+ warn): the claim was
+///   swept + re-claimed elsewhere, nothing was recorded. Symmetric to the
+///   success-side stale routing; NOT a Bug.
+/// - `Err` → propagated with row context (Bug-class; orchestrator reacts
+///   per 0025).
+fn handle_record_fetch_failure_outcome(
+    outcome: anyhow::Result<FailureRecordOutcome>,
+    worker_id: &str,
+    video_id: &str,
+    stats_requeued_for_retry: &Arc<AtomicUsize>,
+    stats_exhausted_retries: &Arc<AtomicUsize>,
+    stats_parked_for_cookies: &Arc<AtomicUsize>,
+    stats_stale_after_failure: &Arc<AtomicUsize>,
+) -> anyhow::Result<()> {
+    match outcome {
+        Ok(FailureRecordOutcome::Requeued) => {
+            stats_requeued_for_retry.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(FailureRecordOutcome::Exhausted) => {
+            stats_exhausted_retries.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(FailureRecordOutcome::ParkedForCookies) => {
+            stats_parked_for_cookies.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(FailureRecordOutcome::StaleClaim) => {
+            stats_stale_after_failure.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                worker = %worker_id,
+                video_id,
+                "record_fetch_failure: stale claim (swept + re-claimed elsewhere)"
+            );
+        }
+        Err(e) => {
+            return Err(e.context(format!("record_fetch_failure for {video_id}")));
+        }
+    }
+    Ok(())
+}
 
 /// Shared stale-claim routing for failure-side mutators, factored out so
 /// `fetch_worker` and `transcribe_worker` don't each carry a third copy of
@@ -152,12 +213,17 @@ pub struct FetchedItem {
 /// `#[allow(dead_code)]` placeholder is lifted as part of this wiring
 /// per 0002. Integration tests in `tests/pipeline_fakes/fetch_worker_tests.rs`
 /// continue to exercise it directly.
+#[allow(clippy::too_many_arguments)] // one worker; each Arc counter/handle is a distinct sink
 pub async fn fetch_worker(
     token: CancellationToken,
     store: SharedStore,
     fetcher: Arc<dyn VideoFetcher>,
     sender: mpsc::Sender<FetchedItem>,
     stats_stale_after_failure: Arc<AtomicUsize>,
+    stats_requeued_for_retry: Arc<AtomicUsize>,
+    stats_exhausted_retries: Arc<AtomicUsize>,
+    stats_parked_for_cookies: Arc<AtomicUsize>,
+    terminal_by_label: TerminalByLabel,
     claims_counter: Arc<AtomicUsize>,
     opts: Arc<ProcessOptions>,
 ) -> Result<()> {
@@ -280,11 +346,17 @@ pub async fn fetch_worker(
                             &stats_stale_after_failure,
                             "mark_terminal_failure",
                         )?;
+                        // Epic 4a: run-side terminal-by-label census. Only
+                        // fetch_worker produces Unavailable; the map is
+                        // folded into ProcessStats after the join loop.
+                        {
+                            let mut m = terminal_by_label.lock().await;
+                            *m.entry(label.clone()).or_insert(0) += 1;
+                        }
                     }
-                    // Epic 4a T06 consumes requires_cookie via record_fetch_failure.
                     ClassifiedFailure::Retryable {
                         label,
-                        requires_cookie: _,
+                        requires_cookie,
                         ctx,
                     } => {
                         tracing::error!(
@@ -293,21 +365,26 @@ pub async fn fetch_worker(
                             label = label.as_str(),
                             "fetch_worker: retryable failure"
                         );
-                        let result = {
+                        let outcome = {
                             let mut guard = store.lock().await;
-                            guard.mark_retryable_failure(
+                            guard.record_fetch_failure(
                                 &video_id,
                                 &worker_id,
                                 &label,
                                 &ctx.message(),
+                                opts.retries + 1,
+                                requires_cookie,
+                                opts.cookies_file.is_some(),
                             )
                         };
-                        handle_mutator_result(
-                            result,
+                        handle_record_fetch_failure_outcome(
+                            outcome,
                             &worker_id,
                             &video_id,
+                            &stats_requeued_for_retry,
+                            &stats_exhausted_retries,
+                            &stats_parked_for_cookies,
                             &stats_stale_after_failure,
-                            "mark_retryable_failure",
                         )?;
                     }
                 }
@@ -375,6 +452,7 @@ pub async fn fetch_worker(
 /// per 0002. Integration tests in
 /// `tests/pipeline_fakes/transcribe_worker_tests.rs` continue to exercise
 /// it directly.
+#[allow(clippy::too_many_arguments)] // one worker; each Arc counter is a distinct sink
 pub async fn transcribe_worker(
     token: CancellationToken,
     mut receiver: mpsc::Receiver<FetchedItem>,
@@ -382,6 +460,9 @@ pub async fn transcribe_worker(
     store: SharedStore,
     stats_stale_after_failure: Arc<AtomicUsize>,
     stats_stale_after_success: Arc<AtomicUsize>,
+    stats_requeued_for_retry: Arc<AtomicUsize>,
+    stats_exhausted_retries: Arc<AtomicUsize>,
+    stats_parked_for_cookies: Arc<AtomicUsize>,
     opts: Arc<ProcessOptions>,
 ) -> Result<()> {
     let worker_id = opts.worker_id.clone();
@@ -513,10 +594,13 @@ pub async fn transcribe_worker(
                     ClassifiedFailure::Unavailable { .. } => {
                         unreachable!("classify_transcribe_error never produces Unavailable")
                     }
-                    // Epic 4a T06 consumes requires_cookie via record_fetch_failure.
+                    // Epic 4a T06: transcribe-side retryables route through
+                    // record_fetch_failure too — `requires_cookie` is always
+                    // false here (no yt-dlp stderr), but the dispatch path is
+                    // identical, so pass it through.
                     ClassifiedFailure::Retryable {
                         label,
-                        requires_cookie: _,
+                        requires_cookie,
                         ctx,
                     } => {
                         tracing::error!(
@@ -525,21 +609,26 @@ pub async fn transcribe_worker(
                             label = label.as_str(),
                             "transcribe_worker: retryable transcribe failure"
                         );
-                        let result = {
+                        let outcome = {
                             let mut guard = store.lock().await;
-                            guard.mark_retryable_failure(
+                            guard.record_fetch_failure(
                                 &video_id,
                                 &worker_id,
                                 &label,
                                 &ctx.message(),
+                                opts.retries + 1,
+                                requires_cookie,
+                                opts.cookies_file.is_some(),
                             )
                         };
-                        handle_mutator_result(
-                            result,
+                        handle_record_fetch_failure_outcome(
+                            outcome,
                             &worker_id,
                             &video_id,
+                            &stats_requeued_for_retry,
+                            &stats_exhausted_retries,
+                            &stats_parked_for_cookies,
                             &stats_stale_after_failure,
-                            "mark_retryable_failure",
                         )?;
                     }
                 }
@@ -607,6 +696,13 @@ pub async fn run_pipelined(
     let opts_arc = Arc::new(opts);
     let stats_stale_after_failure = Arc::new(AtomicUsize::new(0));
     let stats_stale_after_success = Arc::new(AtomicUsize::new(0));
+    // Epic 4a: capped-retry outcome counters, shared across both worker
+    // kinds (both dispatch retryables through record_fetch_failure). The
+    // terminal-by-label census map is fetch_worker-only.
+    let stats_requeued_for_retry = Arc::new(AtomicUsize::new(0));
+    let stats_exhausted_retries = Arc::new(AtomicUsize::new(0));
+    let stats_parked_for_cookies = Arc::new(AtomicUsize::new(0));
+    let terminal_by_label: TerminalByLabel = Arc::new(TokioMutex::new(BTreeMap::new()));
     // Shared counter for --max-videos cap. Checked and incremented inside the
     // Mutex<Store> guard in fetch_worker, so the check+claim+increment is
     // race-free across all concurrent fetch workers.
@@ -622,6 +718,9 @@ pub async fn run_pipelined(
         Arc::clone(&store),
         Arc::clone(&stats_stale_after_failure),
         Arc::clone(&stats_stale_after_success),
+        Arc::clone(&stats_requeued_for_retry),
+        Arc::clone(&stats_exhausted_retries),
+        Arc::clone(&stats_parked_for_cookies),
         Arc::clone(&opts_arc),
     ));
 
@@ -635,6 +734,10 @@ pub async fn run_pipelined(
             Arc::clone(&fetcher),
             tx.clone(),
             Arc::clone(&stats_stale_after_failure),
+            Arc::clone(&stats_requeued_for_retry),
+            Arc::clone(&stats_exhausted_retries),
+            Arc::clone(&stats_parked_for_cookies),
+            Arc::clone(&terminal_by_label),
             Arc::clone(&claims_counter),
             Arc::clone(&opts_arc),
         ));
@@ -692,6 +795,14 @@ pub async fn run_pipelined(
     };
     stats.stale_after_failure = stats_stale_after_failure.load(Ordering::Relaxed);
     stats.stale_after_success = stats_stale_after_success.load(Ordering::Relaxed);
+    stats.requeued_for_retry = stats_requeued_for_retry.load(Ordering::Relaxed);
+    stats.exhausted_retries = stats_exhausted_retries.load(Ordering::Relaxed);
+    stats.parked_for_cookies = stats_parked_for_cookies.load(Ordering::Relaxed);
+    // Every worker has joined, so no writer remains; take the aggregated map.
+    stats.terminal_by_label = {
+        let m = terminal_by_label.lock().await;
+        m.clone()
+    };
 
     if let Some(e) = first_error {
         return Err(e);
@@ -746,9 +857,10 @@ fn compute_process_stats(store: &Store) -> Result<ProcessStats> {
         claimed: succeeded + failed,
         succeeded,
         failed,
-        // Counter-derived fields are filled by the caller after this
-        // function returns; leave them at default here.
-        stale_after_success: 0,
-        stale_after_failure: 0,
+        // Counter-derived fields (stale_after_*, requeued_for_retry,
+        // exhausted_retries, parked_for_cookies, terminal_by_label) are
+        // filled by the caller after this function returns; leave them at
+        // default here.
+        ..ProcessStats::default()
     })
 }
