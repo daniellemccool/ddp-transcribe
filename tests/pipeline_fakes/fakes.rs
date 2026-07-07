@@ -14,7 +14,7 @@ use ddp_transcribe::pipeline::{fetch_worker, FetchedItem, ProcessOptions, Shared
 use ddp_transcribe::state::Store;
 use ddp_transcribe::transcribe::{PerCallConfig, TranscribeOutput, Transcriber};
 
-/// In-test `Transcriber` impl with two behaviors:
+/// In-test `Transcriber` impl with three behaviors:
 /// - `Scripted(output)`: returns a scripted `TranscribeOutput` regardless of
 ///   the samples it receives. Lets us assert that the pipeline projects the
 ///   engine's output into the JSON artifact's `raw_signals` sub-object
@@ -22,9 +22,13 @@ use ddp_transcribe::transcribe::{PerCallConfig, TranscribeOutput, Transcriber};
 /// - `AlwaysFailsRetryable`: returns `Err(TranscribeError::EmptyOutput)` — a
 ///   non-Cancelled, non-Bug variant that `transcribe_worker` classifies as a
 ///   retryable failure (used for the stale-after-failure counter tests).
+/// - `AlwaysFailsBug`: returns `Err(TranscribeError::Bug { .. })` — drives
+///   the Bug-escalation dispatch arm (T07 review fix: `run_serial` must
+///   return `Err` for a transcribe-side Bug, not mark the row retryable).
 pub(crate) enum FakeBehavior {
     Scripted(TranscribeOutput),
     AlwaysFailsRetryable,
+    AlwaysFailsBug,
 }
 
 pub(crate) struct FakeTranscriber {
@@ -61,6 +65,15 @@ impl FakeTranscriber {
             behavior: FakeBehavior::AlwaysFailsRetryable,
         }
     }
+
+    /// Always fails with `TranscribeError::Bug` — the Bug-class variant.
+    /// Drives dispatch into the escalation arm (`return Err`) rather than
+    /// any `mark_*` mutator.
+    pub(crate) fn always_fails_bug() -> Self {
+        Self {
+            behavior: FakeBehavior::AlwaysFailsBug,
+        }
+    }
 }
 
 #[async_trait]
@@ -74,6 +87,9 @@ impl Transcriber for FakeTranscriber {
         match &self.behavior {
             FakeBehavior::Scripted(out) => Ok(out.clone()),
             FakeBehavior::AlwaysFailsRetryable => Err(TranscribeError::EmptyOutput),
+            FakeBehavior::AlwaysFailsBug => Err(TranscribeError::Bug {
+                detail: "FakeTranscriber::always_fails_bug synthetic invariant breach".into(),
+            }),
         }
     }
 

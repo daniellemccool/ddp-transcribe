@@ -277,11 +277,13 @@ async fn run_serial_classifies_fetch_failure_as_retryable_and_continues() -> any
 }
 
 /// Symmetric to the fetch-failure test: a failing transcriber leaves both
-/// rows as `failed_retryable`. Epic 3 T07: `process_one`'s anyhow chain for
-/// a transcribe-side failure doesn't carry a `FetchPhaseError` root cause
-/// (only `fetch_and_decode` produces one), so `run_serial`'s
-/// `downcast_ref::<FetchPhaseError>()` misses and the error arm's
-/// default-cautious `None` branch applies: `RetryableKind::TranscribeOther`.
+/// rows as `failed_retryable`. Epic 3 T07 (+ review fix): `process_one`'s
+/// anyhow chain for a transcribe-side failure doesn't carry a
+/// `FetchPhaseError` root (only `fetch_and_decode` produces one), so the
+/// `FetchPhaseError` downcast misses; the `None` arm then walks the chain
+/// for a `TranscribeError` (`EmptyOutput` here, wrapped below a
+/// "transcribing …" context layer) and dispatches via
+/// `classify_transcribe_error` → `RetryableKind::TranscribeOther`.
 /// Confirms both arms (fetch and transcribe) route through the same Err
 /// branch in `run_serial`, landing on different (but both non-placeholder)
 /// kinds.
@@ -360,5 +362,102 @@ async fn run_serial_classifies_transcribe_failure_as_retryable_and_continues() -
             "video {vid}: claimed_at cleared after retryable flip"
         );
     }
+    Ok(())
+}
+
+/// Epic 3 T07 (review fix 2): a fetch failure whose stderr matches a
+/// write-off pattern (ADR 0033) routes through `run_serial`'s
+/// `mark_terminal_failure` arm — the row lands `failed_terminal` with the
+/// classifier's tag as `terminal_reason`, and `run_serial` itself returns
+/// Ok (a write-off is a per-row verdict, not a Bug).
+#[tokio::test]
+async fn run_serial_writes_off_ip_blocked_as_terminal() -> anyhow::Result<()> {
+    let tmp = TempDir::new()?;
+    let mut store = Store::open(&tmp.path().join("state.sqlite"))?;
+    store.upsert_video("vid_a", "https://example/a", false)?;
+
+    let fetcher = FakeFetcher::fails_with_stderr(
+        "ERROR: [TikTok] vid_a: Your IP address is blocked from accessing this post",
+    );
+    let transcriber = FakeTranscriber::echo(); // never reached; fetch fails
+
+    let opts = ProcessOptions {
+        worker_id: "test-worker".into(),
+        transcripts_root: tmp.path().join("transcripts"),
+        max_videos: Some(1),
+        compute_lang_probs: false,
+        transcribe_timeout: Duration::from_secs(5),
+        stale_claim_threshold: Duration::from_secs(60),
+        download_workers: 3,
+        channel_capacity: 2,
+    };
+
+    let stats = run_serial(&mut store, &fetcher, &transcriber, opts).await?;
+    assert_eq!(stats.claimed, 1);
+    assert_eq!(stats.succeeded, 0);
+    assert_eq!(stats.failed, 1, "write-off counts as a failure in stats");
+
+    let row = store.get_video_for_test("vid_a")?.expect("row");
+    assert_eq!(row.status, "failed_terminal");
+    assert_eq!(
+        row.terminal_reason.as_deref(),
+        Some("IpBlockedMessage"),
+        "terminal_reason carries the classifier's write-off tag"
+    );
+    Ok(())
+}
+
+/// Epic 3 T07 (review fix 1): a transcribe-side `TranscribeError::Bug`
+/// escalates out of `run_serial` as `Err` — it must NOT be silently
+/// downgraded to a retryable mark. The row stays `in_progress` (no mutator
+/// ran; a later sweep recovers it per 0024).
+#[tokio::test]
+async fn run_serial_escalates_transcribe_bug_as_err() -> anyhow::Result<()> {
+    let tmp = TempDir::new()?;
+    let mut store = Store::open(&tmp.path().join("state.sqlite"))?;
+    store.upsert_video("vid_a", "https://example/a", false)?;
+
+    // Fetch succeeds (real WAV staged); only the transcriber fails, with
+    // the Bug-class variant.
+    let fake_wav = tmp.path().join("vid_a.wav");
+    std::fs::copy(silence_fixture(), &fake_wav)?;
+    let map = HashMap::from([("vid_a".to_string(), fake_wav)]);
+    let fetcher = FakeFetcher {
+        canned: Mutex::new(map),
+        always_fails: false,
+        first_call_gate: tokio::sync::Mutex::new(None),
+        canned_stderr: std::sync::Mutex::new(None),
+    };
+    let transcriber = FakeTranscriber::always_fails_bug();
+
+    let opts = ProcessOptions {
+        worker_id: "test-worker".into(),
+        transcripts_root: tmp.path().join("transcripts"),
+        max_videos: Some(1),
+        compute_lang_probs: false,
+        transcribe_timeout: Duration::from_secs(5),
+        stale_claim_threshold: Duration::from_secs(60),
+        download_workers: 3,
+        channel_capacity: 2,
+    };
+
+    let result = run_serial(&mut store, &fetcher, &transcriber, opts).await;
+    let err = result.expect_err("Bug-class transcribe failure must escalate as Err");
+    assert!(
+        err.to_string().contains("transcribe Bug for vid_a"),
+        "error names the Bug and the row: {err:#}"
+    );
+
+    // No mutator ran: the row is still in_progress (claimed), not
+    // failed_retryable/failed_terminal.
+    let row = store.get_video_for_test("vid_a")?.expect("row");
+    assert_eq!(
+        row.status, "in_progress",
+        "Bug escalation must not flip the row to a failure status"
+    );
+    assert_eq!(
+        row.last_retryable_kind, None,
+        "no retryable mark must be recorded for a Bug"
+    );
     Ok(())
 }

@@ -11,7 +11,8 @@ use super::{
     classify_fetch_phase, fetch_and_decode, transcribe_and_write, FetchPhaseError, ProcessOptions,
     ProcessOutcome, ProcessStats,
 };
-use crate::failure::{ClassifiedFailure, RetryableKind};
+use crate::errors::TranscribeError;
+use crate::failure::{classify_transcribe_error, ClassifiedFailure, RetryableKind};
 use crate::fetcher::VideoFetcher;
 use crate::state::{Claim, Store};
 use crate::transcribe::Transcriber;
@@ -71,9 +72,10 @@ pub async fn run_serial(
                 // `?` so the anyhow chain's root cause survives the
                 // downcast). A `None` here means the anyhow chain didn't
                 // originate from `fetch_and_decode` — i.e. a transcribe-side
-                // failure, which `transcribe_and_write` still surfaces as
-                // plain anyhow. Default-cautious: treat those as
-                // TranscribeOther-retryable rather than inventing a verdict.
+                // failure, handled by the nested TranscribeError chain-walk
+                // in the None arm below (T07 review fix: Bug-class
+                // transcribe errors must escalate, not silently downgrade
+                // to retryable).
                 let verdict = e
                     .downcast_ref::<FetchPhaseError>()
                     .map(classify_fetch_phase);
@@ -110,19 +112,59 @@ pub async fn run_serial(
                             })?;
                     }
                     None => {
-                        // Not a fetch-phase error (transcribe-side anyhow) —
-                        // default-cautious.
-                        let msg = format!("{e:#}");
-                        store
-                            .mark_retryable_failure(
-                                &claim.video_id,
-                                &opts.worker_id,
-                                RetryableKind::TranscribeOther.tag(),
-                                &msg,
-                            )
-                            .with_context(|| {
-                                format!("mark_retryable_failure for {}", claim.video_id)
-                            })?;
+                        // Not a fetch-phase error — transcribe-side anyhow.
+                        // T07 review fix: `transcribe_and_write` wraps the
+                        // engine error via `.with_context("transcribing …")`,
+                        // so the TranscribeError sits BELOW a context layer —
+                        // walk the chain rather than downcasting the top
+                        // error. Dispatch mirrors `transcribe_worker`: Bug
+                        // escalates as Err (per 0025, not silently marked
+                        // retryable), Unavailable is never produced, and
+                        // Retryable marks with the classified kind's tag.
+                        let transcribe_verdict = e
+                            .chain()
+                            .find_map(|cause| cause.downcast_ref::<TranscribeError>())
+                            .map(classify_transcribe_error);
+                        match transcribe_verdict {
+                            Some(ClassifiedFailure::Bug { ctx }) => {
+                                return Err(anyhow!(
+                                    "transcribe Bug for {}: {}",
+                                    claim.video_id,
+                                    ctx.message()
+                                ));
+                            }
+                            Some(ClassifiedFailure::Unavailable { .. }) => {
+                                unreachable!("classify_transcribe_error never produces Unavailable")
+                            }
+                            Some(ClassifiedFailure::Retryable { kind, ctx }) => {
+                                store
+                                    .mark_retryable_failure(
+                                        &claim.video_id,
+                                        &opts.worker_id,
+                                        kind.tag(),
+                                        &ctx.message(),
+                                    )
+                                    .with_context(|| {
+                                        format!("mark_retryable_failure for {}", claim.video_id)
+                                    })?;
+                            }
+                            None => {
+                                // Genuinely unclassifiable chain (neither a
+                                // FetchPhaseError nor a TranscribeError root)
+                                // — default-cautious.
+                                let msg = format!("{e:#}");
+                                store
+                                    .mark_retryable_failure(
+                                        &claim.video_id,
+                                        &opts.worker_id,
+                                        RetryableKind::TranscribeOther.tag(),
+                                        &msg,
+                                    )
+                                    .with_context(|| {
+                                        format!("mark_retryable_failure for {}", claim.video_id)
+                                    })?;
+                            }
+                        }
                     }
                 }
             }
