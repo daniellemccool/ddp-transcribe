@@ -530,7 +530,7 @@ silent.
 
 ## Resolved by Plan B Epic 3 — failure classification, triage, cookie-scoped retry (2026-07-07)
 
-Eight entries resolved by Epic 3 task commits, archived with per-entry
+Nine entries resolved by Epic 3 task commits, archived with per-entry
 resolving SHAs. One additional entry (`YtDlpFetcher::acquire`, four
 findings) was SPLIT: findings 1–2 resolved here; finding 3 re-filed under
 Epic 5 (`docs/followups/epic-5.md`), finding 4 re-filed under Plan C
