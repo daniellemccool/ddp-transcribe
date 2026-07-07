@@ -23,7 +23,7 @@ fn seed_failed_retryable(
 }
 
 #[test]
-fn triage_mark_terminal_flips_only_failed_retryable() {
+fn sweep_mark_terminal_flips_only_failed_retryable() {
     use rusqlite::Connection;
 
     let (mut store, tmp) = fresh_store();
@@ -37,7 +37,7 @@ fn triage_mark_terminal_flips_only_failed_retryable() {
     .unwrap();
 
     let n = store
-        .triage_mark_terminal(
+        .sweep_mark_terminal(
             "7000000000000000001",
             "IpBlockedMessage",
             "probe/message write-off",
@@ -47,7 +47,7 @@ fn triage_mark_terminal_flips_only_failed_retryable() {
 
     // Second call: predicate misses (already terminal) → 0, no extra event.
     let n2 = store
-        .triage_mark_terminal("7000000000000000001", "IpBlockedMessage", "again")
+        .sweep_mark_terminal("7000000000000000001", "IpBlockedMessage", "again")
         .unwrap();
     assert_eq!(n2, 0);
 
@@ -66,7 +66,7 @@ fn triage_mark_terminal_flips_only_failed_retryable() {
     );
 
     let event_count: i64 = raw.query_row(
-        "SELECT COUNT(*) FROM video_events WHERE video_id = '7000000000000000001' AND event_type = 'triaged_terminal'",
+        "SELECT COUNT(*) FROM video_events WHERE video_id = '7000000000000000001' AND event_type = 'swept_terminal'",
         [],
         |r| r.get(0),
     ).unwrap();
@@ -74,7 +74,7 @@ fn triage_mark_terminal_flips_only_failed_retryable() {
 }
 
 #[test]
-fn requeue_retryable_respects_attempt_cap_and_writes_kind_back() {
+fn sweep_requeue_respects_attempt_cap_and_writes_kind_back() {
     use rusqlite::Connection;
 
     let (mut store, tmp) = fresh_store();
@@ -89,7 +89,7 @@ fn requeue_retryable_respects_attempt_cap_and_writes_kind_back() {
     // seeded row has attempt_count = 1
 
     let n = store
-        .requeue_retryable("7000000000000000002", "NoDataBlocks", 3)
+        .sweep_requeue("7000000000000000002", "NoDataBlocks", 3)
         .unwrap();
     assert_eq!(n, 1);
 
@@ -118,7 +118,7 @@ fn requeue_retryable_respects_attempt_cap_and_writes_kind_back() {
     // At the cap: attempt_count=1, max_attempts=1 → predicate misses.
     seed_failed_retryable(&mut store, "7000000000000000003", "Fetch", "msg").unwrap();
     let n2 = store
-        .requeue_retryable("7000000000000000003", "NoDataBlocks", 1)
+        .sweep_requeue("7000000000000000003", "NoDataBlocks", 1)
         .unwrap();
     assert_eq!(n2, 0);
 }

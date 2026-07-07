@@ -84,7 +84,7 @@ pub async fn run_triage(
                 let changed = if opts.dry_run {
                     1
                 } else {
-                    store.triage_mark_terminal(
+                    store.sweep_mark_terminal(
                         &row.video_id,
                         &label,
                         "triage: message-class write-off",
@@ -113,7 +113,7 @@ pub async fn run_triage(
                         let changed = if opts.dry_run {
                             1
                         } else {
-                            store.triage_mark_terminal(
+                            store.sweep_mark_terminal(
                                 &row.video_id,
                                 "ProbeDead",
                                 "triage: oEmbed probe returned dead",
@@ -136,7 +136,7 @@ pub async fn run_triage(
                             let changed = if opts.dry_run {
                                 1
                             } else {
-                                store.requeue_retryable(&row.video_id, &label, opts.max_attempts)?
+                                store.sweep_requeue(&row.video_id, &label, opts.max_attempts)?
                             };
                             if changed > 0 {
                                 stats.requeued += 1;

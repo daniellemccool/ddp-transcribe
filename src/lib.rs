@@ -6,6 +6,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod audio;
+pub mod batch;
 pub mod canonical;
 pub mod classification;
 pub mod errors;

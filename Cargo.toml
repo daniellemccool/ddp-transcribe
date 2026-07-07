@@ -104,7 +104,7 @@ name = "state_migrate"
 required-features = ["test-helpers"]
 
 [[test]]
-name = "state_triage"
+name = "state_sweep"
 required-features = ["test-helpers"]
 
 [[test]]
@@ -117,4 +117,8 @@ required-features = ["test-helpers"]
 
 [[test]]
 name = "triage"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "batch_census"
 required-features = ["test-helpers"]

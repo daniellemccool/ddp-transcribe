@@ -275,7 +275,7 @@ async fn fetch_worker_records_taxonomy_kind_for_retryable() {
 /// `last_retryable_kind` is `SensitiveLoginGated`. Drives the full path
 /// through real worker dispatch: seed a pending row → fail it with the
 /// sensitive-login-gated fixture message (recording the taxonomy kind) →
-/// requeue back to pending (Task 05's `requeue_retryable`) → re-claim
+/// requeue back to pending (`sweep_requeue`) → re-claim
 /// through a fresh `fetch_worker` with `cookies_file` set in
 /// `ProcessOptions`. The second `acquire` call must have carried the
 /// cookie path; a first-attempt claim never would (kind gate).
@@ -309,12 +309,12 @@ async fn fetch_worker_threads_cookies_on_sensitive_login_gated_retry() -> anyhow
     assert_eq!(status, "failed_retryable");
     assert_eq!(kind.as_deref(), Some("SensitiveLoginGated"));
 
-    // Requeue back to pending (Task 05's mutator) — preserves the kind so
+    // Requeue back to pending (sweep mutator) — preserves the kind so
     // the next claim's `last_retryable_kind` still reads
     // "SensitiveLoginGated".
     {
         let mut guard = store.lock().await;
-        let requeued = guard.requeue_retryable(video_id, "SensitiveLoginGated", 5)?;
+        let requeued = guard.sweep_requeue(video_id, "SensitiveLoginGated", 5)?;
         assert_eq!(requeued, 1, "row must requeue to pending");
     }
 
