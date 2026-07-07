@@ -331,7 +331,10 @@ pub struct SuccessArtifacts {
 }
 
 impl Store {
-    /// Atomically claim the oldest pending video for processing.
+    /// Atomically claim the next pending video: fresh work first
+    /// (`attempt_count ASC` — Epic 4a end-of-queue retries), FIFO by
+    /// first_seen_at within each attempt tier. Matches
+    /// idx_videos_pending_v3's column order.
     ///
     /// Uses `BEGIN IMMEDIATE` to serialize concurrent claim attempts across
     /// multiple connections to the same SQLite file.
@@ -347,7 +350,7 @@ impl Store {
                 "SELECT video_id, source_url, attempt_count, last_retryable_kind
                  FROM videos
                  WHERE status = 'pending'
-                 ORDER BY first_seen_at ASC, video_id ASC
+                 ORDER BY attempt_count ASC, first_seen_at ASC, video_id ASC
                  LIMIT 1",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
