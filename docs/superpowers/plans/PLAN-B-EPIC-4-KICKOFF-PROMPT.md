@@ -103,18 +103,47 @@ Read in order:
   either co-scoping or an explicit 4a (retry/config/status) / 4b (window/timezone)
   split.
 
-### Step 4: Census calibration data (dry-run of 2026-07-07)
+### Step 4: Census calibration data (dry-run completed 2026-07-07)
 
-Reproducible baseline from `ddp-run-export.sqlite`: 7,087 `failed_retryable`;
-message-class write-offs **3,309** (the plan's ~3,915 estimate included the
-"do not have permission to view this post" class, ~600 rows, which shipped as
-probed-not-written-off); probed remainder 3,778.
+Full-population dry-run census (7,087 rows examined; probes 3,778; zero
+`kept_unreachable` — network posture clean; zero capped):
 
-**FILL IN from the completed dry-run census before kickoff:** ProbeDead count
-(how many probes re-confirmed already-settled classes — the no-permission rows
-are the expected bulk, and a high count justifies moving that pattern to
-`terminal` in the default table), requeue-eligible count, `kept_unreachable`
-(network-posture check), `SensitiveLoginGated` count (sizes the cookie pool).
+| kind | examined | terminal | requeued |
+|---|---|---|---|
+| IpBlockedMessage | 3,241 | 3,241 (write-off) | 0 |
+| VideoNotAvailable10231 | 68 | 68 (write-off) | 0 |
+| YtDlpOther | 606 | 606 (ProbeDead) | 0 |
+| NoPermission | 452 | 427 (ProbeDead) | 25 |
+| NoDataBlocks | 2,318 | 7 (ProbeDead) | 2,311 |
+| SensitiveLoginGated | 301 | 0 | 301 |
+| FfprobePostprocess / HttpError / NetworkTransient / NoVideoFormats | 101 | 0 | 101 |
+| **TOTAL** | **7,087** | **4,349** | **2,738** |
+
+**Default-table calibration lessons (binding on the config design):**
+
+1. **New pure terminal class discovered:** all 606 `YtDlpOther` rows carry ONE
+   message — `"Video not available, status code 10240"` — and probed 606/606
+   dead. Add it to the compiled default table as `terminal`
+   (`VideoNotAvailable10240`), with population-scale evidence (n=606, 100%).
+   Match the specific code, NOT a "status code" prefix — unknown future codes
+   must fall through to the retryable fallback and earn their disposition.
+2. **`NoPermission` is IMPURE and must stay `retryable`:** 427 dead / 25 alive
+   (5.5% alive at population scale; the pilot's 5/5-dead sample was too small).
+   This RETRACTS the earlier candidate-terminal suggestion. Mixed classes are
+   exactly what fetch-as-oracle adjudicates per-row: the 25 alive get
+   recovered, the 427 dead come back with a write-off message and terminalize
+   inline. A blanket `terminal` disposition would have silently discarded 25
+   recoverable videos — the cautionary tale for anyone editing the config
+   toward aggressive write-offs.
+3. `NoDataBlocks` is 99.7% alive (2,311/2,318) → `retryable`, as evidenced.
+4. **First Epic-4 batch expectations:** ~2,437 non-cookie requeues with high
+   recovery odds (+ the 7,087-row sweep terminalizing ~4,349 + 606-class);
+   cookie pool = 301 `SensitiveLoginGated` (pending a real cookies file — the
+   live-efficacy experiment). Projected corpus success after recovery ≈ 91.5–92%.
+5. **Probe retirement postscript:** the probe's one full run both named a new
+   pure class (10240) and exposed class impurity (NoPermission) — its service
+   ends having demonstrated why per-row adjudication (fetch-as-oracle) beats
+   blanket message-class write-offs for everything except proven-pure classes.
 
 ### Step 5: ADR work (via `adg` per repo governance — never hand-edit)
 
