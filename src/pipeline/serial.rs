@@ -12,7 +12,7 @@ use super::{
     ProcessOptions, ProcessOutcome, ProcessStats,
 };
 use crate::errors::TranscribeError;
-use crate::failure::{classify_transcribe_error, ClassifiedFailure, RetryableKind};
+use crate::failure::{classify_transcribe_error, labels, ClassifiedFailure};
 use crate::fetcher::VideoFetcher;
 use crate::state::{Claim, Store};
 use crate::transcribe::Transcriber;
@@ -85,14 +85,14 @@ pub async fn run_serial(
                 // (`e.chain().find_map(...)`) if that ever happens.
                 let verdict = e
                     .downcast_ref::<FetchPhaseError>()
-                    .map(classify_fetch_phase);
+                    .map(|fe| classify_fetch_phase(fe, &opts.classification));
                 match verdict {
-                    Some(ClassifiedFailure::Unavailable { reason, ctx }) => {
+                    Some(ClassifiedFailure::Unavailable { label, ctx }) => {
                         store
                             .mark_terminal_failure(
                                 &claim.video_id,
                                 &opts.worker_id,
-                                reason.tag(),
+                                &label,
                                 &ctx.message(),
                             )
                             .with_context(|| {
@@ -106,12 +106,17 @@ pub async fn run_serial(
                             ctx.message()
                         ));
                     }
-                    Some(ClassifiedFailure::Retryable { kind, ctx }) => {
+                    // Epic 4a T06 consumes requires_cookie via record_fetch_failure.
+                    Some(ClassifiedFailure::Retryable {
+                        label,
+                        requires_cookie: _,
+                        ctx,
+                    }) => {
                         store
                             .mark_retryable_failure(
                                 &claim.video_id,
                                 &opts.worker_id,
-                                kind.tag(),
+                                &label,
                                 &ctx.message(),
                             )
                             .with_context(|| {
@@ -127,7 +132,7 @@ pub async fn run_serial(
                         // error. Dispatch mirrors `transcribe_worker`: Bug
                         // escalates as Err (per 0025, not silently marked
                         // retryable), Unavailable is never produced, and
-                        // Retryable marks with the classified kind's tag.
+                        // Retryable marks with the classified label.
                         let transcribe_verdict = e
                             .chain()
                             .find_map(|cause| cause.downcast_ref::<TranscribeError>())
@@ -143,12 +148,17 @@ pub async fn run_serial(
                             Some(ClassifiedFailure::Unavailable { .. }) => {
                                 unreachable!("classify_transcribe_error never produces Unavailable")
                             }
-                            Some(ClassifiedFailure::Retryable { kind, ctx }) => {
+                            // Epic 4a T06 consumes requires_cookie via record_fetch_failure.
+                            Some(ClassifiedFailure::Retryable {
+                                label,
+                                requires_cookie: _,
+                                ctx,
+                            }) => {
                                 store
                                     .mark_retryable_failure(
                                         &claim.video_id,
                                         &opts.worker_id,
-                                        kind.tag(),
+                                        &label,
                                         &ctx.message(),
                                     )
                                     .with_context(|| {
@@ -164,7 +174,7 @@ pub async fn run_serial(
                                     .mark_retryable_failure(
                                         &claim.video_id,
                                         &opts.worker_id,
-                                        RetryableKind::TranscribeOther.tag(),
+                                        labels::TRANSCRIBE_OTHER,
                                         &msg,
                                     )
                                     .with_context(|| {
@@ -201,7 +211,7 @@ async fn process_one(
     );
 
     // Epic 3 T08: kind-gated cookie routing (ADR 0035).
-    let fetch_opts = cookie_opts_for(claim, opts.cookies_file.as_deref());
+    let fetch_opts = cookie_opts_for(claim, &opts.classification, opts.cookies_file.as_deref());
     let (samples, wav_path) = fetch_and_decode(fetcher, claim, &fetch_opts).await?;
     transcribe_and_write(
         store,
@@ -318,6 +328,10 @@ mod tests {
             download_workers: 3,
             channel_capacity: 2,
             cookies_file: None,
+            classification: std::sync::Arc::new(
+                crate::classification::ClassificationTable::compiled_default()
+                    .expect("default table"),
+            ),
         };
 
         // Use the same Claim returned by claim_next — process_one needs

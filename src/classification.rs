@@ -18,9 +18,9 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 /// What the pipeline does with a matched message class.
-// 0002: consumed by Epic 4a T03 (classifier rewire) / T06 (dispatch+CLI);
-// lift when they land.
-#[allow(dead_code)]
+// 0002: lifted in Epic 4a T03 — consumed by `classify_fetch_error`'s
+// `ClassifiedFailure` mapping and `cookie_opts_for`'s gate, both reached
+// from `main()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Disposition {
@@ -54,27 +54,32 @@ struct RawTable {
 }
 
 /// Immutable, validated classification policy. Shared with workers via Arc.
-// 0002: consumed by Epic 4a T03/T06/T07; lift when they land.
-#[allow(dead_code)]
+// 0002: lifted in Epic 4a T03 — constructed by `main()`'s Process arm and
+// consumed throughout `failure::classify_fetch_error` /
+// `pipeline::cookie_opts_for`.
 #[derive(Debug)]
 pub struct ClassificationTable {
     rules: Vec<RawRule>,
     fallback: RawFallback,
     by_label: HashMap<String, Disposition>,
+    // 0002: populated for every table but only read by `source_toml()`,
+    // which nothing calls yet — Epic 4a T07 will read it to snapshot the
+    // active policy into `batch_runs.policy_toml`. Still genuinely dead
+    // from main()'s perspective; lift alongside `source_toml` then.
+    #[allow(dead_code)]
     source: String,
 }
 
 /// One classification outcome. `label` borrows from the table (labels are
 /// table-owned strings; callers `.to_string()` at persistence boundaries).
-// 0002: consumed by Epic 4a T03; lift when it lands.
-#[allow(dead_code)]
+// 0002: lifted in Epic 4a T03 — `classify_fetch_error`'s `ToolFailed` arm
+// matches on `disposition` and stores `label`.
 #[derive(Debug, Clone, Copy)]
 pub struct MessageMatch<'a> {
     pub label: &'a str,
     pub disposition: Disposition,
 }
 
-#[allow(dead_code)] // 0002: consumed by Epic 4a T03/T06/T07; lift when they land.
 impl ClassificationTable {
     /// Parse + validate. Hard-fail semantics: any error here must abort
     /// startup before a single row is claimed (0022 philosophy).
@@ -164,10 +169,17 @@ impl ClassificationTable {
         self.by_label.get(label).copied()
     }
 
+    // 0002: consumed by Epic 4a T07 (`batch_runs.policy_toml` snapshot);
+    // lift when it lands. Exercised today only by classification.rs's own
+    // `#[cfg(test)]` module.
+    #[allow(dead_code)]
     pub fn source_toml(&self) -> &str {
         &self.source
     }
 
+    // 0002: consumed by Epic 4a T01/T07 tests only so far; no production
+    // caller yet. Lift when a future task reads it from main().
+    #[allow(dead_code)]
     pub fn rule_count(&self) -> usize {
         self.rules.len()
     }

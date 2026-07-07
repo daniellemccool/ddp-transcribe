@@ -207,7 +207,8 @@ pub async fn fetch_worker(
         // Epic 3 T08: kind-gated cookie routing (ADR 0035). Computed at the
         // call site so the policy decision (which reads `claim` fresh each
         // iteration) never goes stale across retries.
-        let fetch_opts = cookie_opts_for(&claim, opts.cookies_file.as_deref());
+        let fetch_opts =
+            cookie_opts_for(&claim, &opts.classification, opts.cookies_file.as_deref());
 
         // T16: wrap the fetch in the cancellation select so a mid-fetch
         // shutdown drops the in-flight `acquire` future promptly (see the
@@ -252,15 +253,15 @@ pub async fn fetch_worker(
             }
             Err(e) => {
                 let video_id = claim.video_id.clone();
-                match classify_fetch_phase(&e) {
+                match classify_fetch_phase(&e, &opts.classification) {
                     ClassifiedFailure::Bug { ctx } => {
                         return Err(anyhow!("fetch Bug for {video_id}: {}", ctx.message()));
                     }
-                    ClassifiedFailure::Unavailable { reason, ctx } => {
+                    ClassifiedFailure::Unavailable { label, ctx } => {
                         tracing::warn!(
                             worker = %worker_id,
                             video_id = video_id.as_str(),
-                            reason = reason.tag(),
+                            label = label.as_str(),
                             "fetch_worker: write-off; marking terminal"
                         );
                         let result = {
@@ -268,7 +269,7 @@ pub async fn fetch_worker(
                             guard.mark_terminal_failure(
                                 &video_id,
                                 &worker_id,
-                                reason.tag(),
+                                &label,
                                 &ctx.message(),
                             )
                         };
@@ -280,11 +281,16 @@ pub async fn fetch_worker(
                             "mark_terminal_failure",
                         )?;
                     }
-                    ClassifiedFailure::Retryable { kind, ctx } => {
+                    // Epic 4a T06 consumes requires_cookie via record_fetch_failure.
+                    ClassifiedFailure::Retryable {
+                        label,
+                        requires_cookie: _,
+                        ctx,
+                    } => {
                         tracing::error!(
                             worker = %worker_id,
                             video_id = video_id.as_str(),
-                            kind = kind.tag(),
+                            label = label.as_str(),
                             "fetch_worker: retryable failure"
                         );
                         let result = {
@@ -292,7 +298,7 @@ pub async fn fetch_worker(
                             guard.mark_retryable_failure(
                                 &video_id,
                                 &worker_id,
-                                kind.tag(),
+                                &label,
                                 &ctx.message(),
                             )
                         };
@@ -507,11 +513,16 @@ pub async fn transcribe_worker(
                     ClassifiedFailure::Unavailable { .. } => {
                         unreachable!("classify_transcribe_error never produces Unavailable")
                     }
-                    ClassifiedFailure::Retryable { kind, ctx } => {
+                    // Epic 4a T06 consumes requires_cookie via record_fetch_failure.
+                    ClassifiedFailure::Retryable {
+                        label,
+                        requires_cookie: _,
+                        ctx,
+                    } => {
                         tracing::error!(
                             worker = %worker_id,
                             video_id = video_id.as_str(),
-                            kind = kind.tag(),
+                            label = label.as_str(),
                             "transcribe_worker: retryable transcribe failure"
                         );
                         let result = {
@@ -519,7 +530,7 @@ pub async fn transcribe_worker(
                             guard.mark_retryable_failure(
                                 &video_id,
                                 &worker_id,
-                                kind.tag(),
+                                &label,
                                 &ctx.message(),
                             )
                         };

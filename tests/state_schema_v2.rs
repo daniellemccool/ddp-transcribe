@@ -3,7 +3,7 @@
 //! Confirm the v2 schema: new nullable columns present on `videos`.
 //! SCHEMA_VERSION constant is "3" as of Epic 4a (schema v3 layers batch_runs
 //! + the attempt-aware pending index on top; these Epic 2 columns are
-//! unchanged), fresh DB records the current version in meta.
+//!   unchanged), fresh DB records the current version in meta.
 
 use anyhow::Result;
 use ddp_transcribe::state::{Store, SCHEMA_VERSION};

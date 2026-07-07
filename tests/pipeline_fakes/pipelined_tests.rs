@@ -59,6 +59,10 @@ async fn run_pipelined_honors_max_videos_cap() -> anyhow::Result<()> {
         download_workers: 3,
         channel_capacity: 2,
         cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
     };
 
     let stats = run_pipelined(Arc::clone(&shared), fetcher, transcriber, opts).await?;
@@ -138,6 +142,10 @@ async fn run_pipelined_drains_all_rows_and_returns_stats() -> anyhow::Result<()>
         download_workers: 3,
         channel_capacity: 2,
         cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
     };
 
     let stats = run_pipelined(Arc::clone(&shared), fetcher, transcriber, opts).await?;

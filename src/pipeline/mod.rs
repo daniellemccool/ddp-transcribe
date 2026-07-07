@@ -88,6 +88,10 @@ pub struct ProcessOptions {
     /// `last_retryable_kind` is `SensitiveLoginGated` — see
     /// [`cookie_opts_for`]. ADR 0035: first attempts never get cookies.
     pub cookies_file: Option<PathBuf>,
+    /// Active classification policy (Epic 4a): compiled default or the
+    /// operator's `--classification` file, validated at startup. Shared
+    /// read-only with every worker.
+    pub classification: std::sync::Arc<crate::classification::ClassificationTable>,
 }
 
 #[derive(Debug, Default)]
@@ -152,15 +156,19 @@ pub enum FetchPhaseError {
 
 /// Classify a [`FetchPhaseError`] into the three-arm verdict. Thin
 /// projection: `Fetch` delegates to [`crate::failure::classify_fetch_error`]
-/// (the message-table classifier); `Decode` is always `Retryable` — a
-/// corrupt/truncated WAV on disk doesn't indict the source video, and a
-/// refetch may produce a decodable file.
-pub fn classify_fetch_phase(e: &FetchPhaseError) -> crate::failure::ClassifiedFailure {
-    use crate::failure::{ClassifiedFailure, FailureContext, RetryableKind};
+/// (the classification-table-driven classifier); `Decode` is always
+/// `Retryable` — a corrupt/truncated WAV on disk doesn't indict the source
+/// video, and a refetch may produce a decodable file.
+pub fn classify_fetch_phase(
+    e: &FetchPhaseError,
+    table: &crate::classification::ClassificationTable,
+) -> crate::failure::ClassifiedFailure {
+    use crate::failure::{labels, ClassifiedFailure, FailureContext};
     match e {
-        FetchPhaseError::Fetch(fe) => crate::failure::classify_fetch_error(fe),
+        FetchPhaseError::Fetch(fe) => crate::failure::classify_fetch_error(fe, table),
         FetchPhaseError::Decode(de) => ClassifiedFailure::Retryable {
-            kind: RetryableKind::TranscribeOther,
+            label: labels::TRANSCRIBE_OTHER.to_string(),
+            requires_cookie: false,
             ctx: FailureContext {
                 tool: "hound",
                 exit_code: None,
@@ -172,17 +180,27 @@ pub fn classify_fetch_phase(e: &FetchPhaseError) -> crate::failure::ClassifiedFa
     }
 }
 
-/// Kind-gated cookie routing (Epic 3 T08, ADR 0035): cookies ride on a
-/// fetch iff the claim's most recent retryable failure was
-/// `SensitiveLoginGated` AND the operator supplied `--cookies-file`. First
-/// attempts (`last_retryable_kind == None`) never get cookies, and no
-/// other retryable kind qualifies — the epic deliberately scopes cookie
-/// use to this one taxonomy kind.
-pub(crate) fn cookie_opts_for(claim: &Claim, cookies_file: Option<&Path>) -> FetchOpts {
-    let sensitive = claim.last_retryable_kind.as_deref()
-        == Some(crate::failure::RetryableKind::SensitiveLoginGated.tag());
+/// Kind-gated cookie routing (Epic 3 T08, ADR 0035; Epic 4a T03: the gate
+/// now consults the active [`crate::classification::ClassificationTable`]
+/// instead of a hardcoded tag): cookies ride on a fetch iff the claim's
+/// most recent retryable failure's label resolves to disposition
+/// `requires-cookie` in the active table AND the operator supplied
+/// `--cookies-file`. First attempts (`last_retryable_kind == None`) never
+/// get cookies, and labels the active table doesn't recognize (e.g. the
+/// historical placeholder `"Fetch"`) resolve to `None` and never qualify.
+pub(crate) fn cookie_opts_for(
+    claim: &Claim,
+    table: &crate::classification::ClassificationTable,
+    cookies_file: Option<&Path>,
+) -> FetchOpts {
+    use crate::classification::Disposition;
+    let needs_cookie = claim
+        .last_retryable_kind
+        .as_deref()
+        .and_then(|k| table.disposition_of(k))
+        == Some(Disposition::RequiresCookie);
     FetchOpts {
-        cookies_file: if sensitive {
+        cookies_file: if needs_cookie {
             cookies_file.map(Path::to_path_buf)
         } else {
             None
@@ -464,6 +482,7 @@ mod tests {
     /// taxonomy kind never get cookies, regardless of the flag.
     #[test]
     fn cookies_only_for_sensitive_login_gated_retries() {
+        let table = crate::classification::ClassificationTable::compiled_default().unwrap();
         let cookie = PathBuf::from("/secret/c.txt");
         let mk = |kind: Option<&str>| Claim {
             video_id: "7".into(),
@@ -471,17 +490,27 @@ mod tests {
             attempt_count: 1,
             last_retryable_kind: kind.map(String::from),
         };
-        assert_eq!(cookie_opts_for(&mk(None), Some(&cookie)).cookies_file, None);
         assert_eq!(
-            cookie_opts_for(&mk(Some("NoDataBlocks")), Some(&cookie)).cookies_file,
+            cookie_opts_for(&mk(None), &table, Some(&cookie)).cookies_file,
             None
         );
         assert_eq!(
-            cookie_opts_for(&mk(Some("SensitiveLoginGated")), Some(&cookie)).cookies_file,
+            cookie_opts_for(&mk(Some("NoDataBlocks")), &table, Some(&cookie)).cookies_file,
+            None
+        );
+        assert_eq!(
+            cookie_opts_for(&mk(Some("SensitiveLoginGated")), &table, Some(&cookie)).cookies_file,
             Some(cookie.clone())
         );
         assert_eq!(
-            cookie_opts_for(&mk(Some("SensitiveLoginGated")), None).cookies_file,
+            cookie_opts_for(&mk(Some("SensitiveLoginGated")), &table, None).cookies_file,
+            None
+        );
+        // Historical placeholder kind → unknown label → table's
+        // disposition_of returns None → no cookies, regardless of the
+        // cookie file being supplied.
+        assert_eq!(
+            cookie_opts_for(&mk(Some("Fetch")), &table, Some(&cookie)).cookies_file,
             None
         );
     }

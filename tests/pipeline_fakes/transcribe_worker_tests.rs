@@ -49,6 +49,10 @@ async fn transcribe_worker_processes_one_item_then_exits_on_channel_close() -> a
         download_workers: 3,
         channel_capacity: 2,
         cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
     };
 
     let (tx, rx) = mpsc::channel::<FetchedItem>(2);
@@ -151,6 +155,10 @@ async fn transcribe_worker_exits_on_cancellation() -> anyhow::Result<()> {
         download_workers: 3,
         channel_capacity: 2,
         cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
     };
 
     let (_tx, rx) = mpsc::channel::<FetchedItem>(2);
@@ -234,6 +242,10 @@ async fn transcribe_worker_increments_stale_after_failure_on_swept_claim() -> an
         download_workers: 3,
         channel_capacity: 2,
         cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
     };
 
     let (tx, rx) = mpsc::channel::<FetchedItem>(2);

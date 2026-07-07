@@ -119,6 +119,13 @@ async fn main() -> Result<()> {
             );
             let shared: pipeline::SharedStore = std::sync::Arc::new(tokio::sync::Mutex::new(store));
 
+            // Epic 4a: the active classification policy. `--classification`
+            // file override arrives in Task 06 — compiled default only here.
+            let classification = std::sync::Arc::new(
+                classification::ClassificationTable::compiled_default()
+                    .context("loading classification policy")?,
+            );
+
             let opts = pipeline::ProcessOptions {
                 worker_id: format!("{}-{}", hostname_or_default(), std::process::id()),
                 transcripts_root: cfg.transcripts.clone(),
@@ -129,6 +136,7 @@ async fn main() -> Result<()> {
                 download_workers: cfg.download_workers,
                 channel_capacity: cfg.channel_capacity,
                 cookies_file,
+                classification: std::sync::Arc::clone(&classification),
             };
 
             // ────────────────────────────────────────────────────────────

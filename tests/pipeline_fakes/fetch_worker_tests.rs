@@ -66,6 +66,10 @@ async fn fetch_worker_drains_pending_rows_and_exits() -> anyhow::Result<()> {
         download_workers: 3,
         channel_capacity: 2,
         cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
     };
 
     let worker_handle = tokio::spawn(fetch_worker(
@@ -160,6 +164,10 @@ async fn fetch_worker_increments_stale_after_failure_on_swept_claim() -> anyhow:
         download_workers: 3,
         channel_capacity: 2,
         cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
     };
 
     let counter_handle = Arc::clone(&stats_stale_after_failure);
@@ -322,6 +330,10 @@ async fn fetch_worker_threads_cookies_on_sensitive_login_gated_retry() -> anyhow
         download_workers: 3,
         channel_capacity: 2,
         cookies_file: Some(cookie_path.clone()),
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
     });
 
     let worker = tokio::spawn(fetch_worker(

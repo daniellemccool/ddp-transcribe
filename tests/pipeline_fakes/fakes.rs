@@ -144,6 +144,10 @@ pub(crate) async fn run_single_fetch_worker(store: SharedStore, fetcher: Arc<dyn
         download_workers: 3,
         channel_capacity: 2,
         cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
     });
 
     let worker = tokio::spawn(fetch_worker(

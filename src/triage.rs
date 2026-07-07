@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use crate::failure::{classify_message, MessageVerdict};
+use crate::classification::{ClassificationTable, Disposition};
 use crate::probe::{ProbeOracle, ProbeVerdict};
 use crate::state::Store;
 
@@ -47,11 +47,20 @@ pub struct TriageStats {
     pub by_kind: BTreeMap<String, KindCounts>,
 }
 
+// Epic 4a T03 (disclosed shim, pending T08's deletion of this module): the
+// retired `classify_message` chain is gone, so triage now classifies via
+// the same `ClassificationTable` the pipeline uses. `Disposition::Terminal`
+// takes the old `MessageVerdict::Unavailable` write-off path; both
+// `Retryable` and `RequiresCookie` take the old `MessageVerdict::Retryable`
+// probe path (triage predates the cookie-gate concept — RequiresCookie
+// rows still get probed here, same as any other retryable class, until
+// Task 08 deletes this module entirely).
 pub async fn run_triage(
     store: &mut Store,
     oracle: &dyn ProbeOracle,
     opts: &TriageOptions,
 ) -> Result<TriageStats> {
+    let table = ClassificationTable::compiled_default()?;
     let rows = store.list_failed_retryable()?;
     let mut stats = TriageStats::default();
     let probe_gap = Duration::from_secs_f64(1.0 / opts.rate_per_sec.max(0.001));
@@ -59,9 +68,11 @@ pub async fn run_triage(
     for row in rows {
         stats.examined += 1;
         let message = row.last_retryable_message.as_deref().unwrap_or("");
-        match classify_message(message) {
-            MessageVerdict::Unavailable(reason) => {
-                let k = stats.by_kind.entry(reason.tag().to_string()).or_default();
+        let m = table.classify(message);
+        match m.disposition {
+            Disposition::Terminal => {
+                let label = m.label.to_string();
+                let k = stats.by_kind.entry(label.clone()).or_default();
                 k.examined += 1;
                 // 0006: census increments are gated on the mutator's returned
                 // row-change count. A predicate miss (row left failed_retryable
@@ -75,7 +86,7 @@ pub async fn run_triage(
                 } else {
                     store.triage_mark_terminal(
                         &row.video_id,
-                        reason.tag(),
+                        &label,
                         "triage: message-class write-off",
                     )?
                 };
@@ -90,10 +101,11 @@ pub async fn run_triage(
                     );
                 }
             }
-            MessageVerdict::Retryable(kind) => {
+            Disposition::Retryable | Disposition::RequiresCookie => {
+                let label = m.label.to_string();
                 let verdict = oracle.probe(&row.video_id).await;
                 tokio::time::sleep(probe_gap).await;
-                let k = stats.by_kind.entry(kind.tag().to_string()).or_default();
+                let k = stats.by_kind.entry(label.clone()).or_default();
                 k.examined += 1;
                 match verdict {
                     ProbeVerdict::Dead => {
@@ -124,11 +136,7 @@ pub async fn run_triage(
                             let changed = if opts.dry_run {
                                 1
                             } else {
-                                store.requeue_retryable(
-                                    &row.video_id,
-                                    kind.tag(),
-                                    opts.max_attempts,
-                                )?
+                                store.requeue_retryable(&row.video_id, &label, opts.max_attempts)?
                             };
                             if changed > 0 {
                                 stats.requeued += 1;

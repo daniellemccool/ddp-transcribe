@@ -53,6 +53,10 @@ async fn pipeline_processes_one_video_to_succeeded_with_fake_fetcher() {
         download_workers: 3,
         channel_capacity: 2,
         cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts)
@@ -139,6 +143,10 @@ async fn pipeline_writes_raw_signals_to_json_artifact() {
         download_workers: 3,
         channel_capacity: 2,
         cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts)
@@ -230,6 +238,10 @@ async fn run_serial_classifies_fetch_failure_as_retryable_and_continues() -> any
         download_workers: 3,
         channel_capacity: 2,
         cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts).await?;
@@ -328,6 +340,10 @@ async fn run_serial_classifies_transcribe_failure_as_retryable_and_continues() -
         download_workers: 3,
         channel_capacity: 2,
         cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts).await?;
@@ -398,6 +414,10 @@ async fn run_serial_writes_off_ip_blocked_as_terminal() -> anyhow::Result<()> {
         download_workers: 3,
         channel_capacity: 2,
         cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts).await?;
@@ -449,6 +469,10 @@ async fn run_serial_escalates_transcribe_bug_as_err() -> anyhow::Result<()> {
         download_workers: 3,
         channel_capacity: 2,
         cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
     };
 
     let result = run_serial(&mut store, &fetcher, &transcriber, opts).await;
