@@ -143,6 +143,7 @@ pub(crate) async fn run_single_fetch_worker(store: SharedStore, fetcher: Arc<dyn
         stale_claim_threshold: Duration::from_secs(60),
         download_workers: 3,
         channel_capacity: 2,
+        cookies_file: None,
     });
 
     let worker = tokio::spawn(fetch_worker(

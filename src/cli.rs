@@ -95,6 +95,10 @@ pub enum Command {
     Process {
         #[arg(long)]
         max_videos: Option<usize>,
+        /// Netscape-format cookie file passed to yt-dlp ONLY on retries of
+        /// sensitive/login-gated videos (ADR 0035). Never sent on first attempts.
+        #[arg(long, env = "DDP_TRANSCRIBE_COOKIES_FILE")]
+        cookies_file: Option<PathBuf>,
     },
     /// Upgrade a pre-Epic-2 (v1) state.sqlite to the current schema version.
     /// Idempotent: no-op if already at the current version.

@@ -16,8 +16,8 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    classify_fetch_phase, fetch_and_decode, write_artifacts_and_mark, ProcessOptions,
-    ProcessOutcome, ProcessStats,
+    classify_fetch_phase, cookie_opts_for, fetch_and_decode, write_artifacts_and_mark,
+    ProcessOptions, ProcessOutcome, ProcessStats,
 };
 use crate::errors::TranscribeError;
 use crate::failure::{classify_transcribe_error, ClassifiedFailure};
@@ -204,6 +204,11 @@ pub async fn fetch_worker(
             return Ok(());
         };
 
+        // Epic 3 T08: kind-gated cookie routing (ADR 0035). Computed at the
+        // call site so the policy decision (which reads `claim` fresh each
+        // iteration) never goes stale across retries.
+        let fetch_opts = cookie_opts_for(&claim, opts.cookies_file.as_deref());
+
         // T16: wrap the fetch in the cancellation select so a mid-fetch
         // shutdown drops the in-flight `acquire` future promptly (see the
         // docstring's Cancellation latency section) instead of relying on
@@ -214,7 +219,7 @@ pub async fn fetch_worker(
                 tracing::info!(worker = %worker_id, "fetch_worker: cancellation during fetch; exiting");
                 return Ok(());
             }
-            r = fetch_and_decode(fetcher.as_ref(), &claim) => r,
+            r = fetch_and_decode(fetcher.as_ref(), &claim, &fetch_opts) => r,
         };
 
         match fetch_result {

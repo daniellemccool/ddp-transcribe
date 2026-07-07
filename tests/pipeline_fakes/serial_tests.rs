@@ -32,6 +32,7 @@ async fn pipeline_processes_one_video_to_succeeded_with_fake_fetcher() {
         always_fails: false,
         first_call_gate: tokio::sync::Mutex::new(None),
         canned_stderr: std::sync::Mutex::new(None),
+        received_opts: std::sync::Mutex::new(Vec::new()),
     };
 
     let transcriber = FakeTranscriber::scripted(TranscribeOutput {
@@ -51,6 +52,7 @@ async fn pipeline_processes_one_video_to_succeeded_with_fake_fetcher() {
         stale_claim_threshold: Duration::from_secs(30 * 60),
         download_workers: 3,
         channel_capacity: 2,
+        cookies_file: None,
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts)
@@ -105,6 +107,7 @@ async fn pipeline_writes_raw_signals_to_json_artifact() {
         always_fails: false,
         first_call_gate: tokio::sync::Mutex::new(None),
         canned_stderr: std::sync::Mutex::new(None),
+        received_opts: std::sync::Mutex::new(Vec::new()),
     };
 
     // Scripted output with one realistic segment+token so the projection
@@ -135,6 +138,7 @@ async fn pipeline_writes_raw_signals_to_json_artifact() {
         stale_claim_threshold: Duration::from_secs(30 * 60),
         download_workers: 3,
         channel_capacity: 2,
+        cookies_file: None,
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts)
@@ -225,6 +229,7 @@ async fn run_serial_classifies_fetch_failure_as_retryable_and_continues() -> any
         stale_claim_threshold: Duration::from_secs(60),
         download_workers: 3,
         channel_capacity: 2,
+        cookies_file: None,
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts).await?;
@@ -309,6 +314,7 @@ async fn run_serial_classifies_transcribe_failure_as_retryable_and_continues() -
         always_fails: false,
         first_call_gate: tokio::sync::Mutex::new(None),
         canned_stderr: std::sync::Mutex::new(None),
+        received_opts: std::sync::Mutex::new(Vec::new()),
     };
     let transcriber = FakeTranscriber::always_fails_retryable();
 
@@ -321,6 +327,7 @@ async fn run_serial_classifies_transcribe_failure_as_retryable_and_continues() -
         stale_claim_threshold: Duration::from_secs(60),
         download_workers: 3,
         channel_capacity: 2,
+        cookies_file: None,
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts).await?;
@@ -390,6 +397,7 @@ async fn run_serial_writes_off_ip_blocked_as_terminal() -> anyhow::Result<()> {
         stale_claim_threshold: Duration::from_secs(60),
         download_workers: 3,
         channel_capacity: 2,
+        cookies_file: None,
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts).await?;
@@ -427,6 +435,7 @@ async fn run_serial_escalates_transcribe_bug_as_err() -> anyhow::Result<()> {
         always_fails: false,
         first_call_gate: tokio::sync::Mutex::new(None),
         canned_stderr: std::sync::Mutex::new(None),
+        received_opts: std::sync::Mutex::new(Vec::new()),
     };
     let transcriber = FakeTranscriber::always_fails_bug();
 
@@ -439,6 +448,7 @@ async fn run_serial_escalates_transcribe_bug_as_err() -> anyhow::Result<()> {
         stale_claim_threshold: Duration::from_secs(60),
         download_workers: 3,
         channel_capacity: 2,
+        cookies_file: None,
     };
 
     let result = run_serial(&mut store, &fetcher, &transcriber, opts).await;

@@ -48,6 +48,7 @@ async fn transcribe_worker_processes_one_item_then_exits_on_channel_close() -> a
         stale_claim_threshold: Duration::from_secs(60),
         download_workers: 3,
         channel_capacity: 2,
+        cookies_file: None,
     };
 
     let (tx, rx) = mpsc::channel::<FetchedItem>(2);
@@ -149,6 +150,7 @@ async fn transcribe_worker_exits_on_cancellation() -> anyhow::Result<()> {
         stale_claim_threshold: Duration::from_secs(60),
         download_workers: 3,
         channel_capacity: 2,
+        cookies_file: None,
     };
 
     let (_tx, rx) = mpsc::channel::<FetchedItem>(2);
@@ -231,6 +233,7 @@ async fn transcribe_worker_increments_stale_after_failure_on_swept_claim() -> an
         stale_claim_threshold: Duration::from_secs(60),
         download_workers: 3,
         channel_capacity: 2,
+        cookies_file: None,
     };
 
     let (tx, rx) = mpsc::channel::<FetchedItem>(2);

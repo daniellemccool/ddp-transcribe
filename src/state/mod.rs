@@ -294,9 +294,8 @@ pub struct Claim {
     /// None on first attempt. Epic 3 cookie routing keys on this being
     /// "SensitiveLoginGated" (ADR 0035); triage's requeue normalizes
     /// historical placeholder kinds before the row becomes claimable again.
-    // 0002: consumed by Epic 3 Task 08's kind-gated cookie routing in the
-    // fetch worker; lift the allow when that wiring lands.
-    #[allow(dead_code)]
+    // 0002: `#[allow(dead_code)]` lifted here (Task 08) — now read by
+    // `pipeline::cookie_opts_for`'s kind-gated cookie routing.
     pub last_retryable_kind: Option<String>,
 }
 

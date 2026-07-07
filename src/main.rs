@@ -67,7 +67,10 @@ async fn main() -> Result<()> {
                 "ingest complete"
             );
         }
-        cli::Command::Process { max_videos } => {
+        cli::Command::Process {
+            max_videos,
+            cookies_file,
+        } => {
             let store = state::Store::open(&cfg.state_db).context("opening state DB")?;
             std::fs::create_dir_all(&cfg.transcripts).context("creating transcripts dir")?;
             // Tmp cleanup at startup
@@ -122,6 +125,7 @@ async fn main() -> Result<()> {
                 stale_claim_threshold: cfg.stale_claim_threshold,
                 download_workers: cfg.download_workers,
                 channel_capacity: cfg.channel_capacity,
+                cookies_file,
             };
 
             // ────────────────────────────────────────────────────────────

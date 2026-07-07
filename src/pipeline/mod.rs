@@ -18,14 +18,14 @@
 //!   mark_succeeded + cleanup). 0008 invariant lives here: artifacts are
 //!   durable on disk BEFORE `mark_succeeded`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
 
 use crate::audio;
-use crate::fetcher::{Acquisition, VideoFetcher};
+use crate::fetcher::{Acquisition, FetchOpts, VideoFetcher};
 use crate::output::artifacts::{RawSignals, TranscriptMetadata};
 use crate::output::{artifacts, shard};
 use crate::state::{Claim, Store, SuccessArtifacts};
@@ -82,6 +82,11 @@ pub struct ProcessOptions {
     /// then per 0002.
     #[allow(dead_code)]
     pub channel_capacity: usize,
+    /// Netscape-format cookie file, flag-tunable via `--cookies-file`
+    /// (Epic 3 T08). Threaded to `fetcher.acquire` ONLY on claims whose
+    /// `last_retryable_kind` is `SensitiveLoginGated` — see
+    /// [`cookie_opts_for`]. ADR 0035: first attempts never get cookies.
+    pub cookies_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Default)]
@@ -166,6 +171,24 @@ pub fn classify_fetch_phase(e: &FetchPhaseError) -> crate::failure::ClassifiedFa
     }
 }
 
+/// Kind-gated cookie routing (Epic 3 T08, ADR 0035): cookies ride on a
+/// fetch iff the claim's most recent retryable failure was
+/// `SensitiveLoginGated` AND the operator supplied `--cookies-file`. First
+/// attempts (`last_retryable_kind == None`) never get cookies, and no
+/// other retryable kind qualifies — the epic deliberately scopes cookie
+/// use to this one taxonomy kind.
+pub(crate) fn cookie_opts_for(claim: &Claim, cookies_file: Option<&Path>) -> FetchOpts {
+    let sensitive = claim.last_retryable_kind.as_deref()
+        == Some(crate::failure::RetryableKind::SensitiveLoginGated.tag());
+    FetchOpts {
+        cookies_file: if sensitive {
+            cookies_file.map(Path::to_path_buf)
+        } else {
+            None
+        },
+    }
+}
+
 /// Phase 1+2: acquire the audio and decode it to f32 PCM samples.
 ///
 /// Returns the owned samples + the WAV path on disk (needed downstream so
@@ -178,11 +201,18 @@ pub fn classify_fetch_phase(e: &FetchPhaseError) -> crate::failure::ClassifiedFa
 /// original signature) so callers can classify the failure via
 /// [`classify_fetch_phase`] without downcasting through an anyhow chain
 /// (Epic 3 T07).
+///
+/// `opts` (Epic 3 T08) carries the per-claim cookie decision computed by
+/// [`cookie_opts_for`] at the call site — this function does not decide
+/// policy, only threads the decision to `fetcher.acquire`.
 pub(crate) async fn fetch_and_decode(
     fetcher: &dyn VideoFetcher,
     claim: &Claim,
+    opts: &FetchOpts,
 ) -> Result<(Vec<f32>, PathBuf), FetchPhaseError> {
-    let acquisition = fetcher.acquire(&claim.video_id, &claim.source_url).await?;
+    let acquisition = fetcher
+        .acquire(&claim.video_id, &claim.source_url, opts)
+        .await?;
 
     // Plan A's `Acquisition` has only one variant; Plan B will add `Unavailable`
     // and `ReadyTranscript`, at which point the `match` becomes load-bearing.
@@ -191,7 +221,14 @@ pub(crate) async fn fetch_and_decode(
     let wav_path = match acquisition {
         Acquisition::AudioFile(p) => p,
     };
-    tracing::info!(video_id = claim.video_id.as_str(), wav = %wav_path.display(), "audio acquired");
+    // Tracing hygiene (Epic 3 T08, ADR 0035): log ONLY whether cookies were
+    // attached, never the path — the path must not reach logs or the state DB.
+    tracing::info!(
+        video_id = claim.video_id.as_str(),
+        wav = %wav_path.display(),
+        cookies = opts.cookies_file.is_some(),
+        "audio acquired"
+    );
 
     // Decode WAV → owned Vec<f32> samples (0014: 16 kHz mono validated
     // inside decode_wav). Owned samples cross the worker-thread boundary
@@ -414,4 +451,37 @@ pub(crate) fn write_artifacts_and_mark(
 
     tracing::info!(video_id = claim.video_id.as_str(), "succeeded");
     Ok(ProcessOutcome::Succeeded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Epic 3 T08 / ADR 0035: cookies ride ONLY when the claim's
+    /// `last_retryable_kind` is exactly `SensitiveLoginGated` AND a cookie
+    /// file was supplied. First attempts (`None`) and every other
+    /// taxonomy kind never get cookies, regardless of the flag.
+    #[test]
+    fn cookies_only_for_sensitive_login_gated_retries() {
+        let cookie = PathBuf::from("/secret/c.txt");
+        let mk = |kind: Option<&str>| Claim {
+            video_id: "7".into(),
+            source_url: "u".into(),
+            attempt_count: 1,
+            last_retryable_kind: kind.map(String::from),
+        };
+        assert_eq!(cookie_opts_for(&mk(None), Some(&cookie)).cookies_file, None);
+        assert_eq!(
+            cookie_opts_for(&mk(Some("NoDataBlocks")), Some(&cookie)).cookies_file,
+            None
+        );
+        assert_eq!(
+            cookie_opts_for(&mk(Some("SensitiveLoginGated")), Some(&cookie)).cookies_file,
+            Some(cookie.clone())
+        );
+        assert_eq!(
+            cookie_opts_for(&mk(Some("SensitiveLoginGated")), None).cookies_file,
+            None
+        );
+    }
 }

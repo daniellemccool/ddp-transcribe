@@ -45,6 +45,7 @@ async fn run_pipelined_honors_max_videos_cap() -> anyhow::Result<()> {
         always_fails: false,
         first_call_gate: tokio::sync::Mutex::new(None),
         canned_stderr: std::sync::Mutex::new(None),
+        received_opts: std::sync::Mutex::new(Vec::new()),
     });
     let transcriber: Arc<dyn Transcriber> = Arc::new(FakeTranscriber::echo());
 
@@ -57,6 +58,7 @@ async fn run_pipelined_honors_max_videos_cap() -> anyhow::Result<()> {
         stale_claim_threshold: Duration::from_secs(60),
         download_workers: 3,
         channel_capacity: 2,
+        cookies_file: None,
     };
 
     let stats = run_pipelined(Arc::clone(&shared), fetcher, transcriber, opts).await?;
@@ -122,6 +124,7 @@ async fn run_pipelined_drains_all_rows_and_returns_stats() -> anyhow::Result<()>
         always_fails: false,
         first_call_gate: tokio::sync::Mutex::new(None),
         canned_stderr: std::sync::Mutex::new(None),
+        received_opts: std::sync::Mutex::new(Vec::new()),
     });
     let transcriber: Arc<dyn Transcriber> = Arc::new(FakeTranscriber::echo());
 
@@ -134,6 +137,7 @@ async fn run_pipelined_drains_all_rows_and_returns_stats() -> anyhow::Result<()>
         stale_claim_threshold: Duration::from_secs(60),
         download_workers: 3,
         channel_capacity: 2,
+        cookies_file: None,
     };
 
     let stats = run_pipelined(Arc::clone(&shared), fetcher, transcriber, opts).await?;

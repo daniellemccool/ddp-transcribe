@@ -48,6 +48,7 @@ async fn fetch_worker_drains_pending_rows_and_exits() -> anyhow::Result<()> {
         always_fails: false,
         first_call_gate: tokio::sync::Mutex::new(None),
         canned_stderr: std::sync::Mutex::new(None),
+        received_opts: std::sync::Mutex::new(Vec::new()),
     };
 
     let shared: SharedStore = Arc::new(TokioMutex::new(store));
@@ -64,6 +65,7 @@ async fn fetch_worker_drains_pending_rows_and_exits() -> anyhow::Result<()> {
         stale_claim_threshold: Duration::from_secs(60),
         download_workers: 3,
         channel_capacity: 2,
+        cookies_file: None,
     };
 
     let worker_handle = tokio::spawn(fetch_worker(
@@ -157,6 +159,7 @@ async fn fetch_worker_increments_stale_after_failure_on_swept_claim() -> anyhow:
         stale_claim_threshold: Duration::from_secs(60),
         download_workers: 3,
         channel_capacity: 2,
+        cookies_file: None,
     };
 
     let counter_handle = Arc::clone(&stats_stale_after_failure);
@@ -245,4 +248,102 @@ async fn fetch_worker_records_taxonomy_kind_for_retryable() {
         Some("HttpError"),
         "placeholder \"Fetch\" kind must be gone"
     );
+}
+
+/// Epic 3 T08 / ADR 0035: cookies ride ONLY on a retry whose
+/// `last_retryable_kind` is `SensitiveLoginGated`. Drives the full path
+/// through real worker dispatch: seed a pending row → fail it with the
+/// sensitive-login-gated fixture message (recording the taxonomy kind) →
+/// requeue back to pending (Task 05's `requeue_retryable`) → re-claim
+/// through a fresh `fetch_worker` with `cookies_file` set in
+/// `ProcessOptions`. The second `acquire` call must have carried the
+/// cookie path; a first-attempt claim never would (kind gate).
+#[tokio::test]
+async fn fetch_worker_threads_cookies_on_sensitive_login_gated_retry() -> anyhow::Result<()> {
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    use ddp_transcribe::fetcher::VideoFetcher;
+    use ddp_transcribe::pipeline::{fetch_worker, FetchedItem, ProcessOptions};
+
+    let video_id = "7000000000000000012";
+    let (store, tmp) = store_with_pending(&[video_id]);
+
+    // Phase 1: first attempt fails with the sensitive-login-gated message —
+    // `classify_message` maps it to `RetryableKind::SensitiveLoginGated`.
+    // `run_single_fetch_worker` uses `ProcessOptions { cookies_file: None,
+    // .. }`, so this first `acquire` call carries no cookies regardless
+    // (kind is `None` at claim time — the gate would reject them anyway).
+    let failing_fetcher = std::sync::Arc::new(FakeFetcher::fails_with_stderr(
+        "ERROR: [TikTok] 7000000000000000012: This post may not be comfortable for some \
+         audiences. Log in for access. Use --cookies-from-browser or --cookies for the \
+         authentication.",
+    ));
+    run_single_fetch_worker(store.clone(), failing_fetcher).await;
+
+    let (status, kind) = status_and_retryable_kind(&store, video_id).await;
+    assert_eq!(status, "failed_retryable");
+    assert_eq!(kind.as_deref(), Some("SensitiveLoginGated"));
+
+    // Requeue back to pending (Task 05's mutator) — preserves the kind so
+    // the next claim's `last_retryable_kind` still reads
+    // "SensitiveLoginGated".
+    {
+        let mut guard = store.lock().await;
+        let requeued = guard.requeue_retryable(video_id, "SensitiveLoginGated", 5)?;
+        assert_eq!(requeued, 1, "row must requeue to pending");
+    }
+
+    // Phase 2: re-claim through a fresh fetch_worker with `cookies_file`
+    // set. The recorder captures every FetchOpts passed to `acquire`.
+    let cookie_path = PathBuf::from("/secret/tiktok-cookies.txt");
+    let wav = tmp.path().join(format!("{video_id}.wav"));
+    std::fs::copy(silence_fixture(), &wav)?;
+    let map = HashMap::from([(video_id.to_string(), wav)]);
+    let fetcher = Arc::new(FakeFetcher {
+        canned: Mutex::new(map),
+        always_fails: false,
+        first_call_gate: tokio::sync::Mutex::new(None),
+        canned_stderr: std::sync::Mutex::new(None),
+        received_opts: std::sync::Mutex::new(Vec::new()),
+    });
+
+    let (tx, mut rx) = mpsc::channel::<FetchedItem>(2);
+    let opts = Arc::new(ProcessOptions {
+        worker_id: "fetcher-2".into(),
+        transcripts_root: tmp.path().join("transcripts"),
+        max_videos: None,
+        compute_lang_probs: false,
+        transcribe_timeout: Duration::from_secs(5),
+        stale_claim_threshold: Duration::from_secs(60),
+        download_workers: 3,
+        channel_capacity: 2,
+        cookies_file: Some(cookie_path.clone()),
+    });
+
+    let worker = tokio::spawn(fetch_worker(
+        CancellationToken::new(),
+        store.clone(),
+        Arc::clone(&fetcher) as Arc<dyn VideoFetcher>,
+        tx,
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+        opts,
+    ));
+
+    while rx.recv().await.is_some() {}
+    worker.await.expect("join fetch_worker")?;
+
+    let recorded = fetcher.received_opts.lock().expect("received_opts mutex");
+    assert_eq!(recorded.len(), 1, "exactly one acquire call in phase 2");
+    assert_eq!(
+        recorded[0].cookies_file.as_deref(),
+        Some(cookie_path.as_path()),
+        "cookies must ride on the SensitiveLoginGated retry"
+    );
+
+    Ok(())
 }

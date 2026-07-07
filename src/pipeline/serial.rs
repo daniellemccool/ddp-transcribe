@@ -8,8 +8,8 @@
 use anyhow::{anyhow, Context, Result};
 
 use super::{
-    classify_fetch_phase, fetch_and_decode, transcribe_and_write, FetchPhaseError, ProcessOptions,
-    ProcessOutcome, ProcessStats,
+    classify_fetch_phase, cookie_opts_for, fetch_and_decode, transcribe_and_write, FetchPhaseError,
+    ProcessOptions, ProcessOutcome, ProcessStats,
 };
 use crate::errors::TranscribeError;
 use crate::failure::{classify_transcribe_error, ClassifiedFailure, RetryableKind};
@@ -193,7 +193,9 @@ async fn process_one(
         "claimed"
     );
 
-    let (samples, wav_path) = fetch_and_decode(fetcher, claim).await?;
+    // Epic 3 T08: kind-gated cookie routing (ADR 0035).
+    let fetch_opts = cookie_opts_for(claim, opts.cookies_file.as_deref());
+    let (samples, wav_path) = fetch_and_decode(fetcher, claim, &fetch_opts).await?;
     transcribe_and_write(
         store,
         transcriber,
@@ -213,7 +215,7 @@ mod tests {
     //! tests in `tests/pipeline_fakes.rs` exercise `run_serial`.
     use super::*;
     use crate::errors::TranscribeError;
-    use crate::fetcher::{Acquisition, FakeFetcher, VideoFetcher};
+    use crate::fetcher::{Acquisition, FakeFetcher, FetchOpts, VideoFetcher};
     use crate::state::Store;
     use crate::transcribe::{PerCallConfig, TranscribeOutput, Transcriber};
     use async_trait::async_trait;
@@ -268,6 +270,7 @@ mod tests {
             always_fails: false,
             first_call_gate: tokio::sync::Mutex::new(None),
             canned_stderr: Mutex::new(None),
+            received_opts: Mutex::new(Vec::new()),
         };
         let transcriber = ScriptedTranscriber {
             output: TranscribeOutput {
@@ -293,7 +296,9 @@ mod tests {
 
         // Sanity check the fetcher returns the canned audio (defensive —
         // the `Acquisition` variant could change).
-        let acq = fetcher.acquire("vid_a", "https://example/a").await?;
+        let acq = fetcher
+            .acquire("vid_a", "https://example/a", &FetchOpts::default())
+            .await?;
         assert!(matches!(acq, Acquisition::AudioFile(_)));
 
         let opts = ProcessOptions {
@@ -305,6 +310,7 @@ mod tests {
             stale_claim_threshold: Duration::from_secs(60),
             download_workers: 3,
             channel_capacity: 2,
+            cookies_file: None,
         };
 
         // Use the same Claim returned by claim_next — process_one needs
