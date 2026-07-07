@@ -99,13 +99,19 @@ fn handle_record_fetch_failure_outcome(
 ///
 /// `Err`: the store call itself failed — Bug-class, propagated with context
 /// identifying which mutator and which row.
+///
+/// Returns the mutator's row-change count (0006 shape) so call sites can
+/// gate follow-up accounting on "the write actually landed" — e.g.
+/// fetch_worker's `terminal_by_label` census increment must NOT run on the
+/// `Ok(0)` stale path (nothing was written; counting it would inflate the
+/// census — Epic 4a T06 review fix).
 fn handle_mutator_result(
     result: anyhow::Result<usize>,
     worker_id: &str,
     video_id: &str,
     stale_counter: &Arc<AtomicUsize>,
     op: &'static str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<usize> {
     match result {
         Ok(0) => {
             stale_counter.fetch_add(1, Ordering::Relaxed);
@@ -115,9 +121,9 @@ fn handle_mutator_result(
                 "{op} swallowed: row no longer claimed by this worker \
                  (probably swept + re-claimed by another process)"
             );
-            Ok(())
+            Ok(0)
         }
-        Ok(_) => Ok(()),
+        Ok(changed) => Ok(changed),
         Err(e) => Err(e.context(format!("{op} for {video_id}"))),
     }
 }
@@ -173,14 +179,20 @@ pub struct FetchedItem {
 /// pushes a [`FetchedItem`] onto the channel. Exits cleanly on
 /// `claim_next == None` (drain semantics per 0026 — no polling).
 ///
-/// **Error classification (Epic 3 T07).** `fetch_and_decode`'s
+/// **Error classification (Epic 3 T07; Epic 4a T06).** `fetch_and_decode`'s
 /// [`super::FetchPhaseError`] is run through [`classify_fetch_phase`]:
 /// - `Bug`: returns `Err` — the orchestrator reacts per 0025 (cancel all +
 ///   drain).
 /// - `Unavailable`: write-off class (ADR 0033) — calls
 ///   `mark_terminal_failure` and continues; the row never retries.
-/// - `Retryable`: calls `mark_retryable_failure` with the typed kind's tag
-///   and continues.
+/// - `Retryable`: calls `record_fetch_failure`, which decides
+///   requeue-vs-exhaust-vs-park in one transaction (Epic 4a), and
+///   continues; the outcome routes to the retry counters via
+///   [`handle_record_fetch_failure_outcome`].
+///
+/// Every failure-dispatched attempt also bumps `stats_failed` once (before
+/// the classifier match), mirroring `run_serial`'s per-attempt bump —
+/// ADR-0007 input-side accounting.
 ///
 /// **Mutex hold-time discipline.** The shared store guard is acquired
 /// briefly for `claim_next` and the failure mutators only; it is
@@ -223,6 +235,7 @@ pub async fn fetch_worker(
     stats_requeued_for_retry: Arc<AtomicUsize>,
     stats_exhausted_retries: Arc<AtomicUsize>,
     stats_parked_for_cookies: Arc<AtomicUsize>,
+    stats_failed: Arc<AtomicUsize>,
     terminal_by_label: TerminalByLabel,
     claims_counter: Arc<AtomicUsize>,
     opts: Arc<ProcessOptions>,
@@ -319,6 +332,12 @@ pub async fn fetch_worker(
             }
             Err(e) => {
                 let video_id = claim.video_id.clone();
+                // ADR-0007 input-side accounting: one failure-dispatched
+                // attempt, bumped before the classifier match — mirrors
+                // run_serial's `stats.failed += 1` at the top of its Err
+                // arm. (The Bug arm returns Err below, discarding stats,
+                // so the extra bump there is inert — same as serial.)
+                stats_failed.fetch_add(1, Ordering::Relaxed);
                 match classify_fetch_phase(&e, &opts.classification) {
                     ClassifiedFailure::Bug { ctx } => {
                         return Err(anyhow!("fetch Bug for {video_id}: {}", ctx.message()));
@@ -339,7 +358,7 @@ pub async fn fetch_worker(
                                 &ctx.message(),
                             )
                         };
-                        handle_mutator_result(
+                        let changed = handle_mutator_result(
                             result,
                             &worker_id,
                             &video_id,
@@ -349,7 +368,11 @@ pub async fn fetch_worker(
                         // Epic 4a: run-side terminal-by-label census. Only
                         // fetch_worker produces Unavailable; the map is
                         // folded into ProcessStats after the join loop.
-                        {
+                        // Gated on the write actually landing: on the
+                        // Ok(0) stale path nothing was written (the row
+                        // was swept + re-claimed elsewhere) and counting
+                        // it would inflate the census (T06 review fix).
+                        if changed > 0 {
                             let mut m = terminal_by_label.lock().await;
                             *m.entry(label.clone()).or_insert(0) += 1;
                         }
@@ -423,7 +446,7 @@ pub async fn fetch_worker(
 /// (per ADR 0012) fires the per-request `Arc<AtomicBool>`, and
 /// whisper.cpp's `abort_callback` aborts inference within milliseconds.
 ///
-/// **Error classification (Epic 3 T07).**
+/// **Error classification (Epic 3 T07; Epic 4a T06).**
 /// - [`TranscribeError::Cancelled`]: row stays `in_progress`, sweep
 ///   recovers on next startup. Worker returns `Ok(())` — coordinated
 ///   shutdown is not a Bug.
@@ -434,10 +457,13 @@ pub async fn fetch_worker(
 ///   produces `Unavailable` and only produces `Bug` for the
 ///   already-excluded `TranscribeError::Bug` case — both arms are
 ///   `unreachable!()` in this match. The live path is `Retryable`:
-///   `mark_retryable_failure` with the typed kind's tag. On `Ok(0)` (claim
-///   swept mid-flight), increment `stats_stale_after_failure` and continue
-///   (symmetric to T16's
-///   amendment for the fetch side).
+///   `record_fetch_failure` decides requeue-vs-exhaust-vs-park (Epic 4a);
+///   the outcome routes to the retry counters via
+///   [`handle_record_fetch_failure_outcome`], whose `StaleClaim` arm
+///   (claim swept mid-flight) increments `stats_stale_after_failure` and
+///   continues (symmetric to T16's amendment for the fetch side). Each
+///   dispatched attempt also bumps `stats_failed` once (ADR-0007
+///   input-side accounting, mirroring `run_serial`).
 ///
 /// **Success-side stale-claim routing (T18 Decision A).** When
 /// `write_artifacts_and_mark` returns `Ok(StaleAfterSuccess)`,
@@ -463,6 +489,8 @@ pub async fn transcribe_worker(
     stats_requeued_for_retry: Arc<AtomicUsize>,
     stats_exhausted_retries: Arc<AtomicUsize>,
     stats_parked_for_cookies: Arc<AtomicUsize>,
+    stats_succeeded: Arc<AtomicUsize>,
+    stats_failed: Arc<AtomicUsize>,
     opts: Arc<ProcessOptions>,
 ) -> Result<()> {
     let worker_id = opts.worker_id.clone();
@@ -549,9 +577,13 @@ pub async fn transcribe_worker(
                 // symmetric to `stats_stale_after_failure`. Artifacts are
                 // durable per 0008; the row sits in pending and will be
                 // re-claimed. Counter is monotonic telemetry — Relaxed is
-                // fine.
+                // fine. Otherwise mark_succeeded changed a row: bump the
+                // input-side success counter (ADR-0007; T06 review fix —
+                // ProcessStats is per-attempt, not DB-status-derived).
                 if outcome == ProcessOutcome::StaleAfterSuccess {
                     stats_stale_after_success.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    stats_succeeded.fetch_add(1, Ordering::Relaxed);
                 }
             }
             Err(TranscribeError::Cancelled) => {
@@ -587,6 +619,9 @@ pub async fn transcribe_worker(
                 // `Unavailable` — cannot reach either arm here. Both are
                 // `unreachable!()`; the live path is `Retryable`.
                 let video_id = claim.video_id.clone();
+                // ADR-0007 input-side accounting: one failure-dispatched
+                // attempt (mirrors run_serial's per-attempt bump).
+                stats_failed.fetch_add(1, Ordering::Relaxed);
                 match classify_transcribe_error(&e) {
                     ClassifiedFailure::Bug { .. } => {
                         unreachable!("TranscribeError::Bug is caught by the arm above this match")
@@ -645,8 +680,13 @@ pub async fn transcribe_worker(
 /// `tokio_util::sync::CancellationToken`. On first `Err`/panic from any
 /// worker, fires `token.cancel()` and drains the remaining tasks. On
 /// clean drain (every worker exits `Ok(())` after `claim_next == None`
-/// or channel close), computes a `ProcessStats` from the DB and merges
-/// the two stale-claim counters in.
+/// or channel close), assembles `ProcessStats` from the shared input-side
+/// counters (ADR-0007): every field counts THIS RUN's attempts —
+/// `claimed` per successful `claim_next` (retry re-claims included),
+/// `succeeded` per row-changing `mark_succeeded`, `failed` per
+/// failure-dispatched attempt — never DB-status row counts (which would
+/// under-report retried attempts and absorb prior runs' rows; Epic 4a
+/// T06 review fix).
 ///
 /// **0025 shutdown ORDER — steps 1-3 happen inside this function:**
 /// 1. `token.cancel()` is fired on the first `Err` from any worker.
@@ -703,6 +743,11 @@ pub async fn run_pipelined(
     let stats_exhausted_retries = Arc::new(AtomicUsize::new(0));
     let stats_parked_for_cookies = Arc::new(AtomicUsize::new(0));
     let terminal_by_label: TerminalByLabel = Arc::new(TokioMutex::new(BTreeMap::new()));
+    // ADR-0007 input-side attempt counters (T06 review fix): `succeeded`
+    // is bumped by transcribe_worker per row-changing mark_succeeded;
+    // `failed` by both workers per failure-dispatched attempt.
+    let stats_succeeded = Arc::new(AtomicUsize::new(0));
+    let stats_failed = Arc::new(AtomicUsize::new(0));
     // Shared counter for --max-videos cap. Checked and incremented inside the
     // Mutex<Store> guard in fetch_worker, so the check+claim+increment is
     // race-free across all concurrent fetch workers.
@@ -721,6 +766,8 @@ pub async fn run_pipelined(
         Arc::clone(&stats_requeued_for_retry),
         Arc::clone(&stats_exhausted_retries),
         Arc::clone(&stats_parked_for_cookies),
+        Arc::clone(&stats_succeeded),
+        Arc::clone(&stats_failed),
         Arc::clone(&opts_arc),
     ));
 
@@ -737,6 +784,7 @@ pub async fn run_pipelined(
             Arc::clone(&stats_requeued_for_retry),
             Arc::clone(&stats_exhausted_retries),
             Arc::clone(&stats_parked_for_cookies),
+            Arc::clone(&stats_failed),
             Arc::clone(&terminal_by_label),
             Arc::clone(&claims_counter),
             Arc::clone(&opts_arc),
@@ -751,7 +799,8 @@ pub async fn run_pipelined(
     // Supervise: on first Err or panic, cancel the token and drain.
     // Bug-class signals propagate via the `Err` join arm; non-Bug
     // outcomes from individual rows are absorbed inside the workers
-    // (via `mark_retryable_failure` + the two counters).
+    // (via `record_fetch_failure` / `mark_terminal_failure` + the shared
+    // counters).
     let mut first_error: Option<anyhow::Error> = None;
     while let Some(joined) = join_set.join_next().await {
         match joined {
@@ -785,82 +834,28 @@ pub async fn run_pipelined(
             }
         }
     }
-    // 0025 step 3 complete: every worker has joined. Compute the final
-    // stats by summing per-status DB row counts + merging the two
-    // counters.
-
-    let mut stats = {
-        let guard = store.lock().await;
-        compute_process_stats(&guard)?
-    };
-    stats.stale_after_failure = stats_stale_after_failure.load(Ordering::Relaxed);
-    stats.stale_after_success = stats_stale_after_success.load(Ordering::Relaxed);
-    stats.requeued_for_retry = stats_requeued_for_retry.load(Ordering::Relaxed);
-    stats.exhausted_retries = stats_exhausted_retries.load(Ordering::Relaxed);
-    stats.parked_for_cookies = stats_parked_for_cookies.load(Ordering::Relaxed);
-    // Every worker has joined, so no writer remains; take the aggregated map.
-    stats.terminal_by_label = {
-        let m = terminal_by_label.lock().await;
-        m.clone()
+    // 0025 step 3 complete: every worker has joined; no counter writer
+    // remains. Assemble the final stats from the shared input-side
+    // counters (ADR-0007; T06 review fix). The previous status-derived
+    // COUNT-by-status proxy (`compute_process_stats`) is retired: with
+    // in-batch retries a fail-once-then-recover video consumes 2 claims
+    // but would have reported claimed=1/failed=0, contradicting serial's
+    // per-attempt semantics for the identical struct fields and Task 07's
+    // census expectations.
+    let stats = ProcessStats {
+        claimed: claims_counter.load(Ordering::Relaxed),
+        succeeded: stats_succeeded.load(Ordering::Relaxed),
+        failed: stats_failed.load(Ordering::Relaxed),
+        stale_after_success: stats_stale_after_success.load(Ordering::Relaxed),
+        stale_after_failure: stats_stale_after_failure.load(Ordering::Relaxed),
+        requeued_for_retry: stats_requeued_for_retry.load(Ordering::Relaxed),
+        exhausted_retries: stats_exhausted_retries.load(Ordering::Relaxed),
+        parked_for_cookies: stats_parked_for_cookies.load(Ordering::Relaxed),
+        terminal_by_label: terminal_by_label.lock().await.clone(),
     };
 
     if let Some(e) = first_error {
         return Err(e);
     }
     Ok(stats)
-}
-
-/// Compute `ProcessStats` from the DB after `run_pipelined` drains.
-/// Counts rows by status (succeeded / failed_retryable / failed_terminal)
-/// under the assumption that the run started on a clean state or that
-/// the operator interprets `claimed` as "rows in a terminal status by
-/// the end of this run". Pending/in_progress rows are not counted —
-/// `claimed = succeeded + failed_retryable + failed_terminal`.
-///
-/// Stale-claim counters (`stale_after_success`, `stale_after_failure`)
-/// are written by the caller after this returns; both are workers' own
-/// telemetry rather than DB-derivable.
-///
-/// For run-to-run accuracy in mid-stream invocations, a richer metric
-/// (claim-count delta tracked in an `Arc<Mutex<ProcessStats>>` shared
-/// across workers) would be preferable — left for Epic 5's ops-hygiene
-/// work; Plan B Epic 2 ships this COUNT-by-status proxy because the
-/// happy-path test and the 0027 bake validate only per-row status.
-fn compute_process_stats(store: &Store) -> Result<ProcessStats> {
-    let mut succeeded: usize = 0;
-    let mut failed_retryable: usize = 0;
-    let mut failed_terminal: usize = 0;
-
-    let mut stmt = store
-        .conn()
-        .prepare("SELECT status, COUNT(*) FROM videos GROUP BY status")
-        .context("preparing status-count query")?;
-    // COUNT(*) is non-negative and far below usize::MAX.
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    let rows = stmt
-        .query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize))
-        })
-        .context("executing status-count query")?;
-    for row in rows {
-        let (status, count) = row?;
-        match status.as_str() {
-            "succeeded" => succeeded = count,
-            "failed_retryable" => failed_retryable = count,
-            "failed_terminal" => failed_terminal = count,
-            _ => { /* pending / in_progress not counted */ }
-        }
-    }
-
-    let failed = failed_retryable + failed_terminal;
-    Ok(ProcessStats {
-        claimed: succeeded + failed,
-        succeeded,
-        failed,
-        // Counter-derived fields (stale_after_*, requeued_for_retry,
-        // exhausted_retries, parked_for_cookies, terminal_by_label) are
-        // filled by the caller after this function returns; leave them at
-        // default here.
-        ..ProcessStats::default()
-    })
 }

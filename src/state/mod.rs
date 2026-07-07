@@ -167,9 +167,13 @@ impl Store {
     /// Borrow the underlying connection for advanced operations. Internal use
     /// for now; the public API will grow as Tasks 9+ add methods.
     ///
-    /// T18 (pipelined orchestrator's `compute_process_stats`) is the first
-    /// in-bin consumer; the `#[allow(dead_code)]` placeholder is lifted as
-    /// part of that wiring per 0002.
+    /// T18 (pipelined orchestrator's `compute_process_stats`) was the first
+    /// in-bin consumer; the Epic 4a T06 review fix retired that fn
+    /// (`ProcessStats` is assembled from input-side counters per 0007), so
+    /// no bin caller remains. In-module `#[cfg(test)]` schema tests still
+    /// call it — suppressed per 0002; lift when the next raw-connection
+    /// consumer lands.
+    #[allow(dead_code)]
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
     }

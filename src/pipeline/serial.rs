@@ -88,7 +88,7 @@ pub async fn run_serial(
                     .map(|fe| classify_fetch_phase(fe, &opts.classification));
                 match verdict {
                     Some(ClassifiedFailure::Unavailable { label, ctx }) => {
-                        store
+                        let changed = store
                             .mark_terminal_failure(
                                 &claim.video_id,
                                 &opts.worker_id,
@@ -98,8 +98,14 @@ pub async fn run_serial(
                             .with_context(|| {
                                 format!("mark_terminal_failure for {}", claim.video_id)
                             })?;
-                        // Epic 4a: run-side terminal-by-label census.
-                        *stats.terminal_by_label.entry(label.clone()).or_insert(0) += 1;
+                        // Epic 4a: run-side terminal-by-label census. Gated
+                        // on the write landing — a 0-row stale-claim miss
+                        // must not inflate the census (unreachable in this
+                        // single-threaded loop, but the semantics must match
+                        // the pipelined workers'; T06 review fix).
+                        if changed > 0 {
+                            *stats.terminal_by_label.entry(label.clone()).or_insert(0) += 1;
+                        }
                     }
                     Some(ClassifiedFailure::Bug { ctx }) => {
                         return Err(anyhow!(

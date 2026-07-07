@@ -102,8 +102,15 @@ pub struct ProcessOptions {
 
 #[derive(Debug, Default)]
 pub struct ProcessStats {
+    /// Input-side, per-attempt (ADR-0007): every successful `claim_next`
+    /// this run, INCLUDING retry re-claims. Both orchestrators count this
+    /// way — a fail-once-then-recover video is `claimed: 2`.
     pub claimed: usize,
+    /// Attempts whose `mark_succeeded` changed a row this run.
     pub succeeded: usize,
+    /// Failure-dispatched attempts this run (one per classified failure,
+    /// regardless of which arm handled it) — per-attempt, so a video that
+    /// failed then recovered contributes to BOTH `failed` and `succeeded`.
     pub failed: usize,
     /// T5-review carry-forward: rows where `process_one` wrote artifacts and
     /// then `mark_succeeded` returned `Ok(0)` — meaning a concurrent sweep
@@ -117,13 +124,14 @@ pub struct ProcessStats {
     /// counter should stay at 0 in practice. It's surfaced for Phase 2's
     /// concurrent workers where stale-after-success is reachable.
     pub stale_after_success: usize,
-    /// T18: symmetric counter for the failure path. Rows where
-    /// `mark_retryable_failure` returned `Ok(0)` — predicate
-    /// `status='in_progress' AND claimed_by=?` missed because a concurrent
-    /// sweep cleared the claim between `claim_next` and the failure-flip.
-    /// Both `fetch_worker` and `transcribe_worker` increment this on the
-    /// retryable-error path. The row stays where the sweep left it
-    /// (`pending`) and will be re-claimed on the next iteration.
+    /// T18: symmetric counter for the failure path. Rows where the failure
+    /// mutator missed the `status='in_progress' AND claimed_by=?` predicate
+    /// (`record_fetch_failure` → `StaleClaim` outcome on the retryable
+    /// path; `mark_terminal_failure` → `Ok(0)` on the write-off path)
+    /// because a concurrent sweep cleared the claim between `claim_next`
+    /// and the failure-flip. Both `fetch_worker` and `transcribe_worker`
+    /// increment this. The row stays where the sweep left it (`pending`)
+    /// and will be re-claimed on the next iteration.
     ///
     /// In Phase 1 (serial loop) this counter doesn't exist on the path
     /// because `run_serial` doesn't run a mid-loop sweep. Phase 2's

@@ -83,6 +83,7 @@ async fn fetch_worker_drains_pending_rows_and_exits() -> anyhow::Result<()> {
         Arc::new(AtomicUsize::new(0)), // requeued_for_retry
         Arc::new(AtomicUsize::new(0)), // exhausted_retries
         Arc::new(AtomicUsize::new(0)), // parked_for_cookies
+        Arc::new(AtomicUsize::new(0)), // failed
         Arc::new(tokio::sync::Mutex::new(std::collections::BTreeMap::new())), // terminal_by_label
         Arc::clone(&claims_counter),
         Arc::new(opts),
@@ -188,6 +189,7 @@ async fn fetch_worker_increments_stale_after_failure_on_swept_claim() -> anyhow:
         Arc::new(AtomicUsize::new(0)), // requeued_for_retry
         Arc::new(AtomicUsize::new(0)), // exhausted_retries
         Arc::new(AtomicUsize::new(0)), // parked_for_cookies
+        Arc::new(AtomicUsize::new(0)), // failed
         Arc::new(tokio::sync::Mutex::new(std::collections::BTreeMap::new())), // terminal_by_label
         Arc::clone(&claims_counter),
         Arc::new(opts),
@@ -358,6 +360,7 @@ async fn fetch_worker_threads_cookies_on_sensitive_login_gated_retry() -> anyhow
         Arc::new(AtomicUsize::new(0)), // requeued_for_retry
         Arc::new(AtomicUsize::new(0)), // exhausted_retries
         Arc::new(AtomicUsize::new(0)), // parked_for_cookies
+        Arc::new(AtomicUsize::new(0)), // failed
         Arc::new(tokio::sync::Mutex::new(std::collections::BTreeMap::new())), // terminal_by_label
         Arc::new(AtomicUsize::new(0)), // claims_counter
         opts,
@@ -432,6 +435,12 @@ async fn retry_requeues_then_recovers_in_same_batch() -> anyhow::Result<()> {
     };
 
     let stats = run_pipelined(Arc::clone(&shared), fetcher, transcriber, opts).await?;
+    // ADR-0007 input-side, per-attempt semantics (T06 review fix): one
+    // video, two attempts → claimed counts BOTH claims, and the failing
+    // first attempt registers in `failed` even though the row ultimately
+    // recovered.
+    assert_eq!(stats.claimed, 2, "per-attempt: both claims counted");
+    assert_eq!(stats.failed, 1, "per-attempt: the failing first attempt");
     assert_eq!(stats.requeued_for_retry, 1, "one in-batch requeue");
     assert_eq!(stats.succeeded, 1, "row recovered on the retry");
 
@@ -494,6 +503,13 @@ async fn retry_exhausts_into_failed_retryable() -> anyhow::Result<()> {
     };
 
     let stats = run_pipelined(Arc::clone(&shared), fetcher, transcriber, opts).await?;
+    // ADR-0007 per-attempt semantics: two claims, two failure-dispatched
+    // attempts (T06 review fix).
+    assert_eq!(stats.claimed, 2, "per-attempt: both claims counted");
+    assert_eq!(
+        stats.failed, 2,
+        "per-attempt: both failing attempts counted"
+    );
     assert_eq!(stats.requeued_for_retry, 1, "one requeue before exhaustion");
     assert_eq!(
         stats.exhausted_retries, 1,
@@ -570,6 +586,10 @@ async fn requires_cookie_parks_without_cookies_and_requeues_with() -> anyhow::Re
     let stats = run_pipelined(Arc::clone(&shared), failing, transcriber, opts).await?;
     assert_eq!(stats.parked_for_cookies, 1, "parked, not requeued");
     assert_eq!(stats.requeued_for_retry, 0, "budget must NOT be spent");
+    // ADR-0007 per-attempt semantics: the parked attempt is one claim and
+    // one failure-dispatched attempt (T06 review fix).
+    assert_eq!(stats.claimed, 1);
+    assert_eq!(stats.failed, 1);
     {
         let guard = shared.lock().await;
         let row = guard.get_video_for_test("vid_a")?.expect("row");
@@ -627,6 +647,8 @@ async fn requires_cookie_parks_without_cookies_and_requeues_with() -> anyhow::Re
     )
     .await?;
     assert_eq!(stats2.succeeded, 1, "row recovers with cookies");
+    assert_eq!(stats2.claimed, 1, "per-attempt: one claim this run");
+    assert_eq!(stats2.failed, 0, "no failure-dispatched attempt this run");
 
     let recorded = succeeding
         .received_opts
@@ -638,5 +660,118 @@ async fn requires_cookie_parks_without_cookies_and_requeues_with() -> anyhow::Re
         Some(cookie_path.as_path()),
         "cookies must ride on the SensitiveLoginGated retry claim"
     );
+    Ok(())
+}
+
+/// T06 review fix: a `mark_terminal_failure` that misses its claim predicate
+/// (`Ok(0)` — the row was swept mid-fetch) must NOT be counted in the
+/// `terminal_by_label` census map: nothing was written, and the follow-up
+/// attempt that DOES land the write-off records the label once. Before the
+/// fix the increment ran unconditionally after `handle_mutator_result`, so
+/// this scenario double-counted the label (map value 2 instead of 1).
+///
+/// Same gated interleaving as
+/// `fetch_worker_increments_stale_after_failure_on_swept_claim`, but the
+/// canned stderr is a terminal class (ip-blocked) so dispatch takes the
+/// `Unavailable` arm: iteration 1 goes stale (`Ok(0)`), iteration 2
+/// re-claims the swept row and writes it off for real.
+// worker-level: REQUIRED — deterministic interleaving via gate, unreachable from run_pipelined
+#[tokio::test]
+async fn fetch_worker_stale_terminal_claim_not_counted_in_census() -> anyhow::Result<()> {
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, Mutex as TokioMutex};
+    use tokio_util::sync::CancellationToken;
+
+    use ddp_transcribe::pipeline::{fetch_worker, FetchedItem, ProcessOptions, SharedStore};
+
+    let tmp = TempDir::new()?;
+    let mut store = Store::open(&tmp.path().join("state.sqlite"))?;
+    store.upsert_video("vid_a", "https://example/a", false)?;
+
+    // Gated fetcher whose every failure carries a TERMINAL-class stderr.
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let fetcher = FakeFetcher {
+        canned: Mutex::new(HashMap::new()),
+        always_fails: false,
+        first_call_gate: tokio::sync::Mutex::new(Some(gate.clone())),
+        canned_stderr: std::sync::Mutex::new(Some(
+            "ERROR: [TikTok] vid_a: Your IP address is blocked from accessing this post"
+                .to_string(),
+        )),
+        received_opts: std::sync::Mutex::new(Vec::new()),
+        fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
+    };
+
+    let shared: SharedStore = Arc::new(TokioMutex::new(store));
+    let (tx, mut rx) = mpsc::channel::<FetchedItem>(1);
+    let stats_stale_after_failure = Arc::new(AtomicUsize::new(0));
+    let terminal_by_label = Arc::new(TokioMutex::new(BTreeMap::<String, usize>::new()));
+    let opts = ProcessOptions {
+        worker_id: "fetcher-1".into(),
+        transcripts_root: tmp.path().join("transcripts"),
+        max_videos: None,
+        compute_lang_probs: false,
+        transcribe_timeout: Duration::from_secs(5),
+        stale_claim_threshold: Duration::from_secs(60),
+        download_workers: 3,
+        channel_capacity: 2,
+        cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
+        retries: 1,
+    };
+
+    let worker_handle = tokio::spawn(fetch_worker(
+        CancellationToken::new(),
+        Arc::clone(&shared),
+        Arc::new(fetcher),
+        tx,
+        Arc::clone(&stats_stale_after_failure),
+        Arc::new(AtomicUsize::new(0)), // requeued_for_retry
+        Arc::new(AtomicUsize::new(0)), // exhausted_retries
+        Arc::new(AtomicUsize::new(0)), // parked_for_cookies
+        Arc::new(AtomicUsize::new(0)), // failed
+        Arc::clone(&terminal_by_label),
+        Arc::new(AtomicUsize::new(0)), // claims_counter
+        Arc::new(opts),
+    ));
+
+    // Wait past the second-resolution timestamp boundary, then sweep the
+    // claim out from under the worker while it is parked on the gate.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    {
+        let mut guard = shared.lock().await;
+        let swept = guard.sweep_stale_claims(Duration::ZERO)?;
+        assert_eq!(swept, 1, "row must sweep back to pending");
+    }
+    gate.notify_one();
+
+    // No successful fetch ever happens; worker exits after iteration 2's
+    // real write-off leaves no pending rows.
+    assert!(rx.recv().await.is_none(), "every fetch fails");
+    worker_handle.await.expect("join")?;
+
+    assert_eq!(
+        stats_stale_after_failure.load(Ordering::Relaxed),
+        1,
+        "iteration 1's terminal mark went stale"
+    );
+    let census = terminal_by_label.lock().await;
+    assert_eq!(
+        census.get("IpBlockedMessage").copied(),
+        Some(1),
+        "stale Ok(0) attempt must not inflate the census: exactly one \
+         counted write-off (the iteration-2 write that landed)"
+    );
+    assert_eq!(census.len(), 1, "no other labels recorded");
+    drop(census);
+
+    let guard = shared.lock().await;
+    let row = guard.get_video_for_test("vid_a")?.expect("row");
+    assert_eq!(row.status, "failed_terminal");
     Ok(())
 }

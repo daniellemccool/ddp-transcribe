@@ -187,6 +187,7 @@ pub(crate) async fn run_single_fetch_worker(store: SharedStore, fetcher: Arc<dyn
         Arc::new(AtomicUsize::new(0)), // requeued_for_retry
         Arc::new(AtomicUsize::new(0)), // exhausted_retries
         Arc::new(AtomicUsize::new(0)), // parked_for_cookies
+        Arc::new(AtomicUsize::new(0)), // failed
         Arc::new(TokioMutex::new(std::collections::BTreeMap::new())), // terminal_by_label
         Arc::new(AtomicUsize::new(0)), // claims_counter
         opts,
