@@ -269,6 +269,12 @@ pub struct Claim {
     pub video_id: String,
     pub source_url: String,
     pub attempt_count: i64,
+    /// Kind tag recorded by the most recent retryable failure, if any.
+    /// None on first attempt. Epic 3 cookie routing keys on this being
+    /// "SensitiveLoginGated" (ADR 0035); triage's requeue normalizes
+    /// historical placeholder kinds before the row becomes claimable again.
+    #[allow(dead_code)]
+    pub last_retryable_kind: Option<String>,
 }
 
 /// Artifacts written to the database upon successful transcription.
@@ -292,19 +298,20 @@ impl Store {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .context("begin immediate for claim_next")?;
 
-        let candidate: Option<(String, String, i64)> = tx
+        let candidate: Option<(String, String, i64, Option<String>)> = tx
             .query_row(
-                "SELECT video_id, source_url, attempt_count
+                "SELECT video_id, source_url, attempt_count, last_retryable_kind
                  FROM videos
                  WHERE status = 'pending'
                  ORDER BY first_seen_at ASC, video_id ASC
                  LIMIT 1",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
-            .optional()?;
+            .optional()
+            .context("claim_next: select oldest pending row")?;
 
-        let Some((video_id, source_url, prev_attempts)) = candidate else {
+        let Some((video_id, source_url, prev_attempts, last_retryable_kind)) = candidate else {
             tx.commit()?;
             return Ok(None);
         };
@@ -319,13 +326,15 @@ impl Store {
                  updated_at = ?3
              WHERE video_id = ?1",
             params![video_id, worker_id, now, new_attempts],
-        )?;
+        )
+        .with_context(|| format!("claim_next: flip {video_id} to in_progress for {worker_id}"))?;
 
         tx.execute(
             "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
              VALUES (?1, ?2, 'claimed', ?3, NULL)",
             params![video_id, now, worker_id],
-        )?;
+        )
+        .with_context(|| format!("claim_next: insert claimed event for {video_id}"))?;
 
         tx.commit().context("commit claim transaction")?;
 
@@ -333,6 +342,7 @@ impl Store {
             video_id,
             source_url,
             attempt_count: new_attempts,
+            last_retryable_kind,
         }))
     }
 
@@ -391,7 +401,8 @@ impl Store {
                 "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
                  VALUES (?1, ?2, 'succeeded', ?3, NULL)",
                 params![video_id, now, worker_id],
-            )?;
+            )
+            .with_context(|| format!("mark_succeeded: insert succeeded event for {video_id}"))?;
         }
 
         tx.commit().context("commit mark_succeeded")?;
