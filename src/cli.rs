@@ -103,6 +103,20 @@ pub enum Command {
     /// Upgrade a pre-Epic-2 (v1) state.sqlite to the current schema version.
     /// Idempotent: no-op if already at the current version.
     Migrate,
+    /// Adjudicate failed_retryable rows: write-off classes → failed_terminal;
+    /// probe the rest via TikTok oEmbed (dead → terminal, alive → pending under
+    /// the attempt cap). Requires `curl` on PATH. Run `process` afterwards.
+    Triage {
+        /// Probe and report the census without mutating any rows.
+        #[arg(long)]
+        dry_run: bool,
+        /// oEmbed probes per second.
+        #[arg(long, default_value_t = 1.0)]
+        rate: f64,
+        /// Rows at or above this attempt_count are not requeued.
+        #[arg(long, default_value_t = 3)]
+        max_attempts: i64,
+    },
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]

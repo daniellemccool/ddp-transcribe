@@ -74,15 +74,19 @@ impl UnavailableReason {
 pub struct FailureContext {
     // 0002: `tool`/`exit_code`/`signal` are populated for every verdict but
     // only read by `Debug` (dead-code analysis ignores derived-trait reads,
-    // per rustc's own diagnostic) until Task 10's triage surface displays
-    // them to an operator. `message()` — the field T07's dispatch actually
-    // persists — only projects `classification_reason` + `stderr_excerpt`.
+    // per rustc's own diagnostic). Epic 3 T10 landed the triage subcommand
+    // WITHOUT reading these: triage classifies the *stored* message text
+    // directly via `classify_message` (never reconstructing a
+    // `FailureContext`), and its census aggregates on `kind.tag()` /
+    // `reason.tag()` only — there is no raw tool/exit_code/signal display.
+    // Still genuinely dead; re-tagged rather than lifted. Revisit if a
+    // future task adds an operator-facing raw-context view.
     #[allow(dead_code)]
     pub tool: &'static str,
     #[allow(dead_code)]
     pub exit_code: Option<i32>,
-    /// Unix signal that killed the tool, when applicable. Surfaced to
-    /// operators via triage (T10); not read by the classifiers themselves.
+    /// Unix signal that killed the tool, when applicable. Not read by the
+    /// classifiers themselves or by T10's triage census (see note above).
     #[allow(dead_code)]
     pub signal: Option<i32>,
     pub stderr_excerpt: String,

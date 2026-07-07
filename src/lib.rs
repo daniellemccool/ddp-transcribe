@@ -17,3 +17,4 @@ pub mod probe;
 pub mod process;
 pub mod state;
 pub mod transcribe;
+pub mod triage;

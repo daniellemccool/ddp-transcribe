@@ -10,8 +10,6 @@ use async_trait::async_trait;
 
 use crate::process::{run, CommandSpec};
 
-// 0002: consumed by Epic 3 T10; lift when it lands.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeVerdict {
     Alive,
@@ -21,23 +19,17 @@ pub enum ProbeVerdict {
     Unreachable(String),
 }
 
-// 0002: consumed by Epic 3 T10; lift when it lands.
-#[allow(dead_code)]
 #[async_trait]
 pub trait ProbeOracle: Send + Sync {
     async fn probe(&self, video_id: &str) -> ProbeVerdict;
 }
 
-// 0002: consumed by Epic 3 T10; lift when it lands.
-#[allow(dead_code)]
 pub fn oembed_url(video_id: &str) -> String {
     // The @x username placeholder is accepted by oEmbed; verdicts key on the
     // video id. Same URL form used in the 2026-07-06/07 validation.
     format!("https://www.tiktok.com/oembed?url=https://www.tiktok.com/@x/video/{video_id}")
 }
 
-// 0002: consumed by Epic 3 T10; lift when it lands.
-#[allow(dead_code)]
 pub fn verdict_from_http_code(code: &str) -> ProbeVerdict {
     match code {
         "200" => ProbeVerdict::Alive,
@@ -46,8 +38,6 @@ pub fn verdict_from_http_code(code: &str) -> ProbeVerdict {
     }
 }
 
-// 0002: consumed by Epic 3 T10; lift when it lands.
-#[allow(dead_code)]
 pub struct CurlProber {
     pub timeout: Duration,
 }

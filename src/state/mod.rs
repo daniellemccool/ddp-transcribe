@@ -46,11 +46,15 @@ pub struct VideoRow {
 
 /// One failed_retryable row, as triage sees it. Message included because
 /// triage classifies stored messages (fast path) before deciding to probe.
-// 0002: consumed by Epic 3 T10 (triage subcommand)
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct TriageRow {
     pub video_id: String,
+    // 0002: genuinely unread by T10's `run_triage` — triage re-derives the
+    // kind from `last_retryable_message` via `classify_message` and never
+    // consults the previously-stored (possibly placeholder, e.g. "Fetch")
+    // kind. Kept for Debug/audit visibility and API symmetry with the
+    // column set; not dead per se, just not read outside Debug.
+    #[allow(dead_code)]
     pub last_retryable_kind: Option<String>,
     pub last_retryable_message: Option<String>,
     pub attempt_count: i64,
@@ -604,8 +608,6 @@ impl Store {
     }
 
     /// Snapshot of all failed_retryable rows, FIFO by first_seen_at. Read-only.
-    // 0002: consumed by Epic 3 T10 (triage subcommand)
-    #[allow(dead_code)]
     pub fn list_failed_retryable(&self) -> Result<Vec<TriageRow>> {
         let mut stmt = self
             .conn
@@ -635,8 +637,6 @@ impl Store {
     /// caller), this operates on unclaimed failed rows; the operator-action
     /// audit trail is the 'triaged_terminal' event. last_retryable_* columns
     /// are preserved (0023 family convention: diagnostics accumulate).
-    // 0002: consumed by Epic 3 T10 (triage subcommand)
-    #[allow(dead_code)]
     pub fn triage_mark_terminal(
         &mut self,
         video_id: &str,
@@ -677,8 +677,6 @@ impl Store {
     /// are one statement). Writes the re-classified kind back so historical
     /// placeholder kinds ("Fetch") become taxonomy kinds before the row is
     /// claimable — cookie routing (ADR 0035) reads the kind at claim time.
-    // 0002: consumed by Epic 3 T10 (triage subcommand)
-    #[allow(dead_code)]
     pub fn requeue_retryable(
         &mut self,
         video_id: &str,
