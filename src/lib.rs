@@ -7,6 +7,7 @@
 
 pub mod audio;
 pub mod canonical;
+pub mod classification;
 pub mod errors;
 pub mod failure;
 pub mod fetcher;

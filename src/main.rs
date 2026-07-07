@@ -6,6 +6,7 @@ use clap::Parser;
 
 mod audio;
 mod canonical;
+mod classification;
 mod cli;
 mod config;
 mod errors;
