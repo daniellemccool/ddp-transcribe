@@ -525,3 +525,147 @@ parsed, but `run_pipelined` never read the field — every pending
 row drained regardless of the operator's cap. T18 added a startup
 `tracing::warn!` so the regression was visible in logs rather than
 silent.
+
+---
+
+## Resolved by Plan B Epic 3 — failure classification, triage, cookie-scoped retry (2026-07-07)
+
+Eight entries resolved by Epic 3 task commits, archived with per-entry
+resolving SHAs. One additional entry (`YtDlpFetcher::acquire`, four
+findings) was SPLIT: findings 1–2 resolved here; finding 3 re-filed under
+Epic 5 (`docs/followups/epic-5.md`), finding 4 re-filed under Plan C
+(`docs/followups/plan-c.md`).
+
+### `From<RunError> for FetchError` collapses Spawn and Io into NetworkError
+
+**Found in:** T6 code quality review (opus).
+**Resolution:** `9974d69` (`feat(errors): split RunError mapping, capture kill
+signal, type audio-decode and acquire failures`). `RunError::Spawn` now maps
+to `FetchError::ToolNotFound` and `RunError::Io` to `FetchError::SystemIo`;
+`RunError::Timeout → ToolTimeout` unchanged. ADR 0033's classifier routes
+`ToolNotFound` to Bug (a missing binary is never retried with network
+backoff) and `SystemIo` to Retryable.
+
+Original concern: both Spawn (binary missing — environmental, terminal) and
+Io (pipe read failure — potentially transient) were labeled `NetworkError`,
+which would have misguided retry/backoff logic.
+
+### `status.code().unwrap_or(-1)` loses signal information
+
+**Found in:** T6 code quality review (opus).
+**Resolution:** `9974d69`. `CommandOutcome` gained a `signal: Option<i32>`
+field populated via `std::os::unix::process::ExitStatusExt::signal()`
+(cfg-gated to Unix); `FetchError::ToolFailed` carries it through to the
+classifier's `FailureContext.signal`. OOM-kill (SIGKILL), operator interrupt
+(SIGINT), and crash (SIGSEGV) are now distinguishable in stored failure
+context.
+
+### `claim_next` / `mark_succeeded` inner statements lack `with_context`
+
+**Found in:** T10 code quality review (opus).
+**Resolution:** `cc7782f` (`feat(state): Claim carries last_retryable_kind;
+with_context on claim/succeed inner statements`). The inner
+`tx.execute(...)` statements in `claim_next` (videos UPDATE + video_events
+INSERT) and `mark_succeeded` (video_events INSERT) now carry
+`with_context` naming the video_id/worker_id, so constraint failures
+surface with enough context to diagnose.
+
+### `YtDlpFetcher::acquire` error mapping and yt-dlp output-filename coupling — findings 1–2 (SPLIT)
+
+**Found in:** T11 code quality review (opus). Original entry had four
+findings; archived here are findings 1–2. Finding 3 (output-filename
+coupling) re-filed under Epic 5 fetch hardening
+(`docs/followups/epic-5.md`); finding 4 (`--` argv separator before
+`source_url`) re-filed under Plan C (`docs/followups/plan-c.md`) — both
+were NOT resolved by Epic 3.
+**Resolution (findings 1–2):** `9974d69`.
+
+1. `create_dir_all` failure → was `FetchError::NetworkError`; now
+   `FetchError::WorkDirCreate { path, detail }` (ADR 0033 classifier routes
+   it to Bug — environment failure, not network).
+2. Post-success `wav_path.exists() == false` → was `FetchError::ParseError`;
+   now `FetchError::MissingOutput { path }` (tool-contract postcondition
+   violation, distinct from output parsing).
+
+### `pipeline_fakes.rs` is 1000 lines mixing concerns; over-narrated with phase commentary
+
+**Found in:** Operator test-suite review (2026-05-20).
+**Resolution:** `0dd9707` (`test: split pipeline_fakes into per-concern
+modules; strip phase narration; audit worker-level tests`). The 1047-line
+`tests/pipeline_fakes.rs` became the `tests/pipeline_fakes/` directory
+(`main.rs`, `fakes.rs`, `serial_tests.rs`, `fetch_worker_tests.rs`,
+`transcribe_worker_tests.rs`, `pipelined_tests.rs`) — mechanical
+relocation, 11 tests before == 11 after. Phase/task narration stripped from
+comments (assert-message string literals retained per the commit's
+disclosed ADR-0003 deviation).
+
+### Over-reliance on worker-level entry points in `pipeline_fakes`
+
+**Found in:** Operator test-suite review (2026-05-20).
+**Resolution:** `0dd9707` (audit part). Audit verdicts are inline in the
+split test files: 2 of 5 worker-level tests marked REQUIRED
+(timing-dependent gate/sweep races unreachable from `run_pipelined`); the
+rest marked as replacement candidates. Replacement by
+`run_pipelined`-level tests remains opportunistic — pursue when a task
+touches those tests anyway (not scheduled as standalone work).
+
+### `From<AudioDecodeError> for TranscribeError` maps to Bug for Epic 1 fail-fast
+
+**Found in:** T5 (engine shell) — codex-advisor code-quality review.
+**Resolution:** `9974d69`. `TranscribeError` gained an
+`AudioDecode { detail }` variant; the `From` impl now produces it instead
+of `Bug`. ADR 0033's `classify_transcribe_error` routes `AudioDecode` to
+Retryable (corrupt/truncated fetch output warrants a refetch attempt), never
+Bug.
+
+### `fetch_worker` cancellation latency bounded by largest await, not by `token.cancel()`
+
+**Found in:** T16 codex review (Sonnet + codex-advisor delegation per 0018),
+surfaced again in T18 Opus deep review.
+**Resolution:** `50a1db0` (`feat(pipeline): three-arm classifier dispatch;
+first mark_terminal_failure caller; T16 fetch cancellation wrap`) — fix
+option (a) from the original entry. `fetch_and_decode` is wrapped in a
+`biased` `tokio::select!` against the `CancellationToken`
+(`src/pipeline/pipelined.rs`), mirroring the transcribe-side wrap
+(`a66d38b`). Mid-fetch cancellation drops the in-flight future;
+`kill_on_drop` reaps the yt-dlp child immediately. Worst-case shutdown
+latency drops from ~300s (yt-dlp timeout) to milliseconds; the abandoned
+row stays `in_progress` for the next sweep per 0024.
+
+### Plan-brief library-API drift (T13/T19/T16 caught at implementation time)
+
+**Found in:** T13/T19/T16 (Phase 2) — three consecutive tasks where a plan
+brief's library-API claim didn't match the installed crate.
+**Resolution:** `593bd5c` (`docs(plan): Plan B Epic 3 per-task implementation
+plan`). The checklist was demonstrably applied at Epic 3 plan-writing time:
+the plan overview's "Spec refinements (verified at plan-writing time)"
+section records per-claim verification against the code on `main` (e.g. the
+`fetch_and_decode` anyhow-boundary catch that became Task 07's
+`FetchPhaseError`, and the pre-verified `CommandSpec.redact_arg_indices`
+reuse in Task 08). Epic 3 execution surfaced no library-API drift
+deviations, corroborating the checklist's effect.
+
+### Real yt-dlp failure corpus from the PI 65k donation (Tier 5 deploy)
+
+**Found in:** Tier 5 catalog-item validation — the PI's 65,024-video TikTok
+donation run on the 2×A10 SRC workspace.
+**Resolution:** `8000167` (`feat(failure): evidence-derived taxonomy +
+classifiers with corpus-seeded table tests`). The harvested corpus seeded
+`tests/fixtures/yt_dlp_stderr/` and the table tests behind ADR 0033's
+classifier; the two hand-labeled fixtures (`7636789808341323039` → 10231,
+`7038657312860491014` → "IP blocked") became the write-off classes
+`VideoNotAvailable10231` and `IpBlockedMessage`. The load-bearing
+classifier requirement held up: probe evidence (2026-07-06/07, n=36,
+perfect separation) confirmed "IP blocked" marks dead videos.
+
+Two stale claims in the original entry, corrected at archive time:
+
+- "yt-dlp's stderr is dropped" — stale even when re-filed: stderr IS
+  captured (trailing excerpt) since ADR 0021 landed; the 65k run's
+  `last_retryable_message` column contains real yt-dlp stderr, which is
+  what made message-class triage possible.
+- The share-link canonicalization hypothesis is REFUTED (2026-07-07):
+  56,600 of 56,620 URLs in the 65k run are share-form and succeeded at
+  87.5% overall; 10/10 share-form re-fetches of probe-alive failures
+  succeeded from the same egress. Share-form URLs do not inflate the
+  failure rate; no canonicalization fix is needed.

@@ -1,6 +1,10 @@
 ---
-status: proposed
+status: accepted
 date: "2026-07-07"
+comments:
+    - author: Danielle McCool
+      date: "2026-07-07 04:37:05"
+      text: marked decision as decided
 ---
 
 # Operator triage subcommand: oEmbed oracle via curl subprocess, message-class fast path, attempt-capped requeue
@@ -21,7 +25,7 @@ are dead rows distinguished from recoverable ones at scale?
 
 ## Decision Outcome
 
-(placeholder — set via adr decide at epic close)
+Chosen option: "Single operator-driven `triage` subcommand: message-class fast path for write-off classes, oEmbed probe (curl via bounded process::run) for the rest; dead → failed_terminal, alive → pending under attempt cap; operator re-runs `process`", because keeps the pipeline hot path network-pure; message-class fast path + oEmbed probe gave perfect separation; requeue-with-kind-write-back normalizes historical rows without wasted refetches.
 
 ## Consequences
 
@@ -41,3 +45,7 @@ are dead rows distinguished from recoverable ones at scale?
 * Both triage transitions write video_events rows (triaged_terminal, requeued)
   — operator actions are auditable, unlike the 0024 sweep.
 * The per-kind census output is the study's attrition documentation.
+
+## Comments
+
+* **2026-07-07 04:37:05 — @Danielle McCool:** marked decision as decided

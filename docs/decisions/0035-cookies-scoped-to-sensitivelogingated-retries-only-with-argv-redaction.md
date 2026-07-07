@@ -1,6 +1,10 @@
 ---
-status: proposed
+status: accepted
 date: "2026-07-07"
+comments:
+    - author: Danielle McCool
+      date: "2026-07-07 04:37:05"
+      text: marked decision as decided
 ---
 
 # Cookies scoped to SensitiveLoginGated retries only, with argv redaction
@@ -22,7 +26,7 @@ should cookie support be scoped?
 
 ## Decision Outcome
 
-(placeholder — set via adr decide at epic close)
+Chosen option: "Cookies passed only on retries of claims whose last_retryable_kind is SensitiveLoginGated (~300-fetch account exposure)", because research-validity rationale (crime/policing content skews sensitive) justifies cookie support; retry-only scope caps account exposure at ~300 fetches.
 
 ## Consequences
 
@@ -34,3 +38,7 @@ should cookie support be scoped?
 * The operator supplies --cookies-file at `process` time; absent the flag,
   sensitive-class claims are fetched without cookies (and will re-fail into
   failed_retryable — harmless, capped by 0034's attempt cap).
+
+## Comments
+
+* **2026-07-07 04:37:05 — @Danielle McCool:** marked decision as decided

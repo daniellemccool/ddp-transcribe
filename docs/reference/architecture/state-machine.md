@@ -37,7 +37,7 @@ The schema is declared in `src/state/schema.rs`. Three application tables and on
 
 **`watch_history`** — one row per `(respondent_id, video_id, watched_at)` tuple; links a donor participant to their watch events. References `videos` via foreign key. (`src/state/schema.rs:36–44`)
 
-**`video_events`** — append-only audit log; one row per claim/success/failure transition (`claimed`, `succeeded`, `failed_retryable`, `failed_terminal`). The stale-sweep recovery (`in_progress`→`pending`) writes no event. References `videos`. (`src/state/schema.rs:46–55`)
+**`video_events`** — append-only audit log; one row per claim/success/failure/triage transition (`claimed`, `succeeded`, `failed_retryable`, `failed_terminal`, plus the operator-triage types `triaged_terminal` and `requeued` written with `worker_id = 'triage'` per [ADR 0034](../../decisions/0034-operator-triage-subcommand-oembed-oracle-via-curl-subprocess-message-class-fast-path-attempt-capped-requeue.md)). The stale-sweep recovery (`in_progress`→`pending`) writes no event. References `videos`. (`src/state/schema.rs:46–55`)
 
 **`meta`** — key/value table holding `schema_version`. (`src/state/schema.rs:57–62`)
 
@@ -50,12 +50,12 @@ The `status` column is CHECK-constrained to five string values (`src/state/schem
 - **`pending`** — newly ingested (or stale-sweep recovered); eligible for claim by `claim_next`.
 - **`in_progress`** — actively claimed by a worker; not eligible for claim until the worker finishes or the stale-claim sweep recovers it.
 - **`succeeded`** — terminal success; transcript artifact on disk, never re-attempted.
-- **`failed_retryable`** — a recoverable error was recorded by `mark_retryable_failure`; `last_retryable_kind` and `last_retryable_message` are populated. **Currently a sink**: `claim_next` only selects `pending` rows (see diagram below), and no automated reset-to-`pending` path is implemented; that is the Epic 3 retry-policy charter.
-- **`failed_terminal`** — a non-recoverable failure was recorded by `mark_terminal_failure`; `terminal_reason` and `terminal_message` are populated. Sink; not re-attempted.
+- **`failed_retryable`** — a recoverable error was recorded by `mark_retryable_failure`; `last_retryable_kind` and `last_retryable_message` are populated. **Not a sink** (since Epic 3): `claim_next` still selects only `pending` rows, and the pipeline itself never resets failed rows — but the operator-driven `triage` subcommand per [ADR 0034](../../decisions/0034-operator-triage-subcommand-oembed-oracle-via-curl-subprocess-message-class-fast-path-attempt-capped-requeue.md) gives the state two exits: `triage_mark_terminal` (verdict: dead → `failed_terminal`) and `requeue_retryable` (verdict: alive and `attempt_count` under cap → `pending`).
+- **`failed_terminal`** — a non-recoverable failure was recorded by `mark_terminal_failure` (pipeline write-off dispatch per [ADR 0033](../../decisions/0033-evidence-derived-failure-taxonomy-with-inline-write-off-of-probe-validated-dead-message-classes.md)) or by `triage_mark_terminal` (operator triage verdict); `terminal_reason` and `terminal_message` are populated. Sink; not re-attempted.
 
 ### State-transition diagram
 
-Edges are drawn only for transitions that exist in current code; the `failed_retryable` sink is documented explicitly.
+Edges are drawn only for transitions that exist in current code. The two `failed_retryable` exits belong to the operator-driven `triage` subcommand (ADR 0034), not the pipeline.
 
 ```
                               +------------+
@@ -76,17 +76,31 @@ Edges are drawn only for transitions that exist in current code; the `failed_ret
                   v                 v                 v
           +------------+  +-------------------+  +------------------+
           | succeeded  |  | failed_retryable  |  | failed_terminal  |
-          | (terminal) |  | (sink; Epic 3     |  | (terminal, sink; |
-          +------------+  |  adds retry       |  |  no caller until  |
-                          |  policy)          |  |  Epic 3)          |
-                          +-------------------+  +------------------+
+          | (terminal) |  | (triage exits     |  | (terminal, sink) |
+          +------------+  |  below, ADR 0034) |  +------------------+
+                          +-------------------+
+
+   Triage exits (operator-driven `triage` subcommand per ADR 0034;
+   never taken by the pipeline itself):
+
+    +-------------------+  triage_mark_terminal      +------------------+
+    |                   |  (triage verdict: dead)    | failed_terminal  |
+    | failed_retryable  +--------------------------> +------------------+
+    |                   |
+    |                   |  requeue_retryable
+    |                   |  (triage verdict: alive,   +------------------+
+    |                   |   attempt_count < cap)     |     pending      |
+    |                   +--------------------------> +------------------+
+    +-------------------+
 ```
 
 Key code references:
-- `claim_next` WHERE clause: `WHERE status = 'pending'` (`src/state/mod.rs:237–239`)
-- `sweep_stale_claims` WHERE clause: `WHERE status = 'in_progress' AND claimed_at IS NOT NULL AND claimed_at < ?` (`src/state/mod.rs:501–503`)
-- `mark_retryable_failure` sets `status = 'failed_retryable'` (`src/state/mod.rs:372`)
-- `mark_terminal_failure` sets `status = 'failed_terminal'` (`src/state/mod.rs:437`); `#[allow(dead_code)]` — no caller on current main, wired in Epic 3
+- `claim_next` WHERE clause: `WHERE status = 'pending'` (`src/state/mod.rs:331`)
+- `sweep_stale_claims` WHERE clause: `WHERE status = 'in_progress' AND claimed_at IS NOT NULL AND claimed_at < ?` (`src/state/mod.rs:596–598`)
+- `mark_retryable_failure` sets `status = 'failed_retryable'` (`src/state/mod.rs:471`)
+- `mark_terminal_failure` sets `status = 'failed_terminal'` (`src/state/mod.rs:532`); first callers are the pipeline's write-off dispatch arms (Epic 3 T07, `50a1db0`: `fetch_worker` in `src/pipeline/pipelined.rs` and `run_serial`'s error arm in `src/pipeline/serial.rs`)
+- `triage_mark_terminal` sets `status = 'failed_terminal'` from `failed_retryable` (`src/state/mod.rs:640–673`)
+- `requeue_retryable` sets `status = 'pending'` from `failed_retryable`, gated by `attempt_count < ?` in the predicate (`src/state/mod.rs:680–714`)
 
 ## Claim contention
 
@@ -114,15 +128,21 @@ Per [ADR 0006](../../decisions/0006-store-mutators-return-result-of-usize-for-ro
 
 Current mutators on `Store`:
 
-- **`claim_next(worker_id: &str) -> Result<Option<Claim>>`** — special; not a row-change mutator. Opens a `BEGIN IMMEDIATE` transaction, selects the oldest `pending` row, updates it to `in_progress`, and returns the claim. Returns `None` if no `pending` rows exist. (`src/state/mod.rs:226–274`)
+- **`claim_next(worker_id: &str) -> Result<Option<Claim>>`** — special; not a row-change mutator. Opens a `BEGIN IMMEDIATE` transaction, selects the oldest `pending` row, updates it to `in_progress`, and returns the claim. Returns `None` if no `pending` rows exist. Since Epic 3 the returned `Claim` also snapshots `last_retryable_kind` at claim time — the input to kind-gated cookie routing per [ADR 0035](../../decisions/0035-cookies-scoped-to-sensitivelogingated-retries-only-with-argv-redaction.md). (`src/state/mod.rs:320–373`)
 
-- **`mark_succeeded(video_id, worker_id, artifacts) -> Result<usize>`** — flips `in_progress → succeeded`; writes transcript metadata columns. WHERE predicate: `status = 'in_progress' AND claimed_by = ?`. Returns `0` if the claim was stale (per ADR 0008, artifacts are already durable on disk before this call; `0` is survivable). (`src/state/mod.rs:286–337`)
+- **`mark_succeeded(video_id, worker_id, artifacts) -> Result<usize>`** — flips `in_progress → succeeded`; writes transcript metadata columns. WHERE predicate: `status = 'in_progress' AND claimed_by = ?`. Returns `0` if the claim was stale (per ADR 0008, artifacts are already durable on disk before this call; `0` is survivable). (`src/state/mod.rs:384–436`)
 
-- **`mark_retryable_failure(video_id, worker_id, kind: &str, message: &str) -> Result<usize>`** — flips `in_progress → failed_retryable`; writes `last_retryable_kind` and `last_retryable_message`. Same stale-claim predicate. `kind` is a stable short tag (`"Fetch"`, `"Transcribe"`); Epic 3's typed `RetryableKind` enum serializes into the same columns. (`src/state/mod.rs:356–395`)
+- **`mark_retryable_failure(video_id, worker_id, kind: &str, message: &str) -> Result<usize>`** — flips `in_progress → failed_retryable`; writes `last_retryable_kind` and `last_retryable_message`. Same stale-claim predicate. `kind` is a taxonomy tag serialized from Epic 3's `RetryableKind` enum via `tag()` (e.g. `"NoDataBlocks"`, `"SensitiveLoginGated"`; `src/failure.rs`, [ADR 0033](../../decisions/0033-evidence-derived-failure-taxonomy-with-inline-write-off-of-probe-validated-dead-message-classes.md)) — the column type stays `TEXT` per ADR 0023, no schema change. (`src/state/mod.rs:455–495`)
 
-- **`mark_terminal_failure(video_id, worker_id, reason: &str, message: &str) -> Result<usize>`** — flips `in_progress → failed_terminal`; writes `terminal_reason` and `terminal_message`. Same stale-claim predicate. **No caller on current main** (`#[allow(dead_code)]`, `src/state/mod.rs:420`); the mutator surface was landed in Epic 2 so Epic 3's classifier dispatch is an add-caller task, not an add-mutator task. See also [`data-input.md`](data-input.md) §Fetch error surface. (`src/state/mod.rs:421–460`)
+- **`mark_terminal_failure(video_id, worker_id, reason: &str, message: &str) -> Result<usize>`** — flips `in_progress → failed_terminal`; writes `terminal_reason` and `terminal_message`. Same stale-claim predicate. First callers landed in Epic 3 T07 (`50a1db0`): the pipeline's write-off dispatch arms call it when the classifier returns `ClassifiedFailure::Unavailable` (the two probe-validated dead message classes per ADR 0033). See also [`data-input.md`](data-input.md) §Retry classification. (`src/state/mod.rs:516–556`)
 
-- **`sweep_stale_claims(threshold: Duration) -> Result<usize>`** — resets stale `in_progress` rows to `pending`. Returns the count of recovered rows. (`src/state/mod.rs:484–512`)
+- **`sweep_stale_claims(threshold: Duration) -> Result<usize>`** — resets stale `in_progress` rows to `pending`. Returns the count of recovered rows. (`src/state/mod.rs:579–608`)
+
+- **`list_failed_retryable() -> Result<Vec<TriageRow>>`** — read-only snapshot of all `failed_retryable` rows, FIFO by `first_seen_at, video_id`; the triage subcommand's input query. (`src/state/mod.rs:611–633`)
+
+- **`triage_mark_terminal(video_id, reason: &str, message: &str) -> Result<usize>`** — flips `failed_retryable → failed_terminal` (triage verdict: dead). Predicate: `status = 'failed_retryable'` — no `claimed_by` clause, because triage operates on unclaimed failed rows, not in-flight claims. Writes a `triaged_terminal` event with `worker_id = 'triage'`; preserves `last_retryable_*` diagnostics. (`src/state/mod.rs:640–673`)
+
+- **`requeue_retryable(video_id, new_kind: &str, max_attempts: i64) -> Result<usize>`** — flips `failed_retryable → pending` (triage verdict: alive). Predicate: `status = 'failed_retryable' AND attempt_count < ?` — the attempt cap is checked in the same statement as the flip, so cap enforcement is race-free. Writes the re-classified kind back to `last_retryable_kind` (historical placeholder kinds become taxonomy kinds before the row is claimable — cookie routing per [ADR 0035](../../decisions/0035-cookies-scoped-to-sensitivelogingated-retries-only-with-argv-redaction.md) reads the kind at claim time) and a `requeued` event. (`src/state/mod.rs:680–714`)
 
 Redirect signature rationale to ADRs 0006 and 0023.
 
@@ -144,16 +164,16 @@ The artifact-write ordering is enforced in `write_artifacts_and_mark` in `src/pi
 
 ## Failure classification
 
-Failures are classified into retryable or terminal at the state-machine surface via two mutators:
+Failures are classified into retryable or terminal at the state-machine surface via two pipeline mutators (plus the triage pair above):
 
 - **`mark_retryable_failure`** writes the `last_retryable_kind` and `last_retryable_message` columns.
 - **`mark_terminal_failure`** writes the `terminal_reason` and `terminal_message` columns.
 
 (`src/state/schema.rs:23–27` — all four columns verified in schema)
 
-On current main (post-Epic 2), the classifier is **string-kind only**: every error from the fetch path is passed to `mark_retryable_failure` with the literal placeholder kind `"Fetch"`, and every transcription error with `"Transcribe"`. `mark_terminal_failure` has no caller — the mutator surface exists but dispatch logic does not (`src/state/mod.rs:420`). A richer typed taxonomy (`RetryableKind`, `UnavailableReason`, `ClassifiedFailure`) and variant-driven routing are the Epic 3 charter. See [`orchestration.md`](orchestration.md) for the caller's perspective on failure handling.
+Since Epic 3, the kinds written are **taxonomy tags** from the evidence-derived classifier in `src/failure.rs` per [ADR 0033](../../decisions/0033-evidence-derived-failure-taxonomy-with-inline-write-off-of-probe-validated-dead-message-classes.md): `RetryableKind` variants (e.g. `NoDataBlocks`, `SensitiveLoginGated`, `NetworkTransient`, catch-alls `YtDlpOther`/`TranscribeOther`) serialize via `tag()` into `last_retryable_kind`, and `UnavailableReason` variants into `terminal_reason`. The two write-off classes — `IpBlockedMessage` ("Your IP address is blocked", probe-validated dead) and `VideoNotAvailable10231` ("status code 10231") — route to `mark_terminal_failure` at failure time; everything else defaults cautiously to retryable. The enums serialize into the existing v2 `TEXT` columns per ADR 0023 — no schema change. Operator-triage transitions add the `video_events` types `triaged_terminal` and `requeued` (ADR 0034). Historical rows written before Epic 3 carry placeholder kinds (`"Fetch"`, `"Transcribe"`, `"FetchOrTranscribe"`); triage's `requeue_retryable` normalizes them to taxonomy kinds on requeue. See [`orchestration.md`](orchestration.md) for the caller's perspective on failure handling.
 
-The two diagnostic columns written by each mutator are preserved across subsequent flips: `mark_retryable_failure` does not clear `terminal_reason`/`terminal_message`, and `mark_terminal_failure` does not clear `last_retryable_*` — so an operator inspecting any row sees both the most recent retryable and the most recent terminal diagnostics (the full per-transition history lives in `video_events`). (`src/state/mod.rs:347–352`, `src/state/mod.rs:414–419`)
+The two diagnostic columns written by each mutator are preserved across subsequent flips: `mark_retryable_failure` does not clear `terminal_reason`/`terminal_message`, and `mark_terminal_failure` does not clear `last_retryable_*` — so an operator inspecting any row sees both the most recent retryable and the most recent terminal diagnostics (the full per-transition history lives in `video_events`). (`src/state/mod.rs:448–451`, `src/state/mod.rs:510–515`)
 
 ## ADRs governing this subsystem
 
@@ -165,3 +185,6 @@ The two diagnostic columns written by each mutator are preserved across subseque
 | 0023 | Minimum mutator signatures | `mark_retryable_failure` / `mark_terminal_failure` signatures. |
 | 0024 | Stale-claim sweep | `sweep_stale_claims` semantics. |
 | 0026 | Claim contention via `BEGIN IMMEDIATE` | `claim_next` serialization. |
+| 0033 | Evidence-derived failure taxonomy + inline write-off | Kinds/reasons written by the failure mutators. |
+| 0034 | Operator triage subcommand | `list_failed_retryable` / `triage_mark_terminal` / `requeue_retryable`; the two `failed_retryable` exits. |
+| 0035 | Cookies scoped to SensitiveLoginGated retries | `Claim.last_retryable_kind` snapshot consumed at claim time. |

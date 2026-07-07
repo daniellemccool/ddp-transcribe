@@ -48,18 +48,10 @@ lines 120-148.
 - T17: sync `write_artifacts_and_mark` inside `tokio::sync::Mutex` guard inside async fn can stall under `TOKIO_WORKER_THREADS=1` → Epic 2 close OR Epic 5 ops-hygiene
 - Full Epic 2 entries: [followups/epic-2.md](followups/epic-2.md)
 
-**Epic 3 (failure classification taxonomy)**
-- T6: `From<RunError> for FetchError` collapses Spawn/Io → Epic 3 (typed variants)
-- T6: `status.code().unwrap_or(-1)` loses signal info → Epic 3 (add `signal` field)
-- T10: `claim_next`/`mark_succeeded` lack `with_context` → Epic 3 (bundle with error restructure)
-- T11: `YtDlpFetcher::acquire` error mapping → Epic 3 (classifier covers it)
-- T5-Epic1: `From<AudioDecodeError> for TranscribeError` maps to Bug → Epic 3 (classification taxonomy)
-- Epic2-review: `pipeline_fakes.rs` mixing concerns + over-narrated → Epic 3 (file split + strip phase comments)
-- Epic2-review: over-reliance on worker-level entry points in `pipeline_fakes` → Epic 3 (audit vs run_pipelined)
-- Tier5-deploy: real yt-dlp failure fixtures (10231 terminal; "IP blocked" NOT reliably retryable); share-link canonicalization hypothesis → Epic 3 (stderr capture + classifier corroboration)
-- T16-Epic2: `fetch_worker` cancellation latency bounded by largest await → Epic 3 (dispatch-rewiring task; claimed by spec b55783e)
-- Epic2-process: plan-brief library-API drift checklist → Epic 3 (plan expansion; adopted by spec b55783e)
-- Full Epic 3 entries: [followups/epic-3.md](followups/epic-3.md)
+**Epic 3 (failure classification taxonomy)** — closed 2026-07-07. All ten entries resolved
+(archived with resolving SHAs in [archive/followups-resolved.md](archive/followups-resolved.md),
+section "Resolved by Plan B Epic 3") or split-and-re-filed: `YtDlpFetcher::acquire`
+finding 3 → Epic 5, finding 4 → Plan C (see those groups below).
 
 **Epic 4 (operator-facing commands / timestamps)**
 - T13: `parse_watched_at` UTC assumption → Epic 4 (0027 resolution path)
@@ -75,6 +67,7 @@ lines 120-148.
 - T13: `ingest::walk_recursive` polish → Epic 5 (bundle with sync-IO sweep)
 - T15: `output::shard_dir` unused → Epic 5 (delete)
 - SRC-bake + T11: `--whisper-model` (and 5 other GlobalArgs flags) rejected after subcommand → Epic 5 (one-line `global = true` per flag)
+- T11 (split at Epic 3 close): `YtDlpFetcher::acquire` coupling to `{video_id}.wav` output filename → Epic 5 (fetch hardening)
 - Full Epic 5 entries: [followups/epic-5.md](followups/epic-5.md)
 
 **Plan C (short-link resolution, multi-engine, storage scale)**
@@ -83,6 +76,7 @@ lines 120-148.
 - T1-Epic1: Promote 0010's pass-through rule to a meta-process ADR → Plan C (if recurring pressure)
 - T3-Epic1: `decode_wav` trusts float-format WAV sample values → Plan C (if alternate fetcher introduces float WAVs)
 - T10-Epic1: Per-token text field doubles raw_signals payload → Plan C (compact JSON landed in perf-tweaks decdf6f; drop-text still deferred pending 0010 amendment)
+- T11 (split at Epic 3 close): yt-dlp argv `--` separator before `source_url` → Plan C (when resolved URLs reach the fetcher)
 - Full Plan C entries: [followups/plan-c.md](followups/plan-c.md)
 
 **Cross-epic / ADR maintenance / verify-then-archive**

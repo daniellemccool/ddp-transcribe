@@ -1,6 +1,13 @@
 ---
-status: proposed
+status: accepted
 date: "2026-07-07"
+comments:
+    - author: Danielle McCool
+      date: "2026-07-07 04:37:05"
+      text: marked decision as decided
+    - author: Danielle McCool
+      date: "2026-07-07 04:40:25"
+      text: marked decision as decided
 ---
 
 # Evidence-derived failure taxonomy with inline write-off of probe-validated dead message classes
@@ -18,13 +25,13 @@ egress). How should the pipeline classify failures at failure time?
 
 ## Considered Options
 
-* Evidence-derived enums (Retryable/Unavailable/Bug arms; variants only for observed corpus classes; inline terminal write-off of "IP blocked" + "status code 10231"; default-cautious catch-alls)
+* Evidence-derived enums (Retryable/Unavailable/Bug arms; variants only for observed corpus classes; inline terminal write-off of 'IP blocked' + 'status code 10231'; default-cautious catch-alls)
 * Full speculative taxonomy from the Plan B spec (11 RetryableKind + 7 UnavailableReason variants, stderr classification tables as primary signal)
 * No pipeline classification; record raw strings and defer all verdicts to the operator triage pass
 
 ## Decision Outcome
 
-(placeholder — set via adr decide at epic close)
+Chosen option: "Evidence-derived enums (Retryable/Unavailable/Bug arms; variants only for observed corpus classes; inline terminal write-off of 'IP blocked' + 'status code 10231'; default-cautious catch-alls)", because 65k-run corpus + oEmbed probe evidence (n=36) made the speculative variant list unnecessary and showed message text is inverted on the dominant classes; inline write-off of the two probe-validated dead classes accepted by operator ruling 2026-07-07.
 
 ## Consequences
 
@@ -43,3 +50,8 @@ egress). How should the pipeline classify failures at failure time?
   yt-dlp upgrade or oEmbed drift.
 * Enums serialize into the existing v2 string columns via tag()/message()
   per 0023 — no schema change.
+
+## Comments
+
+* **2026-07-07 04:37:05 — @Danielle McCool:** marked decision as decided
+* **2026-07-07 04:40:25 — @Danielle McCool:** marked decision as decided

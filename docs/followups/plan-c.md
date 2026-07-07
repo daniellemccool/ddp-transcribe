@@ -124,3 +124,24 @@ surfaces:
 
 Option 1 is cheaper structurally; option 2 keeps the wire format inspectable.
 Don't pre-optimize — wait for the storage line item to actually pinch.
+
+---
+
+### yt-dlp argv: no `--` separator before `source_url`
+
+**Found in:** T11 code quality review (opus); finding 4 of the original
+four-finding `YtDlpFetcher::acquire` entry. Split out at Epic 3 close:
+findings 1–2 were resolved by Epic 3 (`9974d69`, archived in
+`../archive/followups-resolved.md`), finding 3 moved to
+`docs/followups/epic-5.md`.
+**Disposition:** Deferred to Plan C (short-link resolution).
+**Trigger to revisit:** when Plan C wires resolved URLs into the fetcher
+pipeline.
+
+`source_url` is bound as the last positional arg with no `--` separator.
+Today this is safe because `source_url` always comes from
+`Canonical::Valid`, whose regex anchors `^https?://`. Plan C will introduce
+short-link resolution that produces resolved URLs from external sources; an
+attacker-controlled or malformed URL beginning with `-` could be
+reinterpreted as a yt-dlp flag. One-line defense: insert `"--".into()`
+immediately before `source_url.to_string()` in the `args` vector.

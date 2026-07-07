@@ -270,3 +270,23 @@ non-`compute_lang_probs` flags in one commit. T11's
 `stale_claim_threshold` was deliberately left without `global = true`
 to match the prevailing project convention rather than create
 two-of-eight inconsistency.
+
+---
+
+### `YtDlpFetcher::acquire` tight coupling to yt-dlp's `{video_id}.wav` output filename
+
+**Found in:** T11 code quality review (opus); finding 3 of the original
+four-finding `YtDlpFetcher::acquire` entry. Split out at Epic 3 close:
+findings 1–2 were resolved by Epic 3 (`9974d69`, archived in
+`../archive/followups-resolved.md`), finding 4 moved to
+`docs/followups/plan-c.md`.
+**Disposition:** Epic 5 fetch hardening.
+**Trigger to revisit:** Epic 5 planning; or any yt-dlp version bump that
+changes output-template behavior.
+
+The post-fetch existence check (now `FetchError::MissingOutput`) assumes
+yt-dlp's `--audio-format wav` + `%(ext)s` template always produces exactly
+`{video_id}.wav`. If yt-dlp emits a sanitized variant, intermediate partial
+files, or a suffix for collisions, the check fails despite a successful
+exit. A robustness improvement: scan `video_dir` for any `.wav` after
+success, or glob `{video_id}.*.wav`.
