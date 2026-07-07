@@ -37,16 +37,17 @@ mod serial;
 // T18: `run_pipelined` + `SharedStore` are now consumed by `main.rs`'s
 // Process arm; the other three (`fetch_worker`, `transcribe_worker`,
 // `FetchedItem`) are reached transitively via `run_pipelined` inside
-// the bin and DIRECTLY from `tests/pipeline_fakes.rs`. The direct test
-// reach is the reason these stay `pub` re-exports — bin compilation
-// doesn't see the direct reach, hence the `#[allow(unused_imports)]`
-// stays per 0002 (suppressed-at-re-export, not at definition).
+// the bin and DIRECTLY from the `tests/pipeline_fakes/` test files. The
+// direct test reach is the reason these stay `pub` re-exports — bin
+// compilation doesn't see the direct reach, hence the
+// `#[allow(unused_imports)]` stays per 0002 (suppressed-at-re-export, not
+// at definition).
 #[allow(unused_imports)]
 pub use pipelined::{fetch_worker, run_pipelined, transcribe_worker, FetchedItem, SharedStore};
 // `run_serial` is no longer on the bin's hot path after T18 (the
 // Process arm calls `run_pipelined`). It stays compiled for the
-// integration tests in `tests/pipeline_fakes.rs` which exercise the
-// serial helper's behavioral contract (retryable failure
+// integration tests in `tests/pipeline_fakes/serial_tests.rs` which
+// exercise the serial helper's behavioral contract (retryable failure
 // classification, stale-after-success). 0002 placeholder until a
 // follow-up either retires `run_serial` or restores a behind-a-flag
 // bin caller.

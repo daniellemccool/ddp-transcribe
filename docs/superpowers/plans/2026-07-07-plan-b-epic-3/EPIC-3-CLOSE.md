@@ -23,6 +23,14 @@ Verification at close: `cargo fmt` clean, `clippy --all-targets -D warnings` cle
 
 ## Operator runbook — production DB (7,087 failed_retryable from the 65k run)
 
+0. Verify `curl` is on PATH (`command -v curl`). `CurlProber` shells out to
+   it for the oEmbed liveness probe; a missing/non-executable `curl` does
+   NOT error the run — every `Retryable` row comes back
+   `ProbeVerdict::Unreachable` instead (fail-open by design, so a transient
+   network blip doesn't get misread as `Dead`). Surprising on a first run:
+   the census will silently show 100% `kept_unreachable` rather than a
+   startup error. Check this before trusting a census with unexpectedly
+   high `kept_unreachable`.
 1. `ddp-transcribe triage --dry-run` — probe + census, zero mutations. Expect ~3,915 message-class write-offs, remainder probed at `--rate` (default 1/s, so budget ~1 h).
 2. Review the census (it is the study's attrition documentation): terminal counts by reason, requeue counts by kind, `kept_unreachable` (probe unreachable — rerun later), `kept_capped`.
 3. `ddp-transcribe triage` — execute: dead → `failed_terminal` (audited as `triaged_terminal`), alive → `pending` with normalized kind (audited as `requeued`; cap: `--max-attempts`, default 3).

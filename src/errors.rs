@@ -10,7 +10,16 @@ pub enum FetchError {
         duration: Duration,
     },
 
-    #[error("subprocess `{tool}` exited with status {exit_code}: {stderr_excerpt}")]
+    // Final-review fix (Epic 3 close): the verbatim Task 02 brief template
+    // omitted `signal`, so a signal-killed child (exit_code == -1) displayed
+    // with no indication of *why* — defeating the field's stated purpose of
+    // distinguishing OOM-kill (SIGKILL) / segfault (SIGSEGV) / operator
+    // interrupt (SIGINT). thiserror can't conditionally format, so `signal`
+    // is always shown (`None` for a normal exit) rather than adding a custom
+    // Display impl for one field. Deviation disclosed per ADR-0003.
+    #[error(
+        "subprocess `{tool}` exited with status {exit_code} (signal {signal:?}): {stderr_excerpt}"
+    )]
     ToolFailed {
         tool: &'static str,
         exit_code: i32,
@@ -57,15 +66,14 @@ pub enum FetchError {
 #[derive(Debug, Error)]
 pub enum TranscribeError {
     // 0002: Plan A's whisper-cli subprocess constructed these (T11 deleted
-    // the legacy `transcribe()` fn). Epic 3's failure-classification work will
-    // rebuild this enum with a richer taxonomy (`AudioDecode`, `ModelOOM`,
-    // `RetryableKind`, `UnavailableReason`, etc.). Keeping `Timeout`,
-    // `Failed`, `EmptyOutput` in place as forward-pointer variants so the
-    // Epic 3 diff is additive — but they're not constructed anywhere in Epic
-    // 1's whisper-rs path (the engine surfaces deadline-elapse via
-    // `Cancelled` and internal failures via `Bug`). The errors.rs unit test
-    // keeps `Failed` alive; `Timeout` and `EmptyOutput` need the explicit
-    // suppression. Remove these annotations when Epic 3 re-wires them.
+    // the legacy `transcribe()` fn). Epic 3 (ADR 0033) closed and put the
+    // richer failure taxonomy (`RetryableKind`, `UnavailableReason`, etc.) in
+    // `src/failure.rs` instead of rebuilding this enum — Epic 1's whisper-rs
+    // path surfaces deadline-elapse via `Cancelled` and internal failures via
+    // `Bug`, so `Timeout`, `Failed`, `EmptyOutput` remain unconstructed by the
+    // embedded engine. The errors.rs unit test keeps `Failed` alive; `Timeout`
+    // and `EmptyOutput` need the explicit suppression. Revisit if a
+    // subprocess engine returns, or at the Epic 5 dead-code sweep.
     #[allow(dead_code)]
     #[error("whisper.cpp timed out after {duration:?}")]
     Timeout { duration: Duration },
@@ -112,6 +120,31 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("yt-dlp"));
         assert!(msg.contains("300"));
+    }
+
+    #[test]
+    fn fetch_tool_failed_display_surfaces_signal() {
+        let killed = FetchError::ToolFailed {
+            tool: "yt-dlp",
+            exit_code: -1,
+            signal: Some(9),
+            stderr_excerpt: "killed".into(),
+        };
+        let msg = format!("{killed}");
+        assert!(
+            msg.contains("signal Some(9)"),
+            "signal-killed Display must surface the signal, got: {msg}"
+        );
+
+        let normal = FetchError::ToolFailed {
+            tool: "yt-dlp",
+            exit_code: 1,
+            signal: None,
+            stderr_excerpt: "some error".into(),
+        };
+        let msg = format!("{normal}");
+        assert!(msg.contains("signal None"));
+        assert!(msg.contains("status 1"));
     }
 
     #[test]

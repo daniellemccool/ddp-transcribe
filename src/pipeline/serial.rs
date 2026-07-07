@@ -19,9 +19,9 @@ use crate::transcribe::Transcriber;
 
 // 0002: T18 swapped main.rs's Process arm to `run_pipelined`, so this
 // helper is no longer reached from the bin. It stays exercised by the
-// integration tests in `tests/pipeline_fakes.rs` (serial's behavioral
-// contract — retryable classification + StaleAfterSuccess — is part of
-// the helper-shared invariants documented in `mod.rs`). Suppress
+// integration tests in `tests/pipeline_fakes/serial_tests.rs` (serial's
+// behavioral contract — retryable classification + StaleAfterSuccess — is
+// part of the helper-shared invariants documented in `mod.rs`). Suppress
 // dead_code until a follow-up either retires the helper or restores a
 // bin caller.
 #[allow(dead_code)]
@@ -76,6 +76,13 @@ pub async fn run_serial(
                 // in the None arm below (T07 review fix: Bug-class
                 // transcribe errors must escalate, not silently downgrade
                 // to retryable).
+                //
+                // Tripwire: this downcast relies on the fetch path never
+                // wrapping FetchPhaseError in `.context()`. If a future edit
+                // adds context on that path, `downcast_ref` silently misses
+                // and routing falls through to the TranscribeOther
+                // catch-all below — chain-walk like the transcribe side
+                // (`e.chain().find_map(...)`) if that ever happens.
                 let verdict = e
                     .downcast_ref::<FetchPhaseError>()
                     .map(classify_fetch_phase);
@@ -212,7 +219,7 @@ async fn process_one(
 mod tests {
     //! Unit tests for `process_one` — placed in-module so the private
     //! function is reachable without a public re-export. The integration
-    //! tests in `tests/pipeline_fakes.rs` exercise `run_serial`.
+    //! tests in `tests/pipeline_fakes/serial_tests.rs` exercise `run_serial`.
     use super::*;
     use crate::errors::TranscribeError;
     use crate::fetcher::{Acquisition, FakeFetcher, FetchOpts, VideoFetcher};

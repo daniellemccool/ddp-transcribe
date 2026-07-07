@@ -28,8 +28,13 @@ pub struct KindCounts {
     pub kept_capped: usize,
 }
 
-/// 0007: input-side counters, verb-named. `examined = marked_terminal +
-/// requeued + kept_unreachable + kept_capped` holds by construction.
+/// 0007: input-side counters, verb-named. `examined >= marked_terminal +
+/// requeued + kept_unreachable + kept_capped`; the two sides are not always
+/// equal since commit 5c837bb (0006 row-change-count gating). The gap counts
+/// predicate misses — a row changed state between `list_failed_retryable`'s
+/// snapshot and the mutating UPDATE — each of which is logged with a
+/// `tracing::warn!` at the call site instead of incrementing an action
+/// counter.
 #[derive(Debug, Default)]
 pub struct TriageStats {
     pub examined: usize,

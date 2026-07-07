@@ -94,8 +94,8 @@ pub type SharedStore = std::sync::Arc<tokio::sync::Mutex<Store>>;
 /// Decision B). The 'static lifetime mirrors the trait method's
 /// signature; every fetcher's name is a string literal.
 ///
-/// `pub` (not `pub(crate)`) so the integration tests in
-/// `tests/pipeline_fakes.rs` can construct/inspect items. After T18
+/// `pub` (not `pub(crate)`) so the integration tests under
+/// `tests/pipeline_fakes/` can construct/inspect items. After T18
 /// `run_pipelined` is wired in `main.rs`, every field is read on the
 /// bin path (via destructuring inside `transcribe_worker`) — no
 /// `dead_code` suppression needed.
@@ -150,8 +150,8 @@ pub struct FetchedItem {
 ///
 /// T18: `run_pipelined` is the in-bin caller; the prior
 /// `#[allow(dead_code)]` placeholder is lifted as part of this wiring
-/// per 0002. Integration tests in `tests/pipeline_fakes.rs` continue
-/// to exercise it directly.
+/// per 0002. Integration tests in `tests/pipeline_fakes/fetch_worker_tests.rs`
+/// continue to exercise it directly.
 pub async fn fetch_worker(
     token: CancellationToken,
     store: SharedStore,
@@ -366,8 +366,9 @@ pub async fn fetch_worker(
 ///
 /// T18: `run_pipelined` is the in-bin caller; the prior
 /// `#[allow(dead_code)]` placeholder is lifted as part of this wiring
-/// per 0002. Integration tests in `tests/pipeline_fakes.rs` continue
-/// to exercise it directly.
+/// per 0002. Integration tests in
+/// `tests/pipeline_fakes/transcribe_worker_tests.rs` continue to exercise
+/// it directly.
 pub async fn transcribe_worker(
     token: CancellationToken,
     mut receiver: mpsc::Receiver<FetchedItem>,

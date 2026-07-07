@@ -37,9 +37,9 @@ pub trait VideoFetcher: Send + Sync {
     fn name(&self) -> &'static str;
 }
 
-// Cfg-gated test fixture per 0005; consumed by tests/pipeline_fakes.rs.
-// Bin compilation also gets the feature when --features test-helpers is
-// enabled, hence the dead_code suppression.
+// Cfg-gated test fixture per 0005; consumed by the tests/pipeline_fakes/
+// test files. Bin compilation also gets the feature when --features
+// test-helpers is enabled, hence the dead_code suppression.
 #[cfg(any(test, feature = "test-helpers"))]
 #[allow(dead_code)]
 pub struct FakeFetcher {
@@ -75,7 +75,7 @@ pub struct FakeFetcher {
 #[allow(dead_code)]
 impl FakeFetcher {
     /// Construct a `FakeFetcher` that fails every `acquire` call. Used by T9's
-    /// continue-on-failure test in `tests/pipeline_fakes.rs`.
+    /// continue-on-failure test in `tests/pipeline_fakes/serial_tests.rs`.
     pub fn always_fails() -> Self {
         Self {
             canned: std::sync::Mutex::new(std::collections::HashMap::new()),

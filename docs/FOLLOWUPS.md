@@ -55,6 +55,8 @@ finding 3 → Epic 5, finding 4 → Plan C (see those groups below).
 
 **Epic 4 (operator-facing commands / timestamps)**
 - T13: `parse_watched_at` UTC assumption → Epic 4 (0027 resolution path)
+- Epic 3 final review: `requeued` event `detail_json` lacks attempt-count context → Epic 4 (`status` subcommand work)
+- Epic 3 final review: architecture-doc `uu-tiktok` naming sweep (four deepdive H1s, index.md:44, state-machine.md:151) → Epic 4 (bundle with doc touch)
 - Full Epic 4 entries: [followups/epic-4.md](followups/epic-4.md)
 
 **Epic 5 (Plan A → Plan B cleanup sweep)**
@@ -68,6 +70,11 @@ finding 3 → Epic 5, finding 4 → Plan C (see those groups below).
 - T15: `output::shard_dir` unused → Epic 5 (delete)
 - SRC-bake + T11: `--whisper-model` (and 5 other GlobalArgs flags) rejected after subcommand → Epic 5 (one-line `global = true` per flag)
 - T11 (split at Epic 3 close): `YtDlpFetcher::acquire` coupling to `{video_id}.wav` output filename → Epic 5 (fetch hardening)
+- Epic 3 final review: test-hardening bundle (signal-capture spawn+kill test, `classify_message` precedence/case test, `transcribe_worker` kind-string end-to-end assertion) → Epic 5
+- Epic 3 final review: `state/mod.rs` hygiene bundle (bare `tx.commit()?`, attempt_count==2 assertion, defensive claimed_by/claimed_at clearing, capped-requeue no-event assertion) → Epic 5
+- Epic 3 final review: `run_serial` mutator-return-value bundle (discarded row-change counts; fetch/transcribe downcast asymmetry, see tripwire in `src/pipeline/serial.rs`) → Epic 5 (or moot if `run_serial` retires)
+- Epic 3 final review: `FetchOpts` derived `Debug` doesn't redact `cookies_file` → Epic 5
+- Epic 3 final review: `scrub_cookie_path` empty-path guard → Epic 5
 - Full Epic 5 entries: [followups/epic-5.md](followups/epic-5.md)
 
 **Plan C (short-link resolution, multi-engine, storage scale)**
@@ -77,6 +84,8 @@ finding 3 → Epic 5, finding 4 → Plan C (see those groups below).
 - T3-Epic1: `decode_wav` trusts float-format WAV sample values → Plan C (if alternate fetcher introduces float WAVs)
 - T10-Epic1: Per-token text field doubles raw_signals payload → Plan C (compact JSON landed in perf-tweaks decdf6f; drop-text still deferred pending 0010 amendment)
 - T11 (split at Epic 3 close): yt-dlp argv `--` separator before `source_url` → Plan C (when resolved URLs reach the fetcher)
+- Epic 3 final review: `scrub_cookie_path` canonicalized/relative path-variant hardening → Plan C (multi-engine work)
+- Epic 3 final review: `CurlProber` missing `--location`; bundle with ADR-0034 oEmbed-drift re-validation → Plan C
 - Full Plan C entries: [followups/plan-c.md](followups/plan-c.md)
 
 **Cross-epic / ADR maintenance / verify-then-archive**

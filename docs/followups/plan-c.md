@@ -145,3 +145,46 @@ short-link resolution that produces resolved URLs from external sources; an
 attacker-controlled or malformed URL beginning with `-` could be
 reinterpreted as a yt-dlp flag. One-line defense: insert `"--".into()`
 immediately before `source_url.to_string()` in the `args` vector.
+
+---
+
+### `scrub_cookie_path` doesn't handle canonicalized/relative path variants
+
+**Found in:** Epic 3 final whole-branch review.
+**Disposition:** Deferred to Plan C (multi-engine / alternate fetcher work is the likeliest place a path gets re-derived in a different form before reaching the redaction call).
+**Trigger to revisit:** Plan C multi-engine work, or any report of a cookie
+path leaking into logs/state despite `--cookies-file` being set.
+
+`src/fetcher/ytdlp.rs::scrub_cookie_path` matches the cookie path via exact
+string equality against `path.display().to_string()`. If yt-dlp's stderr
+(or a future engine's) echoes the path in a different form than what was
+passed in — canonicalized (symlinks resolved), relative vs. absolute, or
+with a trailing slash — the substring match misses and the path leaks into
+the persisted `stderr_excerpt` uncorrected. Today's single fetcher/single
+call site doesn't hit this; worth a normalize-before-compare pass (e.g.
+`std::fs::canonicalize` both sides, or match on the basename as a fallback)
+before a second engine's stderr conventions are in scope.
+
+---
+
+### `CurlProber` doesn't pass `--location`; redirect responses are unhandled
+
+**Found in:** Epic 3 final whole-branch review.
+**Disposition:** Deferred to Plan C; bundle with the ADR-0034 oEmbed-drift
+re-validation trigger below (both concern the oEmbed probe's assumptions
+about TikTok's HTTP behavior holding steady).
+**Trigger to revisit:** any oEmbed 3xx observed in production triage logs,
+or when Plan C's periodic re-validation of ADR 0034's classifier table
+(HTTP code → verdict mapping was empirically derived 2026-07-06/07, n=36)
+is scheduled and the oEmbed corpus is re-sampled.
+
+`src/probe.rs::CurlProber::probe`'s curl invocation has no `--location`
+flag, so a redirect response (3xx) is not followed; the redirect's own
+status code falls through `verdict_from_http_code`'s wildcard arm to
+`Unreachable`, not misclassified as `Alive`/`Dead` — safe by accident
+rather than by design. If TikTok's oEmbed endpoint starts redirecting
+(domain migration, protocol upgrade) whole classes of otherwise-`Alive`
+videos would silently degrade to `kept_unreachable`. Add `--location`
+(with a `--max-redirs` cap) once oEmbed drift is worth re-validating, and
+fold it into the same pass that re-checks the empirical HTTP-code table
+against a fresh sample.

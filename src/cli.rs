@@ -110,8 +110,10 @@ pub enum Command {
         /// Probe and report the census without mutating any rows.
         #[arg(long)]
         dry_run: bool,
-        /// oEmbed probes per second.
-        #[arg(long, default_value_t = 1.0)]
+        /// oEmbed probes per second. Must be > 0 — a non-positive rate
+        /// previously clamped silently to a 1000s/probe crawl (final
+        /// review, Epic 3 close); now rejected outright.
+        #[arg(long, default_value_t = 1.0, value_parser = parse_positive_rate)]
         rate: f64,
         /// Rows at or above this attempt_count are not requeued.
         #[arg(long, default_value_t = 3)]
@@ -128,4 +130,51 @@ pub enum Profile {
 pub enum LogFormat {
     Human,
     Json,
+}
+
+/// `--rate`'s `value_parser` (final review, Epic 3 close): rejects
+/// non-positive rates at parse time rather than letting `triage.rs`'s
+/// `.max(0.001)` clamp silently turn e.g. `--rate 0` into a 1000s/probe
+/// crawl. No `RangedU64ValueParser`-equivalent exists for `f64` in clap, so
+/// this is a small hand-rolled parser matching the `humantime::parse_duration`
+/// pattern already used for `stale_claim_threshold` above.
+fn parse_positive_rate(s: &str) -> Result<f64, String> {
+    let v: f64 = s.parse().map_err(|_| format!("`{s}` is not a number"))?;
+    if v > 0.0 {
+        Ok(v)
+    } else {
+        Err(format!("--rate must be greater than 0, got {v}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        let mut full = vec!["ddp-transcribe"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full)
+    }
+
+    #[test]
+    fn triage_rejects_zero_rate() {
+        let err = parse(&["triage", "--rate", "0"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn triage_rejects_negative_rate() {
+        let err = parse(&["triage", "--rate=-1"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn triage_accepts_positive_rate() {
+        let cli = parse(&["triage", "--rate", "0.5"]).unwrap();
+        match cli.command {
+            Command::Triage { rate, .. } => assert_eq!(rate, 0.5),
+            other => panic!("expected Triage, got {other:?}"),
+        }
+    }
 }
