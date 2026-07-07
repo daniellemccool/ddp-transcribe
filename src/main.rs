@@ -14,6 +14,7 @@ mod fetcher;
 mod ingest;
 mod output;
 mod pipeline;
+mod probe;
 mod process;
 mod state;
 mod transcribe;

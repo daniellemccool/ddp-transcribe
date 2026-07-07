@@ -13,6 +13,7 @@ pub mod fetcher;
 pub mod ingest;
 pub mod output;
 pub mod pipeline;
+pub mod probe;
 pub mod process;
 pub mod state;
 pub mod transcribe;
