@@ -9,7 +9,8 @@ use tempfile::TempDir;
 use ddp_transcribe::fetcher::FakeFetcher;
 use ddp_transcribe::state::Store;
 
-use crate::fakes::silence_fixture;
+use crate::fakes::{run_single_fetch_worker, silence_fixture, store_with_pending};
+use crate::fakes::{status_and_retryable_kind, status_and_terminal_reason};
 
 /// A single `fetch_worker` claims every pending row, decodes audio, emits a
 /// `FetchedItem` per row onto the channel, then exits cleanly when
@@ -46,6 +47,7 @@ async fn fetch_worker_drains_pending_rows_and_exits() -> anyhow::Result<()> {
         canned: Mutex::new(map),
         always_fails: false,
         first_call_gate: tokio::sync::Mutex::new(None),
+        canned_stderr: std::sync::Mutex::new(None),
     };
 
     let shared: SharedStore = Arc::new(TokioMutex::new(store));
@@ -206,4 +208,41 @@ async fn fetch_worker_increments_stale_after_failure_on_swept_claim() -> anyhow:
     );
 
     Ok(())
+}
+
+/// Epic 3 T07: a fetch failure whose stderr matches a write-off pattern
+/// (ADR 0033) is dispatched through `mark_terminal_failure`, not
+/// `mark_retryable_failure` — the row goes straight to `failed_terminal`
+/// with the classifier's tag as `terminal_reason`, never to be retried.
+#[tokio::test]
+async fn fetch_worker_writes_off_ip_blocked_as_terminal() {
+    let (store, _tmp) = store_with_pending(&["7000000000000000010"]);
+    let fetcher = std::sync::Arc::new(FakeFetcher::fails_with_stderr(
+        "ERROR: [TikTok] 7000000000000000010: Your IP address is blocked from accessing this post",
+    ));
+    run_single_fetch_worker(store.clone(), fetcher).await;
+
+    let (status, reason) = status_and_terminal_reason(&store, "7000000000000000010").await;
+    assert_eq!(status, "failed_terminal");
+    assert_eq!(reason.as_deref(), Some("IpBlockedMessage"));
+}
+
+/// Epic 3 T07: a fetch failure whose stderr matches a retryable pattern
+/// records the taxonomy kind (not the Epic 2 placeholder "Fetch") in
+/// `last_retryable_kind`.
+#[tokio::test]
+async fn fetch_worker_records_taxonomy_kind_for_retryable() {
+    let (store, _tmp) = store_with_pending(&["7000000000000000011"]);
+    let fetcher = std::sync::Arc::new(FakeFetcher::fails_with_stderr(
+        "ERROR: unable to download video data: HTTP Error 403: Forbidden",
+    ));
+    run_single_fetch_worker(store.clone(), fetcher).await;
+
+    let (status, kind) = status_and_retryable_kind(&store, "7000000000000000011").await;
+    assert_eq!(status, "failed_retryable");
+    assert_eq!(
+        kind.as_deref(),
+        Some("HttpError"),
+        "placeholder \"Fetch\" kind must be gone"
+    );
 }

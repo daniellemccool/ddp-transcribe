@@ -7,10 +7,9 @@
 
 use crate::errors::{FetchError, TranscribeError};
 
-// 0002: constructed only by `classify_message`/`classify_fetch_error`, which
-// are themselves unreached from `main()` until Epic 3 T07 wires the pipeline
-// dispatch on `ClassifiedFailure`. Lift when T07 lands.
-#[allow(dead_code)]
+// 0002: lifted in Epic 3 T07 — constructed by `classify_fetch_error`/
+// `classify_transcribe_error`/`classify_fetch_phase`, all reached from
+// `main()` via `fetch_worker`/`transcribe_worker`/`run_serial`'s dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetryableKind {
     NoDataBlocks,
@@ -26,8 +25,9 @@ pub enum RetryableKind {
 }
 
 impl RetryableKind {
-    // consumed by Epic 3 T07/T10 (state-column serialization)
-    #[allow(dead_code)]
+    // 0002: lifted in Epic 3 T07 — `fetch_worker`/`transcribe_worker`/
+    // `run_serial`'s error arms call this to serialize the kind into
+    // `mark_retryable_failure`'s `kind` column.
     pub fn tag(&self) -> &'static str {
         match self {
             Self::NoDataBlocks => "NoDataBlocks",
@@ -44,8 +44,8 @@ impl RetryableKind {
     }
 }
 
-// 0002: same forward-reference as RetryableKind — unreached until T07/T10.
-#[allow(dead_code)]
+// 0002: lifted in Epic 3 T07 — same reach as RetryableKind, via
+// `classify_message`'s write-off branches inside `classify_fetch_error`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnavailableReason {
     /// "Your IP address is blocked" — probe-validated 10/10 dead (2026-07-06).
@@ -56,8 +56,9 @@ pub enum UnavailableReason {
 }
 
 impl UnavailableReason {
-    // consumed by Epic 3 T07/T10 (state-column serialization)
-    #[allow(dead_code)]
+    // 0002: lifted in Epic 3 T07 — `fetch_worker`/`run_serial`'s error arms
+    // call this to serialize the reason into `mark_terminal_failure`'s
+    // `reason` column.
     pub fn tag(&self) -> &'static str {
         match self {
             Self::IpBlockedMessage => "IpBlockedMessage",
@@ -66,15 +67,23 @@ impl UnavailableReason {
     }
 }
 
-// 0002: constructed only within classify_fetch_error/classify_transcribe_error,
-// which are unreached from `main()` until T07 wires pipeline dispatch. Lift then.
-#[allow(dead_code)]
+// 0002: lifted in Epic 3 T07 — constructed within classify_fetch_error/
+// classify_transcribe_error, both reached from `main()` via the pipeline
+// dispatch this task wires.
 #[derive(Debug, Clone)]
 pub struct FailureContext {
+    // 0002: `tool`/`exit_code`/`signal` are populated for every verdict but
+    // only read by `Debug` (dead-code analysis ignores derived-trait reads,
+    // per rustc's own diagnostic) until Task 10's triage surface displays
+    // them to an operator. `message()` — the field T07's dispatch actually
+    // persists — only projects `classification_reason` + `stderr_excerpt`.
+    #[allow(dead_code)]
     pub tool: &'static str,
+    #[allow(dead_code)]
     pub exit_code: Option<i32>,
     /// Unix signal that killed the tool, when applicable. Surfaced to
     /// operators via triage (T10); not read by the classifiers themselves.
+    #[allow(dead_code)]
     pub signal: Option<i32>,
     pub stderr_excerpt: String,
     /// Which rule matched — audit trail for "why was this row written off".
@@ -85,16 +94,15 @@ impl FailureContext {
     /// Message written to last_retryable_message / terminal_message. Leads
     /// with the matched rule so operators can grep verdicts, keeps the raw
     /// excerpt so nothing is lost.
-    // consumed by Epic 3 T07 (write-off message persisted to state columns)
-    #[allow(dead_code)]
+    // 0002: lifted in Epic 3 T07 — dispatch calls this to build the
+    // message/reason text persisted to state columns.
     pub fn message(&self) -> String {
         format!("[{}] {}", self.classification_reason, self.stderr_excerpt)
     }
 }
 
-// 0002: the three-arm verdict `classify_fetch_error`/`classify_transcribe_error`
-// produce; unreached from `main()` until T07 wires pipeline dispatch on it.
-#[allow(dead_code)]
+// 0002: lifted in Epic 3 T07 — the three-arm verdict `fetch_worker`/
+// `transcribe_worker`/`run_serial` match on directly.
 #[derive(Debug)]
 pub enum ClassifiedFailure {
     Retryable {
@@ -110,8 +118,9 @@ pub enum ClassifiedFailure {
     },
 }
 
-// consumed by Epic 3 T07/T10
-#[allow(dead_code)]
+// 0002: lifted in Epic 3 T07 — `classify_message`'s return type, reached
+// via `classify_fetch_error`'s `ToolFailed` arm. Task 10 (triage) will add a
+// second, direct call site on stored messages.
 #[derive(Debug, PartialEq, Eq)]
 pub enum MessageVerdict {
     Unavailable(UnavailableReason),
@@ -122,8 +131,9 @@ pub enum MessageVerdict {
 /// then specific retryable classes, then network markers, then the
 /// default-cautious catch-all. Substring matching on the raw stored message
 /// (which includes our own "fetching <id>: subprocess…" prefix).
-// consumed by Epic 3 T10 (triage calls this directly on stored messages)
-#[allow(dead_code)]
+// 0002: lifted in Epic 3 T07 — reached via `classify_fetch_error`'s
+// `ToolFailed` arm (now itself reached from `main()`). Task 10 (triage)
+// adds a second, direct call site on stored messages.
 pub fn classify_message(stderr: &str) -> MessageVerdict {
     if stderr.contains("Your IP address is blocked") {
         return MessageVerdict::Unavailable(UnavailableReason::IpBlockedMessage);
@@ -165,8 +175,9 @@ pub fn classify_message(stderr: &str) -> MessageVerdict {
     MessageVerdict::Retryable(RetryableKind::YtDlpOther)
 }
 
-// consumed by Epic 3 T07 (pipeline dispatch on FetchError)
-#[allow(dead_code)]
+// 0002: lifted in Epic 3 T07 — called by `classify_fetch_phase`
+// (`src/pipeline/mod.rs`), reached from `main()` via `fetch_worker`/
+// `run_serial`'s dispatch.
 pub fn classify_fetch_error(e: &FetchError) -> ClassifiedFailure {
     let ctx = |exit_code: Option<i32>, signal: Option<i32>, excerpt: &str, reason: &'static str| {
         FailureContext {
@@ -247,8 +258,8 @@ pub fn classify_fetch_error(e: &FetchError) -> ClassifiedFailure {
     }
 }
 
-// consumed by Epic 3 T07 (pipeline dispatch on TranscribeError)
-#[allow(dead_code)]
+// 0002: lifted in Epic 3 T07 — called by `transcribe_worker`'s error arm,
+// reached from `main()` via `run_pipelined`.
 pub fn classify_transcribe_error(e: &TranscribeError) -> ClassifiedFailure {
     let ctx = |excerpt: String, reason: &'static str| FailureContext {
         tool: "whisper-rs",

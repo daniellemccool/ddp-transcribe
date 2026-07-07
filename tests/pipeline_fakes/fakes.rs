@@ -1,11 +1,17 @@
 //! Shared fakes and fixture helpers for the pipeline_fakes suite.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use tempfile::TempDir;
+use tokio::sync::Mutex as TokioMutex;
 
 use ddp_transcribe::errors::TranscribeError;
+use ddp_transcribe::fetcher::VideoFetcher;
+use ddp_transcribe::pipeline::{fetch_worker, FetchedItem, ProcessOptions, SharedStore};
+use ddp_transcribe::state::Store;
 use ddp_transcribe::transcribe::{PerCallConfig, TranscribeOutput, Transcriber};
 
 /// In-test `Transcriber` impl with two behaviors:
@@ -81,4 +87,91 @@ impl Transcriber for FakeTranscriber {
 /// transcriber is called, defeating the projection assertions).
 pub(crate) fn silence_fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/audio/silence_16khz_mono.wav")
+}
+
+/// Fresh `Store` (in a scratch `TempDir`) with one `pending` row per
+/// `video_id`, wrapped as a [`SharedStore`] so callers can hand it straight
+/// to `fetch_worker`/`run_pipelined`. The `TempDir` must outlive the store
+/// (it backs the sqlite file) — callers keep the second tuple element alive
+/// for the duration of the test even if unused directly.
+pub(crate) fn store_with_pending(video_ids: &[&str]) -> (SharedStore, TempDir) {
+    let tmp = TempDir::new().expect("create tempdir");
+    let mut store = Store::open(&tmp.path().join("state.sqlite")).expect("open store");
+    for vid in video_ids {
+        store
+            .upsert_video(vid, &format!("https://example.com/{vid}"), false)
+            .expect("upsert pending video");
+    }
+    (Arc::new(TokioMutex::new(store)), tmp)
+}
+
+/// Run a single `fetch_worker` to completion against `store`/`fetcher`,
+/// draining (and discarding) every `FetchedItem` it emits. Used by tests
+/// that only care about the DB row's post-failure state (terminal reason /
+/// retryable kind), not the happy-path payload — see
+/// `fetch_worker_tests.rs`'s write-off and taxonomy-kind tests.
+pub(crate) async fn run_single_fetch_worker(store: SharedStore, fetcher: Arc<dyn VideoFetcher>) {
+    use std::sync::atomic::AtomicUsize;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    let (tx, mut rx) = mpsc::channel::<FetchedItem>(2);
+    let opts = Arc::new(ProcessOptions {
+        worker_id: "fetcher-1".into(),
+        // fetch_worker never reads transcripts_root; only transcribe_worker
+        // does. No need for this path to exist.
+        transcripts_root: PathBuf::from("/unused/transcripts-root"),
+        max_videos: None,
+        compute_lang_probs: false,
+        transcribe_timeout: Duration::from_secs(5),
+        stale_claim_threshold: Duration::from_secs(60),
+        download_workers: 3,
+        channel_capacity: 2,
+    });
+
+    let worker = tokio::spawn(fetch_worker(
+        CancellationToken::new(),
+        store,
+        fetcher,
+        tx,
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+        opts,
+    ));
+
+    // Drain (0026 drain semantics: the worker closes the channel on exit).
+    while rx.recv().await.is_some() {}
+
+    worker
+        .await
+        .expect("join fetch_worker")
+        .expect("fetch_worker returns Ok on this suite's failure-classification paths");
+}
+
+/// Read `(status, terminal_reason)` for `video_id` from `store`. Test-only
+/// projection of [`ddp_transcribe::state::VideoRow`] — see
+/// `status_and_retryable_kind` for the retryable-side counterpart.
+pub(crate) async fn status_and_terminal_reason(
+    store: &SharedStore,
+    video_id: &str,
+) -> (String, Option<String>) {
+    let guard = store.lock().await;
+    let row = guard
+        .get_video_for_test(video_id)
+        .expect("query video row")
+        .expect("row present");
+    (row.status, row.terminal_reason)
+}
+
+/// Read `(status, last_retryable_kind)` for `video_id` from `store`.
+pub(crate) async fn status_and_retryable_kind(
+    store: &SharedStore,
+    video_id: &str,
+) -> (String, Option<String>) {
+    let guard = store.lock().await;
+    let row = guard
+        .get_video_for_test(video_id)
+        .expect("query video row")
+        .expect("row present");
+    (row.status, row.last_retryable_kind)
 }

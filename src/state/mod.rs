@@ -33,6 +33,15 @@ pub struct VideoRow {
     pub source_url: String,
     pub first_seen_at: i64,
     pub attempt_count: i64,
+    /// Epic 3 T07 addition: lets integration tests assert the
+    /// classifier-dispatched write-off reason (`mark_terminal_failure`'s
+    /// `reason` column) without a hand-rolled raw `rusqlite::Connection`
+    /// query per test (the pre-existing convention in `serial_tests.rs`).
+    pub terminal_reason: Option<String>,
+    /// Epic 3 T07 addition: same rationale as `terminal_reason`, for the
+    /// retryable-side taxonomy kind (`mark_retryable_failure`'s `kind`
+    /// column).
+    pub last_retryable_kind: Option<String>,
 }
 
 /// One failed_retryable row, as triage sees it. Message included because
@@ -437,9 +446,9 @@ impl Store {
     /// this flip — they're retained as diagnostic history if the row was
     /// previously terminal (e.g., operator manually requeued). Symmetric:
     /// `mark_terminal_failure` likewise preserves prior `last_retryable_*`.
-    // T9 wires this into `run_serial`'s error arm (placeholder kind
-    // "FetchOrTranscribe" per 0023); Epic 3 replaces the placeholder with
-    // typed classifier dispatch.
+    // T9 wired this into `run_serial`'s error arm with a placeholder kind
+    // ("FetchOrTranscribe" per 0023); Epic 3 T07 replaced the placeholder
+    // with typed classifier dispatch (`RetryableKind::tag()`).
     pub fn mark_retryable_failure(
         &mut self,
         video_id: &str,
@@ -487,16 +496,13 @@ impl Store {
     /// columns. Same stale-claim predicate as the rest of the family
     /// (0023). Returns the row-change count per 0006.
     ///
-    /// **SURFACE ONLY in Epic 2 — no caller wires this.** Epic 3's classifier
-    /// dispatcher is the first caller (when failure classification distinguishes
-    /// VideoUnavailable / VideoNonExistent / similar terminal kinds from
-    /// transient classes that go through mark_retryable_failure). Landing the
-    /// surface in Epic 2 means Epic 3 is a classifier-add task, not a
-    /// mutator-add task — keeps Epic 3's diff focused on the new logic.
-    ///
-    /// 0002 cleanup discipline: `#[allow(dead_code)]` lives on this method
-    /// until Epic 3's first caller wires it. The closing task of Epic 3's
-    /// classifier work removes the attribute.
+    /// **First wired in Epic 3 T07.** `fetch_worker` and `run_serial`'s
+    /// error arm call this when `classify_fetch_phase`/`classify_fetch_error`
+    /// returns `ClassifiedFailure::Unavailable` (ADR 0033 write-off classes:
+    /// `IpBlockedMessage`, `VideoNotAvailable10231`) — a row that will never
+    /// succeed on retry. Epic 2 landed the surface with no caller so Epic 3's
+    /// diff would be a classifier-add task, not a mutator-add task; the
+    /// `#[allow(dead_code)]` that held that placement is lifted here per 0002.
     ///
     /// The `last_retryable_kind`/`last_retryable_message` columns are NOT
     /// cleared on this flip — they're retained as diagnostic history so an
@@ -504,7 +510,6 @@ impl Store {
     /// preceded it (e.g., "retried 3× as FetchTimeout, then gave up as
     /// VideoUnavailable"). Symmetric: `mark_retryable_failure` likewise
     /// preserves prior `terminal_*`.
-    #[allow(dead_code)]
     pub fn mark_terminal_failure(
         &mut self,
         video_id: &str,
@@ -721,7 +726,8 @@ impl Store {
         let row = self
             .conn
             .query_row(
-                "SELECT video_id, status, canonical, source_url, first_seen_at, attempt_count
+                "SELECT video_id, status, canonical, source_url, first_seen_at, attempt_count,
+                        terminal_reason, last_retryable_kind
                  FROM videos WHERE video_id = ?1",
                 params![video_id],
                 |r| {
@@ -732,6 +738,8 @@ impl Store {
                         source_url: r.get(3)?,
                         first_seen_at: r.get(4)?,
                         attempt_count: r.get(5)?,
+                        terminal_reason: r.get(6)?,
+                        last_retryable_kind: r.get(7)?,
                     })
                 },
             )

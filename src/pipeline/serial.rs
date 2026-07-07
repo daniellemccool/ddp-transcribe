@@ -5,9 +5,13 @@
 //! [`super::fetch_and_decode`] + [`super::transcribe_and_write`] helpers
 //! (T15). Stays the production default until T18 wires `--pipelined`.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 
-use super::{fetch_and_decode, transcribe_and_write, ProcessOptions, ProcessOutcome, ProcessStats};
+use super::{
+    classify_fetch_phase, fetch_and_decode, transcribe_and_write, FetchPhaseError, ProcessOptions,
+    ProcessOutcome, ProcessStats,
+};
+use crate::failure::{ClassifiedFailure, RetryableKind};
 use crate::fetcher::VideoFetcher;
 use crate::state::{Claim, Store};
 use crate::transcribe::Transcriber;
@@ -57,23 +61,70 @@ pub async fn run_serial(
             }
             Err(e) => {
                 stats.failed += 1;
-                let msg = format!("{e:#}"); // chain-aware via anyhow
                 tracing::error!(
                     video_id = claim.video_id.as_str(),
                     error = %e,
-                    "video failed; classifying as failed_retryable"
+                    "video failed; classifying"
                 );
-                // Epic 2 MVP: single placeholder kind "FetchOrTranscribe"
-                // per 0023. Epic 3 replaces this with typed classifier
-                // dispatch (RetryableKind enum projection).
-                store
-                    .mark_retryable_failure(
-                        &claim.video_id,
-                        &opts.worker_id,
-                        "FetchOrTranscribe",
-                        &msg,
-                    )
-                    .with_context(|| format!("mark_retryable_failure for {}", claim.video_id))?;
+                // Epic 3 T07: classify by downcasting to the typed
+                // FetchPhaseError (propagated un-contexted by process_one's
+                // `?` so the anyhow chain's root cause survives the
+                // downcast). A `None` here means the anyhow chain didn't
+                // originate from `fetch_and_decode` — i.e. a transcribe-side
+                // failure, which `transcribe_and_write` still surfaces as
+                // plain anyhow. Default-cautious: treat those as
+                // TranscribeOther-retryable rather than inventing a verdict.
+                let verdict = e
+                    .downcast_ref::<FetchPhaseError>()
+                    .map(classify_fetch_phase);
+                match verdict {
+                    Some(ClassifiedFailure::Unavailable { reason, ctx }) => {
+                        store
+                            .mark_terminal_failure(
+                                &claim.video_id,
+                                &opts.worker_id,
+                                reason.tag(),
+                                &ctx.message(),
+                            )
+                            .with_context(|| {
+                                format!("mark_terminal_failure for {}", claim.video_id)
+                            })?;
+                    }
+                    Some(ClassifiedFailure::Bug { ctx }) => {
+                        return Err(anyhow!(
+                            "fetch Bug for {}: {}",
+                            claim.video_id,
+                            ctx.message()
+                        ));
+                    }
+                    Some(ClassifiedFailure::Retryable { kind, ctx }) => {
+                        store
+                            .mark_retryable_failure(
+                                &claim.video_id,
+                                &opts.worker_id,
+                                kind.tag(),
+                                &ctx.message(),
+                            )
+                            .with_context(|| {
+                                format!("mark_retryable_failure for {}", claim.video_id)
+                            })?;
+                    }
+                    None => {
+                        // Not a fetch-phase error (transcribe-side anyhow) —
+                        // default-cautious.
+                        let msg = format!("{e:#}");
+                        store
+                            .mark_retryable_failure(
+                                &claim.video_id,
+                                &opts.worker_id,
+                                RetryableKind::TranscribeOther.tag(),
+                                &msg,
+                            )
+                            .with_context(|| {
+                                format!("mark_retryable_failure for {}", claim.video_id)
+                            })?;
+                    }
+                }
             }
         }
     }
@@ -174,6 +225,7 @@ mod tests {
             canned: Mutex::new(map),
             always_fails: false,
             first_call_gate: tokio::sync::Mutex::new(None),
+            canned_stderr: Mutex::new(None),
         };
         let transcriber = ScriptedTranscriber {
             output: TranscribeOutput {

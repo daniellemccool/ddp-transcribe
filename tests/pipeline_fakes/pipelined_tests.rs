@@ -44,6 +44,7 @@ async fn run_pipelined_honors_max_videos_cap() -> anyhow::Result<()> {
         canned: Mutex::new(map),
         always_fails: false,
         first_call_gate: tokio::sync::Mutex::new(None),
+        canned_stderr: std::sync::Mutex::new(None),
     });
     let transcriber: Arc<dyn Transcriber> = Arc::new(FakeTranscriber::echo());
 
@@ -120,6 +121,7 @@ async fn run_pipelined_drains_all_rows_and_returns_stats() -> anyhow::Result<()>
         canned: Mutex::new(map),
         always_fails: false,
         first_call_gate: tokio::sync::Mutex::new(None),
+        canned_stderr: std::sync::Mutex::new(None),
     });
     let transcriber: Arc<dyn Transcriber> = Arc::new(FakeTranscriber::echo());
 

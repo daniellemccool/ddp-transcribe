@@ -46,6 +46,12 @@ pub struct FakeFetcher {
     /// `mark_retryable_failure` predicate misses (row no longer claimed)
     /// → returns `Ok(0)` → counter increments.
     pub first_call_gate: tokio::sync::Mutex<Option<std::sync::Arc<tokio::sync::Notify>>>,
+    /// When Some, `acquire` returns a `FetchError::ToolFailed` carrying this
+    /// stderr text verbatim (exit_code=1, signal=None), checked before the
+    /// `always_fails` branch. Lets Epic 3 integration tests drive specific
+    /// classifier verdicts (`classify_fetch_error`'s message table) through
+    /// real worker dispatch rather than calling the classifier directly.
+    pub canned_stderr: std::sync::Mutex<Option<String>>,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -58,6 +64,21 @@ impl FakeFetcher {
             canned: std::sync::Mutex::new(std::collections::HashMap::new()),
             always_fails: true,
             first_call_gate: tokio::sync::Mutex::new(None),
+            canned_stderr: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Construct a `FakeFetcher` whose `acquire` always fails with
+    /// `FetchError::ToolFailed { stderr_excerpt: stderr.to_string(), .. }`
+    /// (exit_code=1, signal=None). Used by Epic 3 integration tests to drive
+    /// specific classifier verdicts (write-off vs. taxonomy-kind retryable)
+    /// through real `fetch_worker`/`run_serial` dispatch.
+    pub fn fails_with_stderr(stderr: &str) -> Self {
+        Self {
+            canned: std::sync::Mutex::new(std::collections::HashMap::new()),
+            always_fails: false,
+            first_call_gate: tokio::sync::Mutex::new(None),
+            canned_stderr: std::sync::Mutex::new(Some(stderr.to_string())),
         }
     }
 
@@ -71,6 +92,7 @@ impl FakeFetcher {
             canned: std::sync::Mutex::new(std::collections::HashMap::new()),
             always_fails: true,
             first_call_gate: tokio::sync::Mutex::new(Some(gate.clone())),
+            canned_stderr: std::sync::Mutex::new(None),
         };
         (fetcher, gate)
     }
@@ -92,6 +114,23 @@ impl VideoFetcher for FakeFetcher {
         };
         if let Some(gate) = maybe_gate {
             gate.notified().await;
+        }
+
+        // Checked before `always_fails` so `fails_with_stderr` doesn't need
+        // to also flip `always_fails` — the two modes are mutually
+        // exclusive in practice (see the constructors above).
+        let canned_err = self
+            .canned_stderr
+            .lock()
+            .expect("canned_stderr mutex")
+            .clone();
+        if let Some(stderr_excerpt) = canned_err {
+            return Err(FetchError::ToolFailed {
+                tool: "yt-dlp",
+                exit_code: 1,
+                signal: None,
+                stderr_excerpt,
+            });
         }
 
         if self.always_fails {
@@ -129,6 +168,7 @@ mod tests {
             canned: std::sync::Mutex::new(map),
             always_fails: false,
             first_call_gate: tokio::sync::Mutex::new(None),
+            canned_stderr: std::sync::Mutex::new(None),
         };
         let result = fake.acquire("7234567890123456789", "url").await.unwrap();
         match result {

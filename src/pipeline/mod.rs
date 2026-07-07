@@ -127,6 +127,45 @@ pub enum ProcessOutcome {
     StaleAfterSuccess,
 }
 
+/// Typed error for phases 1+2 (fetch + decode), so the worker/serial callers
+/// can classify the failure without downcasting through anyhow (Epic 3 T07
+/// spec refinement #1). `#[from]` on both variants means `?` inside
+/// `fetch_and_decode` converts without an explicit `.map_err`; the anyhow
+/// boundary (where a caller needs `anyhow::Result`) is crossed via the
+/// blanket `From<E: std::error::Error + Send + Sync + 'static> for
+/// anyhow::Error` impl, which does NOT attach context — required so
+/// `serial.rs`'s `downcast_ref::<FetchPhaseError>()` can recover the typed
+/// error from the anyhow chain.
+#[derive(Debug, thiserror::Error)]
+pub enum FetchPhaseError {
+    #[error(transparent)]
+    Fetch(#[from] crate::errors::FetchError),
+    #[error("decoding fetched wav: {0}")]
+    Decode(#[from] crate::audio::AudioDecodeError),
+}
+
+/// Classify a [`FetchPhaseError`] into the three-arm verdict. Thin
+/// projection: `Fetch` delegates to [`crate::failure::classify_fetch_error`]
+/// (the message-table classifier); `Decode` is always `Retryable` — a
+/// corrupt/truncated WAV on disk doesn't indict the source video, and a
+/// refetch may produce a decodable file.
+pub fn classify_fetch_phase(e: &FetchPhaseError) -> crate::failure::ClassifiedFailure {
+    use crate::failure::{ClassifiedFailure, FailureContext, RetryableKind};
+    match e {
+        FetchPhaseError::Fetch(fe) => crate::failure::classify_fetch_error(fe),
+        FetchPhaseError::Decode(de) => ClassifiedFailure::Retryable {
+            kind: RetryableKind::TranscribeOther,
+            ctx: FailureContext {
+                tool: "hound",
+                exit_code: None,
+                signal: None,
+                stderr_excerpt: de.to_string(),
+                classification_reason: "wav decode failure: refetch may repair a corrupt download",
+            },
+        },
+    }
+}
+
 /// Phase 1+2: acquire the audio and decode it to f32 PCM samples.
 ///
 /// Returns the owned samples + the WAV path on disk (needed downstream so
@@ -134,14 +173,16 @@ pub enum ProcessOutcome {
 ///
 /// Used by `run_serial`'s `process_one` AND (in Phase 2) by the fetch
 /// workers in `pipelined::fetch_worker`.
+///
+/// Returns a typed [`FetchPhaseError`] (rather than `anyhow::Result`, T15's
+/// original signature) so callers can classify the failure via
+/// [`classify_fetch_phase`] without downcasting through an anyhow chain
+/// (Epic 3 T07).
 pub(crate) async fn fetch_and_decode(
     fetcher: &dyn VideoFetcher,
     claim: &Claim,
-) -> Result<(Vec<f32>, PathBuf)> {
-    let acquisition = fetcher
-        .acquire(&claim.video_id, &claim.source_url)
-        .await
-        .with_context(|| format!("fetching {}", claim.video_id))?;
+) -> Result<(Vec<f32>, PathBuf), FetchPhaseError> {
+    let acquisition = fetcher.acquire(&claim.video_id, &claim.source_url).await?;
 
     // Plan A's `Acquisition` has only one variant; Plan B will add `Unavailable`
     // and `ReadyTranscript`, at which point the `match` becomes load-bearing.
@@ -155,8 +196,7 @@ pub(crate) async fn fetch_and_decode(
     // Decode WAV → owned Vec<f32> samples (0014: 16 kHz mono validated
     // inside decode_wav). Owned samples cross the worker-thread boundary
     // per 0016.
-    let samples = audio::decode_wav(&wav_path)
-        .with_context(|| format!("decoding wav {}", wav_path.display()))?;
+    let samples = audio::decode_wav(&wav_path)?;
 
     Ok((samples, wav_path))
 }

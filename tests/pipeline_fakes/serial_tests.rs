@@ -31,6 +31,7 @@ async fn pipeline_processes_one_video_to_succeeded_with_fake_fetcher() {
         canned: Mutex::new(map),
         always_fails: false,
         first_call_gate: tokio::sync::Mutex::new(None),
+        canned_stderr: std::sync::Mutex::new(None),
     };
 
     let transcriber = FakeTranscriber::scripted(TranscribeOutput {
@@ -103,6 +104,7 @@ async fn pipeline_writes_raw_signals_to_json_artifact() {
         canned: Mutex::new(map),
         always_fails: false,
         first_call_gate: tokio::sync::Mutex::new(None),
+        canned_stderr: std::sync::Mutex::new(None),
     };
 
     // Scripted output with one realistic segment+token so the projection
@@ -230,7 +232,10 @@ async fn run_serial_classifies_fetch_failure_as_retryable_and_continues() -> any
     assert_eq!(stats.succeeded, 0);
     assert_eq!(stats.failed, 2);
 
-    // Both rows should be failed_retryable with the placeholder kind.
+    // Both rows should be failed_retryable with the taxonomy kind
+    // (Epic 3 T07: FakeFetcher::always_fails emits FetchError::NetworkError,
+    // which classify_fetch_error maps to RetryableKind::NetworkTransient —
+    // the Epic 2 placeholder "FetchOrTranscribe" is gone).
     for vid in ["vid_a", "vid_b"] {
         let row = store.get_video_for_test(vid)?.expect("row");
         assert_eq!(row.status, "failed_retryable", "video {vid}");
@@ -251,8 +256,8 @@ async fn run_serial_classifies_fetch_failure_as_retryable_and_continues() -> any
         )?;
         assert_eq!(
             rk.as_deref(),
-            Some("FetchOrTranscribe"),
-            "video {vid}: placeholder kind"
+            Some("NetworkTransient"),
+            "video {vid}: taxonomy kind (placeholder \"FetchOrTranscribe\" must be gone)"
         );
         let msg = rm.expect("last_retryable_message populated");
         assert!(
@@ -272,9 +277,14 @@ async fn run_serial_classifies_fetch_failure_as_retryable_and_continues() -> any
 }
 
 /// Symmetric to the fetch-failure test: a failing transcriber leaves both
-/// rows as `failed_retryable` with the same placeholder kind as the
-/// fetch-failure variant. Confirms both arms (fetch and transcribe) route
-/// through the same Err branch in `run_serial`.
+/// rows as `failed_retryable`. Epic 3 T07: `process_one`'s anyhow chain for
+/// a transcribe-side failure doesn't carry a `FetchPhaseError` root cause
+/// (only `fetch_and_decode` produces one), so `run_serial`'s
+/// `downcast_ref::<FetchPhaseError>()` misses and the error arm's
+/// default-cautious `None` branch applies: `RetryableKind::TranscribeOther`.
+/// Confirms both arms (fetch and transcribe) route through the same Err
+/// branch in `run_serial`, landing on different (but both non-placeholder)
+/// kinds.
 #[tokio::test]
 async fn run_serial_classifies_transcribe_failure_as_retryable_and_continues() -> anyhow::Result<()>
 {
@@ -296,6 +306,7 @@ async fn run_serial_classifies_transcribe_failure_as_retryable_and_continues() -
         canned: Mutex::new(map),
         always_fails: false,
         first_call_gate: tokio::sync::Mutex::new(None),
+        canned_stderr: std::sync::Mutex::new(None),
     };
     let transcriber = FakeTranscriber::always_fails_retryable();
 
@@ -332,8 +343,9 @@ async fn run_serial_classifies_transcribe_failure_as_retryable_and_continues() -
         assert_eq!(status, "failed_retryable", "video {vid}");
         assert_eq!(
             rk.as_deref(),
-            Some("FetchOrTranscribe"),
-            "video {vid}: same placeholder kind regardless of which arm failed"
+            Some("TranscribeOther"),
+            "video {vid}: default-cautious kind for a non-FetchPhaseError anyhow chain \
+             (placeholder \"FetchOrTranscribe\" must be gone)"
         );
         assert!(
             rm.as_ref().is_some_and(|m| !m.is_empty()),
