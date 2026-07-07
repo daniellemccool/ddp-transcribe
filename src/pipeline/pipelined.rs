@@ -16,12 +16,50 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    fetch_and_decode, write_artifacts_and_mark, ProcessOptions, ProcessOutcome, ProcessStats,
+    classify_fetch_phase, cookie_opts_for, fetch_and_decode, write_artifacts_and_mark,
+    ProcessOptions, ProcessOutcome, ProcessStats,
 };
 use crate::errors::TranscribeError;
+use crate::failure::{classify_transcribe_error, ClassifiedFailure};
 use crate::fetcher::VideoFetcher;
 use crate::state::{Claim, Store};
 use crate::transcribe::{PerCallConfig, Transcriber};
+
+/// Shared stale-claim routing for failure-side mutators, factored out so
+/// `fetch_worker` and `transcribe_worker` don't each carry a third copy of
+/// this match (T07: the classifier dispatch would otherwise duplicate it
+/// per-arm on top of the two pre-existing copies).
+///
+/// `Ok(0)`: the mutator's `status='in_progress' AND claimed_by=?` predicate
+/// missed — a concurrent sweep (or another worker) cleared the claim between
+/// this worker's `claim_next` and the failure-flip. Symmetric to the
+/// success-side `StaleAfterSuccess` outcome: count it and continue, do NOT
+/// treat it as a Bug.
+///
+/// `Err`: the store call itself failed — Bug-class, propagated with context
+/// identifying which mutator and which row.
+fn handle_mutator_result(
+    result: anyhow::Result<usize>,
+    worker_id: &str,
+    video_id: &str,
+    stale_counter: &Arc<AtomicUsize>,
+    op: &'static str,
+) -> anyhow::Result<()> {
+    match result {
+        Ok(0) => {
+            stale_counter.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                worker = %worker_id,
+                video_id,
+                "{op} swallowed: row no longer claimed by this worker \
+                 (probably swept + re-claimed by another process)"
+            );
+            Ok(())
+        }
+        Ok(_) => Ok(()),
+        Err(e) => Err(e.context(format!("{op} for {video_id}"))),
+    }
+}
 
 /// Shared mutable access to the `Store` across N fetch workers + 1
 /// transcribe worker.
@@ -56,8 +94,8 @@ pub type SharedStore = std::sync::Arc<tokio::sync::Mutex<Store>>;
 /// Decision B). The 'static lifetime mirrors the trait method's
 /// signature; every fetcher's name is a string literal.
 ///
-/// `pub` (not `pub(crate)`) so the integration tests in
-/// `tests/pipeline_fakes.rs` can construct/inspect items. After T18
+/// `pub` (not `pub(crate)`) so the integration tests under
+/// `tests/pipeline_fakes/` can construct/inspect items. After T18
 /// `run_pipelined` is wired in `main.rs`, every field is read on the
 /// bin path (via destructuring inside `transcribe_worker`) — no
 /// `dead_code` suppression needed.
@@ -72,29 +110,39 @@ pub struct FetchedItem {
 
 /// Phase 2 fetch worker. Claims pending rows; fetches + decodes WAVs;
 /// pushes a [`FetchedItem`] onto the channel. Exits cleanly on
-/// `claim_next == None` (drain semantics per 0026 — no polling). On
-/// retryable error, calls `mark_retryable_failure` and continues. On
-/// Bug-class signals (channel closed, store error), returns `Err` — the
-/// orchestrator reacts per 0025.
+/// `claim_next == None` (drain semantics per 0026 — no polling).
+///
+/// **Error classification (Epic 3 T07).** `fetch_and_decode`'s
+/// [`super::FetchPhaseError`] is run through [`classify_fetch_phase`]:
+/// - `Bug`: returns `Err` — the orchestrator reacts per 0025 (cancel all +
+///   drain).
+/// - `Unavailable`: write-off class (ADR 0033) — calls
+///   `mark_terminal_failure` and continues; the row never retries.
+/// - `Retryable`: calls `mark_retryable_failure` with the typed kind's tag
+///   and continues.
 ///
 /// **Mutex hold-time discipline.** The shared store guard is acquired
-/// briefly for `claim_next` and `mark_retryable_failure` only; it is
+/// briefly for `claim_next` and the failure mutators only; it is
 /// dropped before the multi-second `fetch_and_decode().await` so other
 /// fetch workers can claim concurrently (SQLite's BEGIN IMMEDIATE
 /// already serializes the actual claim transaction at the connection
 /// level).
 ///
-/// **Cancellation latency.** Polled at the loop top. The hottest await
-/// inside the loop is `fetcher.acquire()` (multi-second yt-dlp call);
-/// it is intentionally NOT wrapped in `tokio::select!` for Phase 2 —
-/// yt-dlp's `kill_on_drop` already terminates the subprocess when the
-/// future is dropped. If shutdown latency becomes operationally painful,
-/// a follow-up can add a `select!` around `acquire`.
+/// **Cancellation latency (T16, closed out here).** The `fetch_and_decode`
+/// future is wrapped in a `tokio::select!` against the `CancellationToken`,
+/// mirroring the transcribe-side wrap (a66d38b). When `token.cancel()`
+/// fires mid-fetch, the select arm wins and the in-flight `acquire` future
+/// drops; `kill_on_drop` reaps the yt-dlp child immediately instead of the
+/// worker waiting out the fetch. The row stays `in_progress`; the next
+/// run's `sweep_stale_claims` recovers it per 0024. Resolves the
+/// FOLLOWUPS T16 cancellation-latency entry (previously: polled at the
+/// loop top only, relying on `kill_on_drop` firing whenever the future was
+/// eventually dropped — correct but with unbounded latency during a long
+/// fetch).
 ///
-/// **Stale-after-failure handling (design amendment).** When
-/// `mark_retryable_failure` returns `Ok(0)`, the row's claim was swept
-/// (or re-assigned) between this worker's `claim_next` and its
-/// `mark_retryable_failure` call — the predicate
+/// **Stale-after-failure handling (design amendment).** When a failure
+/// mutator returns `Ok(0)`, the row's claim was swept (or re-assigned)
+/// between this worker's `claim_next` and the mutator call — the predicate
 /// `status='in_progress' AND claimed_by=?` no longer matches. Symmetric
 /// to T9's `StaleAfterSuccess` outcome on the success side: increment
 /// `stats_stale_after_failure` and continue, do NOT return Err. T18
@@ -102,8 +150,8 @@ pub struct FetchedItem {
 ///
 /// T18: `run_pipelined` is the in-bin caller; the prior
 /// `#[allow(dead_code)]` placeholder is lifted as part of this wiring
-/// per 0002. Integration tests in `tests/pipeline_fakes.rs` continue
-/// to exercise it directly.
+/// per 0002. Integration tests in `tests/pipeline_fakes/fetch_worker_tests.rs`
+/// continue to exercise it directly.
 pub async fn fetch_worker(
     token: CancellationToken,
     store: SharedStore,
@@ -156,9 +204,25 @@ pub async fn fetch_worker(
             return Ok(());
         };
 
-        // Inline fetch + decode (T15 helper). Errors here are application
-        // failures, not Bug-class — classify as retryable and continue.
-        match fetch_and_decode(fetcher.as_ref(), &claim).await {
+        // Epic 3 T08: kind-gated cookie routing (ADR 0035). Computed at the
+        // call site so the policy decision (which reads `claim` fresh each
+        // iteration) never goes stale across retries.
+        let fetch_opts = cookie_opts_for(&claim, opts.cookies_file.as_deref());
+
+        // T16: wrap the fetch in the cancellation select so a mid-fetch
+        // shutdown drops the in-flight `acquire` future promptly (see the
+        // docstring's Cancellation latency section) instead of relying on
+        // the loop-top poll alone.
+        let fetch_result = tokio::select! {
+            biased;
+            () = token.cancelled() => {
+                tracing::info!(worker = %worker_id, "fetch_worker: cancellation during fetch; exiting");
+                return Ok(());
+            }
+            r = fetch_and_decode(fetcher.as_ref(), &claim, &fetch_opts) => r,
+        };
+
+        match fetch_result {
             Ok((samples, wav_path)) => {
                 let samples_len = samples.len();
                 let item = FetchedItem {
@@ -188,41 +252,57 @@ pub async fn fetch_worker(
             }
             Err(e) => {
                 let video_id = claim.video_id.clone();
-                let msg = format!("{e:#}");
-                tracing::error!(
-                    worker = %worker_id,
-                    video_id = video_id.as_str(),
-                    error = %e,
-                    "fetch_worker: failure; classifying as retryable"
-                );
-                // Acquire guard briefly for the mutator; drop before the
-                // next loop iteration's claim.
-                let result = {
-                    let mut guard = store.lock().await;
-                    // Epic 2 MVP placeholder kind "Fetch" per 0023; Epic 3
-                    // swaps in typed RetryableKind via classifier dispatch.
-                    guard.mark_retryable_failure(&video_id, &worker_id, "Fetch", &msg)
-                };
-                match result {
-                    Ok(0) => {
-                        // Stale claim: predicate
-                        // `status='in_progress' AND claimed_by=?` missed.
-                        // Symmetric to StaleAfterSuccess on the success
-                        // side. Counter is monotonic telemetry — Relaxed
-                        // is fine (no synchronization signal).
-                        stats_stale_after_failure.fetch_add(1, Ordering::Relaxed);
+                match classify_fetch_phase(&e) {
+                    ClassifiedFailure::Bug { ctx } => {
+                        return Err(anyhow!("fetch Bug for {video_id}: {}", ctx.message()));
+                    }
+                    ClassifiedFailure::Unavailable { reason, ctx } => {
                         tracing::warn!(
                             worker = %worker_id,
                             video_id = video_id.as_str(),
-                            "fetch_worker: mark_retryable_failure swallowed: \
-                             row no longer claimed by this worker \
-                             (probably swept + re-claimed by another process)"
+                            reason = reason.tag(),
+                            "fetch_worker: write-off; marking terminal"
                         );
+                        let result = {
+                            let mut guard = store.lock().await;
+                            guard.mark_terminal_failure(
+                                &video_id,
+                                &worker_id,
+                                reason.tag(),
+                                &ctx.message(),
+                            )
+                        };
+                        handle_mutator_result(
+                            result,
+                            &worker_id,
+                            &video_id,
+                            &stats_stale_after_failure,
+                            "mark_terminal_failure",
+                        )?;
                     }
-                    Ok(_) => { /* normal retryable flip */ }
-                    Err(store_err) => {
-                        // The store call itself failed — Bug-class.
-                        return Err(store_err.context("fetch_worker: mark_retryable_failure"));
+                    ClassifiedFailure::Retryable { kind, ctx } => {
+                        tracing::error!(
+                            worker = %worker_id,
+                            video_id = video_id.as_str(),
+                            kind = kind.tag(),
+                            "fetch_worker: retryable failure"
+                        );
+                        let result = {
+                            let mut guard = store.lock().await;
+                            guard.mark_retryable_failure(
+                                &video_id,
+                                &worker_id,
+                                kind.tag(),
+                                &ctx.message(),
+                            )
+                        };
+                        handle_mutator_result(
+                            result,
+                            &worker_id,
+                            &video_id,
+                            &stats_stale_after_failure,
+                            "mark_retryable_failure",
+                        )?;
                     }
                 }
                 // continue to next iteration.
@@ -260,16 +340,20 @@ pub async fn fetch_worker(
 /// (per ADR 0012) fires the per-request `Arc<AtomicBool>`, and
 /// whisper.cpp's `abort_callback` aborts inference within milliseconds.
 ///
-/// **Error classification.**
+/// **Error classification (Epic 3 T07).**
 /// - [`TranscribeError::Cancelled`]: row stays `in_progress`, sweep
 ///   recovers on next startup. Worker returns `Ok(())` — coordinated
 ///   shutdown is not a Bug.
 /// - [`TranscribeError::Bug`]: worker returns `Err` — the orchestrator
 ///   reacts per 0025 (cancel all + drain JoinSet).
-/// - Other variants (currently `Timeout`, `Failed`, `EmptyOutput`):
-///   classified as retryable via `mark_retryable_failure(kind="Transcribe")`.
-///   On `Ok(0)` (claim swept mid-flight), increment
-///   `stats_stale_after_failure` and continue (symmetric to T16's
+/// - Other variants (currently `Timeout`, `Failed`, `EmptyOutput`,
+///   `AudioDecode`): run through `classify_transcribe_error`, which never
+///   produces `Unavailable` and only produces `Bug` for the
+///   already-excluded `TranscribeError::Bug` case — both arms are
+///   `unreachable!()` in this match. The live path is `Retryable`:
+///   `mark_retryable_failure` with the typed kind's tag. On `Ok(0)` (claim
+///   swept mid-flight), increment `stats_stale_after_failure` and continue
+///   (symmetric to T16's
 ///   amendment for the fetch side).
 ///
 /// **Success-side stale-claim routing (T18 Decision A).** When
@@ -282,8 +366,9 @@ pub async fn fetch_worker(
 ///
 /// T18: `run_pipelined` is the in-bin caller; the prior
 /// `#[allow(dead_code)]` placeholder is lifted as part of this wiring
-/// per 0002. Integration tests in `tests/pipeline_fakes.rs` continue
-/// to exercise it directly.
+/// per 0002. Integration tests in
+/// `tests/pipeline_fakes/transcribe_worker_tests.rs` continue to exercise
+/// it directly.
 pub async fn transcribe_worker(
     token: CancellationToken,
     mut receiver: mpsc::Receiver<FetchedItem>,
@@ -407,43 +492,44 @@ pub async fn transcribe_worker(
                 );
             }
             Err(e) => {
-                // Retryable transcribe error: classify via
-                // mark_retryable_failure. Symmetric to T16's
-                // `stats_stale_after_failure` amendment on Ok(0).
+                // Classifier dispatch (Epic 3 T07). By this point
+                // `TranscribeError::Cancelled` and `TranscribeError::Bug`
+                // have already been consumed by the arms above, so
+                // `classify_transcribe_error` — which only ever produces
+                // `Bug` for the `Bug` variant, and never produces
+                // `Unavailable` — cannot reach either arm here. Both are
+                // `unreachable!()`; the live path is `Retryable`.
                 let video_id = claim.video_id.clone();
-                let msg = format!("{e:#}");
-                tracing::error!(
-                    worker = %worker_id,
-                    video_id = video_id.as_str(),
-                    error = %e,
-                    "transcribe_worker: retryable transcribe failure"
-                );
-                let result = {
-                    let mut guard = store.lock().await;
-                    // Epic 2 MVP placeholder kind "Transcribe" per 0023;
-                    // Epic 3 swaps in typed RetryableKind via
-                    // classifier dispatch.
-                    guard.mark_retryable_failure(&video_id, &worker_id, "Transcribe", &msg)
-                };
-                match result {
-                    Ok(0) => {
-                        // Stale claim: predicate
-                        // `status='in_progress' AND claimed_by=?` missed.
-                        // Counter is monotonic telemetry — Relaxed is
-                        // fine.
-                        stats_stale_after_failure.fetch_add(1, Ordering::Relaxed);
-                        tracing::warn!(
+                match classify_transcribe_error(&e) {
+                    ClassifiedFailure::Bug { .. } => {
+                        unreachable!("TranscribeError::Bug is caught by the arm above this match")
+                    }
+                    ClassifiedFailure::Unavailable { .. } => {
+                        unreachable!("classify_transcribe_error never produces Unavailable")
+                    }
+                    ClassifiedFailure::Retryable { kind, ctx } => {
+                        tracing::error!(
                             worker = %worker_id,
                             video_id = video_id.as_str(),
-                            "transcribe_worker: mark_retryable_failure swallowed: \
-                             row no longer claimed by this worker \
-                             (probably swept + re-claimed by another process)"
+                            kind = kind.tag(),
+                            "transcribe_worker: retryable transcribe failure"
                         );
-                    }
-                    Ok(_) => { /* normal retryable flip */ }
-                    Err(store_err) => {
-                        // The store call itself failed — Bug-class.
-                        return Err(store_err.context("transcribe_worker: mark_retryable_failure"));
+                        let result = {
+                            let mut guard = store.lock().await;
+                            guard.mark_retryable_failure(
+                                &video_id,
+                                &worker_id,
+                                kind.tag(),
+                                &ctx.message(),
+                            )
+                        };
+                        handle_mutator_result(
+                            result,
+                            &worker_id,
+                            &video_id,
+                            &stats_stale_after_failure,
+                            "mark_retryable_failure",
+                        )?;
                     }
                 }
                 // continue loop

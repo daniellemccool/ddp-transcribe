@@ -33,6 +33,31 @@ pub struct VideoRow {
     pub source_url: String,
     pub first_seen_at: i64,
     pub attempt_count: i64,
+    /// Epic 3 T07 addition: lets integration tests assert the
+    /// classifier-dispatched write-off reason (`mark_terminal_failure`'s
+    /// `reason` column) without a hand-rolled raw `rusqlite::Connection`
+    /// query per test (the pre-existing convention in `serial_tests.rs`).
+    pub terminal_reason: Option<String>,
+    /// Epic 3 T07 addition: same rationale as `terminal_reason`, for the
+    /// retryable-side taxonomy kind (`mark_retryable_failure`'s `kind`
+    /// column).
+    pub last_retryable_kind: Option<String>,
+}
+
+/// One failed_retryable row, as triage sees it. Message included because
+/// triage classifies stored messages (fast path) before deciding to probe.
+#[derive(Debug)]
+pub struct TriageRow {
+    pub video_id: String,
+    // 0002: genuinely unread by T10's `run_triage` — triage re-derives the
+    // kind from `last_retryable_message` via `classify_message` and never
+    // consults the previously-stored (possibly placeholder, e.g. "Fetch")
+    // kind. Kept for Debug/audit visibility and API symmetry with the
+    // column set; not dead per se, just not read outside Debug.
+    #[allow(dead_code)]
+    pub last_retryable_kind: Option<String>,
+    pub last_retryable_message: Option<String>,
+    pub attempt_count: i64,
 }
 
 /// Typed errors surfaced by `state::Store` mutators and accessors.
@@ -269,6 +294,13 @@ pub struct Claim {
     pub video_id: String,
     pub source_url: String,
     pub attempt_count: i64,
+    /// Kind tag recorded by the most recent retryable failure, if any.
+    /// None on first attempt. Epic 3 cookie routing keys on this being
+    /// "SensitiveLoginGated" (ADR 0035); triage's requeue normalizes
+    /// historical placeholder kinds before the row becomes claimable again.
+    // 0002: `#[allow(dead_code)]` lifted here (Task 08) — now read by
+    // `pipeline::cookie_opts_for`'s kind-gated cookie routing.
+    pub last_retryable_kind: Option<String>,
 }
 
 /// Artifacts written to the database upon successful transcription.
@@ -292,19 +324,20 @@ impl Store {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .context("begin immediate for claim_next")?;
 
-        let candidate: Option<(String, String, i64)> = tx
+        let candidate: Option<(String, String, i64, Option<String>)> = tx
             .query_row(
-                "SELECT video_id, source_url, attempt_count
+                "SELECT video_id, source_url, attempt_count, last_retryable_kind
                  FROM videos
                  WHERE status = 'pending'
                  ORDER BY first_seen_at ASC, video_id ASC
                  LIMIT 1",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
-            .optional()?;
+            .optional()
+            .context("claim_next: select oldest pending row")?;
 
-        let Some((video_id, source_url, prev_attempts)) = candidate else {
+        let Some((video_id, source_url, prev_attempts, last_retryable_kind)) = candidate else {
             tx.commit()?;
             return Ok(None);
         };
@@ -319,13 +352,15 @@ impl Store {
                  updated_at = ?3
              WHERE video_id = ?1",
             params![video_id, worker_id, now, new_attempts],
-        )?;
+        )
+        .with_context(|| format!("claim_next: flip {video_id} to in_progress for {worker_id}"))?;
 
         tx.execute(
             "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
              VALUES (?1, ?2, 'claimed', ?3, NULL)",
             params![video_id, now, worker_id],
-        )?;
+        )
+        .with_context(|| format!("claim_next: insert claimed event for {video_id}"))?;
 
         tx.commit().context("commit claim transaction")?;
 
@@ -333,6 +368,7 @@ impl Store {
             video_id,
             source_url,
             attempt_count: new_attempts,
+            last_retryable_kind,
         }))
     }
 
@@ -391,7 +427,8 @@ impl Store {
                 "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
                  VALUES (?1, ?2, 'succeeded', ?3, NULL)",
                 params![video_id, now, worker_id],
-            )?;
+            )
+            .with_context(|| format!("mark_succeeded: insert succeeded event for {video_id}"))?;
         }
 
         tx.commit().context("commit mark_succeeded")?;
@@ -412,9 +449,9 @@ impl Store {
     /// this flip — they're retained as diagnostic history if the row was
     /// previously terminal (e.g., operator manually requeued). Symmetric:
     /// `mark_terminal_failure` likewise preserves prior `last_retryable_*`.
-    // T9 wires this into `run_serial`'s error arm (placeholder kind
-    // "FetchOrTranscribe" per 0023); Epic 3 replaces the placeholder with
-    // typed classifier dispatch.
+    // T9 wired this into `run_serial`'s error arm with a placeholder kind
+    // ("FetchOrTranscribe" per 0023); Epic 3 T07 replaced the placeholder
+    // with typed classifier dispatch (`RetryableKind::tag()`).
     pub fn mark_retryable_failure(
         &mut self,
         video_id: &str,
@@ -462,16 +499,13 @@ impl Store {
     /// columns. Same stale-claim predicate as the rest of the family
     /// (0023). Returns the row-change count per 0006.
     ///
-    /// **SURFACE ONLY in Epic 2 — no caller wires this.** Epic 3's classifier
-    /// dispatcher is the first caller (when failure classification distinguishes
-    /// VideoUnavailable / VideoNonExistent / similar terminal kinds from
-    /// transient classes that go through mark_retryable_failure). Landing the
-    /// surface in Epic 2 means Epic 3 is a classifier-add task, not a
-    /// mutator-add task — keeps Epic 3's diff focused on the new logic.
-    ///
-    /// 0002 cleanup discipline: `#[allow(dead_code)]` lives on this method
-    /// until Epic 3's first caller wires it. The closing task of Epic 3's
-    /// classifier work removes the attribute.
+    /// **First wired in Epic 3 T07.** `fetch_worker` and `run_serial`'s
+    /// error arm call this when `classify_fetch_phase`/`classify_fetch_error`
+    /// returns `ClassifiedFailure::Unavailable` (ADR 0033 write-off classes:
+    /// `IpBlockedMessage`, `VideoNotAvailable10231`) — a row that will never
+    /// succeed on retry. Epic 2 landed the surface with no caller so Epic 3's
+    /// diff would be a classifier-add task, not a mutator-add task; the
+    /// `#[allow(dead_code)]` that held that placement is lifted here per 0002.
     ///
     /// The `last_retryable_kind`/`last_retryable_message` columns are NOT
     /// cleared on this flip — they're retained as diagnostic history so an
@@ -479,7 +513,6 @@ impl Store {
     /// preceded it (e.g., "retried 3× as FetchTimeout, then gave up as
     /// VideoUnavailable"). Symmetric: `mark_retryable_failure` likewise
     /// preserves prior `terminal_*`.
-    #[allow(dead_code)]
     pub fn mark_terminal_failure(
         &mut self,
         video_id: &str,
@@ -573,6 +606,112 @@ impl Store {
 
         Ok(changed)
     }
+
+    /// Snapshot of all failed_retryable rows, FIFO by first_seen_at. Read-only.
+    pub fn list_failed_retryable(&self) -> Result<Vec<TriageRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT video_id, last_retryable_kind, last_retryable_message, attempt_count
+                 FROM videos WHERE status = 'failed_retryable'
+                 ORDER BY first_seen_at ASC, video_id ASC",
+            )
+            .context("prepare list_failed_retryable")?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(TriageRow {
+                    video_id: r.get(0)?,
+                    last_retryable_kind: r.get(1)?,
+                    last_retryable_message: r.get(2)?,
+                    attempt_count: r.get(3)?,
+                })
+            })
+            .context("query list_failed_retryable")?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("collect list_failed_retryable rows")?;
+        Ok(rows)
+    }
+
+    /// Triage verdict: dead. failed_retryable → failed_terminal. Unlike
+    /// mark_terminal_failure (in_progress + claimed_by predicate, pipeline
+    /// caller), this operates on unclaimed failed rows; the operator-action
+    /// audit trail is the 'triaged_terminal' event. last_retryable_* columns
+    /// are preserved (0023 family convention: diagnostics accumulate).
+    pub fn triage_mark_terminal(
+        &mut self,
+        video_id: &str,
+        reason: &str,
+        message: &str,
+    ) -> Result<usize> {
+        let now = unix_now();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("begin immediate for triage_mark_terminal")?;
+        let changed = tx
+            .execute(
+                "UPDATE videos
+                 SET status = 'failed_terminal',
+                     terminal_reason = ?2,
+                     terminal_message = ?3,
+                     updated_at = ?4
+                 WHERE video_id = ?1 AND status = 'failed_retryable'",
+                params![video_id, reason, message, now],
+            )
+            .with_context(|| format!("triage_mark_terminal update for {video_id}"))?;
+        if changed > 0 {
+            let detail = serde_json::json!({ "reason": reason, "message": message }).to_string();
+            tx.execute(
+                "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
+                 VALUES (?1, ?2, 'triaged_terminal', 'triage', ?3)",
+                params![video_id, now, detail],
+            )
+            .with_context(|| format!("triage_mark_terminal event for {video_id}"))?;
+        }
+        tx.commit().context("commit triage_mark_terminal")?;
+        Ok(changed)
+    }
+
+    /// Triage verdict: alive. failed_retryable → pending, gated by the
+    /// attempt cap IN THE PREDICATE (race-free: the cap check and the flip
+    /// are one statement). Writes the re-classified kind back so historical
+    /// placeholder kinds ("Fetch") become taxonomy kinds before the row is
+    /// claimable — cookie routing (ADR 0035) reads the kind at claim time.
+    pub fn requeue_retryable(
+        &mut self,
+        video_id: &str,
+        new_kind: &str,
+        max_attempts: i64,
+    ) -> Result<usize> {
+        let now = unix_now();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("begin immediate for requeue_retryable")?;
+        let changed = tx
+            .execute(
+                "UPDATE videos
+                 SET status = 'pending',
+                     last_retryable_kind = ?2,
+                     updated_at = ?3
+                 WHERE video_id = ?1
+                   AND status = 'failed_retryable'
+                   AND attempt_count < ?4",
+                params![video_id, new_kind, now, max_attempts],
+            )
+            .with_context(|| format!("requeue_retryable update for {video_id}"))?;
+        if changed > 0 {
+            let detail = serde_json::json!({ "new_kind": new_kind }).to_string();
+            tx.execute(
+                "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
+                 VALUES (?1, ?2, 'requeued', 'triage', ?3)",
+                params![video_id, now, detail],
+            )
+            .with_context(|| format!("requeue_retryable event for {video_id}"))?;
+        }
+        tx.commit().context("commit requeue_retryable")?;
+        Ok(changed)
+    }
 }
 
 impl Store {
@@ -584,7 +723,8 @@ impl Store {
         let row = self
             .conn
             .query_row(
-                "SELECT video_id, status, canonical, source_url, first_seen_at, attempt_count
+                "SELECT video_id, status, canonical, source_url, first_seen_at, attempt_count,
+                        terminal_reason, last_retryable_kind
                  FROM videos WHERE video_id = ?1",
                 params![video_id],
                 |r| {
@@ -595,6 +735,8 @@ impl Store {
                         source_url: r.get(3)?,
                         first_seen_at: r.get(4)?,
                         attempt_count: r.get(5)?,
+                        terminal_reason: r.get(6)?,
+                        last_retryable_kind: r.get(7)?,
                     })
                 },
             )

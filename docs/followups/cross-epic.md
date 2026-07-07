@@ -116,32 +116,6 @@ calibrating language-pin policy.
 
 ---
 
-### Plan-brief library-API drift (T13/T19/T16 caught at implementation time)
-
-**Found in:** T13 (`features = ["sync"]`), T19 (`clap::value_parser!(usize).range(1..)`), T16 (stale-test design via pre-claim with different worker_id) — three consecutive Phase 2 tasks where the plan-brief's library-API claim or test-design suggestion didn't match the actually-installed crate behavior, requiring the implementer to detect, deviate, and disclose per ADR 0003.
-**Disposition:** Process improvement for future epics.
-**Trigger to revisit:** Epic 3 planning kickoff.
-
-Pattern: plan authors assume APIs based on memory or older crate versions.
-Three independent catches in one epic suggests the plan-write-time checklist
-should include a "verify each library-API claim against the actually-installed
-crate version" step.
-
-Suggested forms:
-
-- During plan write, run `cargo doc --open` for each library mentioned and
-  spot-check the actual API surface.
-- For `Cargo.toml` claims (features, exact versions), check `Cargo.lock` for
-  the resolved version + read its `Cargo.toml` from the cargo registry
-  (`~/.cargo/registry/src/`).
-- For test-design suggestions, hand-trace the production code semantics
-  (caller ownership, predicate conditions) before publishing the suggested test.
-
-Epic 3 planning should adopt this checklist; treat as project-level discipline
-alongside ADR 0003's deviation-honesty norm.
-
----
-
 ### Architecture doc-set drift detection
 
 **Found in:** T08 (cross-cutting additions) — architecture doc set plan (2026-05-20).

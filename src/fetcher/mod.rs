@@ -12,9 +12,22 @@ pub enum Acquisition {
     AudioFile(PathBuf),
 }
 
+/// Per-request fetch options (Epic 3). Cookie scope is policy: ADR 0035
+/// pins cookies to SensitiveLoginGated retries only; this struct just
+/// carries the decision to the tool adapter.
+#[derive(Debug, Clone, Default)]
+pub struct FetchOpts {
+    pub cookies_file: Option<PathBuf>,
+}
+
 #[async_trait]
 pub trait VideoFetcher: Send + Sync {
-    async fn acquire(&self, video_id: &str, source_url: &str) -> Result<Acquisition, FetchError>;
+    async fn acquire(
+        &self,
+        video_id: &str,
+        source_url: &str,
+        opts: &FetchOpts,
+    ) -> Result<Acquisition, FetchError>;
 
     /// Identifier of the fetcher implementation, recorded in
     /// `TranscriptMetadata::fetcher` and `SuccessArtifacts::fetcher`.
@@ -24,9 +37,9 @@ pub trait VideoFetcher: Send + Sync {
     fn name(&self) -> &'static str;
 }
 
-// Cfg-gated test fixture per 0005; consumed by tests/pipeline_fakes.rs.
-// Bin compilation also gets the feature when --features test-helpers is
-// enabled, hence the dead_code suppression.
+// Cfg-gated test fixture per 0005; consumed by the tests/pipeline_fakes/
+// test files. Bin compilation also gets the feature when --features
+// test-helpers is enabled, hence the dead_code suppression.
 #[cfg(any(test, feature = "test-helpers"))]
 #[allow(dead_code)]
 pub struct FakeFetcher {
@@ -46,18 +59,45 @@ pub struct FakeFetcher {
     /// `mark_retryable_failure` predicate misses (row no longer claimed)
     /// → returns `Ok(0)` → counter increments.
     pub first_call_gate: tokio::sync::Mutex<Option<std::sync::Arc<tokio::sync::Notify>>>,
+    /// When Some, `acquire` returns a `FetchError::ToolFailed` carrying this
+    /// stderr text verbatim (exit_code=1, signal=None), checked before the
+    /// `always_fails` branch. Lets Epic 3 integration tests drive specific
+    /// classifier verdicts (`classify_fetch_error`'s message table) through
+    /// real worker dispatch rather than calling the classifier directly.
+    pub canned_stderr: std::sync::Mutex<Option<String>>,
+    /// Records every `FetchOpts` passed to `acquire`, in call order. Lets
+    /// Epic 3 T08's cookie-routing tests assert what the worker actually
+    /// threaded through, rather than re-deriving the policy decision.
+    pub received_opts: std::sync::Mutex<Vec<FetchOpts>>,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
 #[allow(dead_code)]
 impl FakeFetcher {
     /// Construct a `FakeFetcher` that fails every `acquire` call. Used by T9's
-    /// continue-on-failure test in `tests/pipeline_fakes.rs`.
+    /// continue-on-failure test in `tests/pipeline_fakes/serial_tests.rs`.
     pub fn always_fails() -> Self {
         Self {
             canned: std::sync::Mutex::new(std::collections::HashMap::new()),
             always_fails: true,
             first_call_gate: tokio::sync::Mutex::new(None),
+            canned_stderr: std::sync::Mutex::new(None),
+            received_opts: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Construct a `FakeFetcher` whose `acquire` always fails with
+    /// `FetchError::ToolFailed { stderr_excerpt: stderr.to_string(), .. }`
+    /// (exit_code=1, signal=None). Used by Epic 3 integration tests to drive
+    /// specific classifier verdicts (write-off vs. taxonomy-kind retryable)
+    /// through real `fetch_worker`/`run_serial` dispatch.
+    pub fn fails_with_stderr(stderr: &str) -> Self {
+        Self {
+            canned: std::sync::Mutex::new(std::collections::HashMap::new()),
+            always_fails: false,
+            first_call_gate: tokio::sync::Mutex::new(None),
+            canned_stderr: std::sync::Mutex::new(Some(stderr.to_string())),
+            received_opts: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -71,6 +111,8 @@ impl FakeFetcher {
             canned: std::sync::Mutex::new(std::collections::HashMap::new()),
             always_fails: true,
             first_call_gate: tokio::sync::Mutex::new(Some(gate.clone())),
+            canned_stderr: std::sync::Mutex::new(None),
+            received_opts: std::sync::Mutex::new(Vec::new()),
         };
         (fetcher, gate)
     }
@@ -82,7 +124,20 @@ impl FakeFetcher {
 #[allow(clippy::expect_used)]
 #[async_trait]
 impl VideoFetcher for FakeFetcher {
-    async fn acquire(&self, video_id: &str, _source_url: &str) -> Result<Acquisition, FetchError> {
+    async fn acquire(
+        &self,
+        video_id: &str,
+        _source_url: &str,
+        opts: &FetchOpts,
+    ) -> Result<Acquisition, FetchError> {
+        // Recorder: pushed unconditionally, before any of the
+        // fail/succeed branches below, so Epic 3's cookie-routing tests
+        // can assert what the caller actually threaded through.
+        self.received_opts
+            .lock()
+            .expect("received_opts mutex")
+            .push(opts.clone());
+
         // One-shot gate: take the Notify out of the slot (so subsequent calls
         // skip), then await `notified()` outside the slot guard so we don't
         // hold the tokio Mutex across the long await.
@@ -92,6 +147,23 @@ impl VideoFetcher for FakeFetcher {
         };
         if let Some(gate) = maybe_gate {
             gate.notified().await;
+        }
+
+        // Checked before `always_fails` so `fails_with_stderr` doesn't need
+        // to also flip `always_fails` — the two modes are mutually
+        // exclusive in practice (see the constructors above).
+        let canned_err = self
+            .canned_stderr
+            .lock()
+            .expect("canned_stderr mutex")
+            .clone();
+        if let Some(stderr_excerpt) = canned_err {
+            return Err(FetchError::ToolFailed {
+                tool: "yt-dlp",
+                exit_code: 1,
+                signal: None,
+                stderr_excerpt,
+            });
         }
 
         if self.always_fails {
@@ -129,8 +201,13 @@ mod tests {
             canned: std::sync::Mutex::new(map),
             always_fails: false,
             first_call_gate: tokio::sync::Mutex::new(None),
+            canned_stderr: std::sync::Mutex::new(None),
+            received_opts: std::sync::Mutex::new(Vec::new()),
         };
-        let result = fake.acquire("7234567890123456789", "url").await.unwrap();
+        let result = fake
+            .acquire("7234567890123456789", "url", &FetchOpts::default())
+            .await
+            .unwrap();
         match result {
             Acquisition::AudioFile(p) => assert_eq!(p, PathBuf::from("/tmp/fake.wav")),
         }

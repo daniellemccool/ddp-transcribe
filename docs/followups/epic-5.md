@@ -270,3 +270,130 @@ non-`compute_lang_probs` flags in one commit. T11's
 `stale_claim_threshold` was deliberately left without `global = true`
 to match the prevailing project convention rather than create
 two-of-eight inconsistency.
+
+---
+
+### `YtDlpFetcher::acquire` tight coupling to yt-dlp's `{video_id}.wav` output filename
+
+**Found in:** T11 code quality review (opus); finding 3 of the original
+four-finding `YtDlpFetcher::acquire` entry. Split out at Epic 3 close:
+findings 1–2 were resolved by Epic 3 (`9974d69`, archived in
+`../archive/followups-resolved.md`), finding 4 moved to
+`docs/followups/plan-c.md`.
+**Disposition:** Epic 5 fetch hardening.
+**Trigger to revisit:** Epic 5 planning; or any yt-dlp version bump that
+changes output-template behavior.
+
+The post-fetch existence check (now `FetchError::MissingOutput`) assumes
+yt-dlp's `--audio-format wav` + `%(ext)s` template always produces exactly
+`{video_id}.wav`. If yt-dlp emits a sanitized variant, intermediate partial
+files, or a suffix for collisions, the check fails despite a successful
+exit. A robustness improvement: scan `video_dir` for any `.wav` after
+success, or glob `{video_id}.*.wav`.
+
+---
+
+### Epic 3 close: test-hardening bundle (signal capture, classifier precedence, kind-string end-to-end)
+
+**Found in:** Epic 3 final whole-branch review.
+**Disposition:** Grouped opportunistic hardening; bundle into one Epic 5 pass rather than three separate commits.
+**Trigger to revisit:** Epic 5 test-sweep planning.
+
+Three gaps in current coverage, none blocking:
+
+1. No end-to-end test actually spawns a child, sends it a signal, and
+   asserts `FetchError::ToolFailed { signal: Some(_), .. }` comes out the
+   other end of `process::run`. Today's tests construct `ToolFailed` by hand
+   with a canned `signal` value; the real kill→capture path (`ExitStatus`'s
+   Unix `signal()` extension) is untested.
+2. `classify_message` (`src/failure.rs`) has load-bearing match-arm order
+   (write-off classes before retryable, network markers last) and matches
+   are plain `str::contains` — no test pins the precedence when two markers
+   both appear in one stderr blob, nor exercises case-sensitivity (TikTok/
+   yt-dlp message casing has drifted before).
+3. `transcribe_worker`'s end-to-end dispatch (three-arm classifier) has no
+   test asserting the actual `RetryableKind`/`UnavailableReason` *tag
+   string* written to `last_retryable_kind` — coverage today is via the
+   inline worker-test audit verdicts in `tests/pipeline_fakes/`, which the
+   Epic 3 review already flagged as tracking this gap rather than closing it.
+
+---
+
+### `state/mod.rs` hygiene bundle (post-Epic-3 triage mutators)
+
+**Found in:** Epic 3 final whole-branch review.
+**Disposition:** Grouped cleanup; low risk, no behavior change expected.
+**Trigger to revisit:** next edit to `src/state/mod.rs`, or Epic 5 sweep.
+
+1. `claim_next`'s empty-candidate path (`src/state/mod.rs:341`) commits with
+   a bare `tx.commit()?` — every other transaction in the file uses
+   `.context("commit ...")`. Harmless (an empty SELECT's commit essentially
+   can't fail) but inconsistent with the file's own convention.
+2. No test pins `attempt_count == 2` after a row is claimed, fails, and is
+   requeued+reclaimed once — the attempt-counting invariant across the
+   claim→fail→requeue→reclaim cycle is exercised piecemeal, not end-to-end.
+3. `triage_mark_terminal` and `requeue_retryable` operate on
+   `failed_retryable` rows, which per the current schema are never
+   `claimed_by`/`claimed_at`-set — so the missing defensive clear is inert
+   today. Worth adding anyway if a future schema change ever lets a
+   claimed row reach these mutators.
+4. The `kept_capped` path in `run_triage` (`src/triage.rs`) writes no
+   `video_events` row and no test asserts that absence — currently correct
+   (nothing happened to the row), but an implicit invariant that should be
+   pinned so a future change doesn't accidentally start emitting spurious
+   events.
+
+---
+
+### `run_serial` mutator-return-value bundle
+
+**Found in:** Epic 3 final whole-branch review.
+**Disposition:** Grouped opportunistic hardening.
+**Trigger to revisit:** `run_serial` retirement decision (see "Deferred / open" in `docs/superpowers/plans/2026-07-07-plan-b-epic-3/EPIC-3-CLOSE.md`), or Epic 5 sweep.
+
+`src/pipeline/serial.rs`'s failure arms call `mark_terminal_failure` /
+`mark_retryable_failure` and discard the returned `usize` row-change count
+(unlike `triage.rs`, which per ADR 0006 gates its census counters on it) —
+an `Ok(0)` predicate miss (row swept out from under the running claim)
+goes uncounted and unlogged on the `run_serial` path. Related: the
+fetch-side classification downcasts the top-level anyhow error
+(`downcast_ref::<FetchPhaseError>`) while the transcribe-side walks the
+whole chain (`e.chain().find_map(...)`) — an asymmetry now flagged inline
+by a tripwire comment at `src/pipeline/serial.rs` (near the `downcast_ref`
+call, ~line 79). Fix both if `run_serial` survives the retirement
+decision; moot if it's deleted.
+
+---
+
+### `FetchOpts`'s derived `Debug` does not redact `cookies_file`
+
+**Found in:** Epic 3 final whole-branch review.
+**Disposition:** Small hardening; not exploitable today (no code path logs
+`FetchOpts` via `{:?}`) but a footgun for future callers.
+**Trigger to revisit:** any future logging/tracing call that formats a
+`FetchOpts` value, or Epic 5 sweep.
+
+`src/fetcher/mod.rs`'s `FetchOpts` derives `Debug`, so `{:?}` prints the raw
+`cookies_file` path verbatim — inconsistent with `scrub_cookie_path`'s
+redaction of the same path everywhere else it can reach an error message or
+argv (ADR 0035). A hand-rolled `Debug` impl that redacts `cookies_file` to
+`Some("[COOKIES-REDACTED]")` / `None` would close the gap before any caller
+relies on the derived form.
+
+---
+
+### `scrub_cookie_path` has no guard against an empty cookie path
+
+**Found in:** Epic 3 final whole-branch review.
+**Disposition:** Small hardening; edge case, not observed in practice
+(cookie file paths come from `--cookies-file`, which clap will not populate
+with an empty string absent an explicit `--cookies-file ""`).
+**Trigger to revisit:** Epic 5 sweep, or if `--cookies-file ""` is ever
+observed in the wild.
+
+`src/fetcher/ytdlp.rs::scrub_cookie_path` does
+`excerpt.replace(&path.display().to_string(), "[COOKIES-REDACTED]")`. If
+`path` is empty, `str::replace` with an empty pattern inserts the
+replacement between every character of `excerpt`, corrupting the stderr
+excerpt beyond readability. A one-line guard (`if path.as_os_str().is_empty()
+{ return excerpt; }`) closes it.

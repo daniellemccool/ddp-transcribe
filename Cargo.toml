@@ -101,3 +101,11 @@ required-features = ["test-helpers"]
 [[test]]
 name = "state_migrate"
 required-features = ["test-helpers"]
+
+[[test]]
+name = "state_triage"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "triage"
+required-features = ["test-helpers"]

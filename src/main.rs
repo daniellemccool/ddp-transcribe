@@ -9,13 +9,16 @@ mod canonical;
 mod cli;
 mod config;
 mod errors;
+mod failure;
 mod fetcher;
 mod ingest;
 mod output;
 mod pipeline;
+mod probe;
 mod process;
 mod state;
 mod transcribe;
+mod triage;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -66,7 +69,10 @@ async fn main() -> Result<()> {
                 "ingest complete"
             );
         }
-        cli::Command::Process { max_videos } => {
+        cli::Command::Process {
+            max_videos,
+            cookies_file,
+        } => {
             let store = state::Store::open(&cfg.state_db).context("opening state DB")?;
             std::fs::create_dir_all(&cfg.transcripts).context("creating transcripts dir")?;
             // Tmp cleanup at startup
@@ -121,6 +127,7 @@ async fn main() -> Result<()> {
                 stale_claim_threshold: cfg.stale_claim_threshold,
                 download_workers: cfg.download_workers,
                 channel_capacity: cfg.channel_capacity,
+                cookies_file,
             };
 
             // ────────────────────────────────────────────────────────────
@@ -195,6 +202,26 @@ async fn main() -> Result<()> {
             }
             state::migrate::run_migrate(path).context("running migrate")?;
             tracing::info!(path = %path.display(), "migrate complete");
+        }
+        cli::Command::Triage {
+            dry_run,
+            rate,
+            max_attempts,
+        } => {
+            let mut store = state::Store::open(&cfg.state_db).context("opening state DB")?;
+            let oracle = probe::CurlProber {
+                timeout: std::time::Duration::from_secs(15),
+            };
+            let opts = triage::TriageOptions {
+                dry_run,
+                rate_per_sec: rate,
+                max_attempts,
+            };
+            let stats = triage::run_triage(&mut store, &oracle, &opts).await?;
+            if dry_run {
+                println!("DRY RUN — no rows were modified");
+            }
+            print!("{stats}");
         }
     }
 

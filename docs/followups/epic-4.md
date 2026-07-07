@@ -62,3 +62,43 @@ timeline will see times shifted by their own UTC offset.
 The verbatim T13 brief made this assumption silently. Recording the gap so
 the project can answer it deliberately rather than discover it via a
 data-quality bug.
+
+---
+
+### `requeued` event's `detail_json` lacks attempt-count context
+
+**Found in:** Epic 3 final whole-branch review.
+**Disposition:** Fits naturally into Epic 4's `status` subcommand work
+(same task will define what per-video event detail operators need to see).
+**Trigger to revisit:** Epic 4's `status`/done-contract task.
+
+`Store::requeue_retryable` (`src/state/mod.rs`) writes a `requeued`
+`video_events` row with `detail_json = { "new_kind": new_kind }` only — it
+doesn't record the attempt count the row was requeued at, or the cap it
+was requeued under. An operator inspecting the event log after the fact
+can't tell, without cross-referencing `videos.attempt_count` at query time,
+how many attempts a given requeue used up. Add `attempt_count` /
+`max_attempts` to the `detail_json` when Epic 4 designs the `status`
+command's event-detail surface.
+
+---
+
+### Architecture-doc `uu-tiktok` naming sweep
+
+**Found in:** Epic 3 final whole-branch review (close-out doc pass missed
+these).
+**Disposition:** Cosmetic; bundle into Epic 4's doc touch (or any earlier
+task that edits these files for unrelated reasons).
+**Trigger to revisit:** next edit to the four lifecycle-stage deepdives or
+`index.md`.
+
+The project renamed `uu-tiktok` → `ddp-transcribe` (see this repo's
+`CLAUDE.md`), and Epic 3 close fixed the binary-name reference in
+`index.md` Stage 5 and the archive entry count — but a naming sweep of the
+rest of the doc set wasn't done as a dedicated pass. Known remaining spots:
+the H1 headings of the four architecture deepdives (still titled around
+`uu-tiktok`) and `index.md:44`'s "ingest" stage wording plus
+`state-machine.md:151`'s "migrate" stage wording, which read naturally as
+leftover pre-rename phrasing. Low priority (historical docs/ADRs are
+explicitly allowed to keep the old name per `CLAUDE.md`), but the *current*
+architecture doc set should read as `ddp-transcribe`-native.

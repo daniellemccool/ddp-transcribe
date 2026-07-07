@@ -664,3 +664,33 @@ fn sweep_stale_claims_with_zero_threshold_does_not_sweep_same_second_claim() -> 
     assert_eq!(row.status, "in_progress", "same-second claim not swept");
     Ok(())
 }
+
+#[test]
+fn claim_next_carries_last_retryable_kind() {
+    use rusqlite::Connection;
+
+    let (tmp, mut store) = fresh_store_with(&[("7000000000000000001", "https://example.com/v")]);
+
+    // First claim: kind is None (never failed).
+    let claim = store.claim_next("w1").unwrap().unwrap();
+    assert_eq!(claim.last_retryable_kind, None);
+
+    // Fail it with a kind, requeue it manually to pending, re-claim: the
+    // kind must ride along (cookie routing in the pipeline depends on it).
+    store
+        .mark_retryable_failure(&claim.video_id, "w1", "SensitiveLoginGated", "login gated")
+        .unwrap();
+    {
+        let raw = Connection::open(tmp.path().join("state.sqlite")).unwrap();
+        raw.execute(
+            "UPDATE videos SET status='pending' WHERE video_id=?1",
+            ["7000000000000000001"],
+        )
+        .unwrap();
+    }
+    let claim2 = store.claim_next("w1").unwrap().unwrap();
+    assert_eq!(
+        claim2.last_retryable_kind.as_deref(),
+        Some("SensitiveLoginGated")
+    );
+}

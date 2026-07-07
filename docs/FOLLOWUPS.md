@@ -45,23 +45,18 @@ lines 120-148.
 
 **Epic 2 (concurrent fetch + state-machine)**
 - T5-Epic1: Worker-side closed-reply path silently swallows error → Epic 2 (tracing context)
-- T16: `fetch_worker` cancellation latency bounded by largest await, not by `token.cancel()` → Epic 2 close OR Epic 3 graceful-shutdown
 - T17: sync `write_artifacts_and_mark` inside `tokio::sync::Mutex` guard inside async fn can stall under `TOKIO_WORKER_THREADS=1` → Epic 2 close OR Epic 5 ops-hygiene
 - Full Epic 2 entries: [followups/epic-2.md](followups/epic-2.md)
 
-**Epic 3 (failure classification taxonomy)**
-- T6: `From<RunError> for FetchError` collapses Spawn/Io → Epic 3 (typed variants)
-- T6: `status.code().unwrap_or(-1)` loses signal info → Epic 3 (add `signal` field)
-- T10: `claim_next`/`mark_succeeded` lack `with_context` → Epic 3 (bundle with error restructure)
-- T11: `YtDlpFetcher::acquire` error mapping → Epic 3 (classifier covers it)
-- T5-Epic1: `From<AudioDecodeError> for TranscribeError` maps to Bug → Epic 3 (classification taxonomy)
-- Epic2-review: `pipeline_fakes.rs` mixing concerns + over-narrated → Epic 3 (file split + strip phase comments)
-- Epic2-review: over-reliance on worker-level entry points in `pipeline_fakes` → Epic 3 (audit vs run_pipelined)
-- Tier5-deploy: real yt-dlp failure fixtures (10231 terminal; "IP blocked" NOT reliably retryable); share-link canonicalization hypothesis → Epic 3 (stderr capture + classifier corroboration)
-- Full Epic 3 entries: [followups/epic-3.md](followups/epic-3.md)
+**Epic 3 (failure classification taxonomy)** — closed 2026-07-07. All ten entries resolved
+(archived with resolving SHAs in [archive/followups-resolved.md](archive/followups-resolved.md),
+section "Resolved by Plan B Epic 3") or split-and-re-filed: `YtDlpFetcher::acquire`
+finding 3 → Epic 5, finding 4 → Plan C (see those groups below).
 
 **Epic 4 (operator-facing commands / timestamps)**
 - T13: `parse_watched_at` UTC assumption → Epic 4 (0027 resolution path)
+- Epic 3 final review: `requeued` event `detail_json` lacks attempt-count context → Epic 4 (`status` subcommand work)
+- Epic 3 final review: architecture-doc `uu-tiktok` naming sweep (four deepdive H1s, index.md:44, state-machine.md:151) → Epic 4 (bundle with doc touch)
 - Full Epic 4 entries: [followups/epic-4.md](followups/epic-4.md)
 
 **Epic 5 (Plan A → Plan B cleanup sweep)**
@@ -74,6 +69,12 @@ lines 120-148.
 - T13: `ingest::walk_recursive` polish → Epic 5 (bundle with sync-IO sweep)
 - T15: `output::shard_dir` unused → Epic 5 (delete)
 - SRC-bake + T11: `--whisper-model` (and 5 other GlobalArgs flags) rejected after subcommand → Epic 5 (one-line `global = true` per flag)
+- T11 (split at Epic 3 close): `YtDlpFetcher::acquire` coupling to `{video_id}.wav` output filename → Epic 5 (fetch hardening)
+- Epic 3 final review: test-hardening bundle (signal-capture spawn+kill test, `classify_message` precedence/case test, `transcribe_worker` kind-string end-to-end assertion) → Epic 5
+- Epic 3 final review: `state/mod.rs` hygiene bundle (bare `tx.commit()?`, attempt_count==2 assertion, defensive claimed_by/claimed_at clearing, capped-requeue no-event assertion) → Epic 5
+- Epic 3 final review: `run_serial` mutator-return-value bundle (discarded row-change counts; fetch/transcribe downcast asymmetry, see tripwire in `src/pipeline/serial.rs`) → Epic 5 (or moot if `run_serial` retires)
+- Epic 3 final review: `FetchOpts` derived `Debug` doesn't redact `cookies_file` → Epic 5
+- Epic 3 final review: `scrub_cookie_path` empty-path guard → Epic 5
 - Full Epic 5 entries: [followups/epic-5.md](followups/epic-5.md)
 
 **Plan C (short-link resolution, multi-engine, storage scale)**
@@ -82,6 +83,9 @@ lines 120-148.
 - T1-Epic1: Promote 0010's pass-through rule to a meta-process ADR → Plan C (if recurring pressure)
 - T3-Epic1: `decode_wav` trusts float-format WAV sample values → Plan C (if alternate fetcher introduces float WAVs)
 - T10-Epic1: Per-token text field doubles raw_signals payload → Plan C (compact JSON landed in perf-tweaks decdf6f; drop-text still deferred pending 0010 amendment)
+- T11 (split at Epic 3 close): yt-dlp argv `--` separator before `source_url` → Plan C (when resolved URLs reach the fetcher)
+- Epic 3 final review: `scrub_cookie_path` canonicalized/relative path-variant hardening → Plan C (multi-engine work)
+- Epic 3 final review: `CurlProber` missing `--location`; bundle with ADR-0034 oEmbed-drift re-validation → Plan C
 - Full Plan C entries: [followups/plan-c.md](followups/plan-c.md)
 
 **Cross-epic / ADR maintenance / verify-then-archive**
@@ -90,6 +94,5 @@ lines 120-148.
 - T13-Epic1: 0013 backend assertion must be `cfg(feature="cuda")`-gated → audited 2026-05-18, NOT confirmed; deferred to Epic 5 cleanup
 - T7-Epic1: Revisit `SamplingStrategy::Greedy { best_of }` after T13 bake → unscoped tuning followup (see also `bake-findings.md`)
 - T8-Epic1: Diagnostic log when `lang_detect`'s top id disagrees with primary inference → unscoped diagnostic (see also `bake-findings.md`)
-- T13/T19/T16-Epic2: plan-brief library-API drift → Epic 3 planning kickoff (checklist adoption)
 - T08-arch-docs: architecture doc-set drift detection → standing maintenance (revise matching deepdive + index.md §4 at each epic's planning time if it touches a covered surface)
 - Full cross-epic entries: [followups/cross-epic.md](followups/cross-epic.md)

@@ -95,10 +95,30 @@ pub enum Command {
     Process {
         #[arg(long)]
         max_videos: Option<usize>,
+        /// Netscape-format cookie file passed to yt-dlp ONLY on retries of
+        /// sensitive/login-gated videos (ADR 0035). Never sent on first attempts.
+        #[arg(long, env = "DDP_TRANSCRIBE_COOKIES_FILE")]
+        cookies_file: Option<PathBuf>,
     },
     /// Upgrade a pre-Epic-2 (v1) state.sqlite to the current schema version.
     /// Idempotent: no-op if already at the current version.
     Migrate,
+    /// Adjudicate failed_retryable rows: write-off classes → failed_terminal;
+    /// probe the rest via TikTok oEmbed (dead → terminal, alive → pending under
+    /// the attempt cap). Requires `curl` on PATH. Run `process` afterwards.
+    Triage {
+        /// Probe and report the census without mutating any rows.
+        #[arg(long)]
+        dry_run: bool,
+        /// oEmbed probes per second. Must be > 0 — a non-positive rate
+        /// previously clamped silently to a 1000s/probe crawl (final
+        /// review, Epic 3 close); now rejected outright.
+        #[arg(long, default_value_t = 1.0, value_parser = parse_positive_rate)]
+        rate: f64,
+        /// Rows at or above this attempt_count are not requeued.
+        #[arg(long, default_value_t = 3)]
+        max_attempts: i64,
+    },
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,4 +130,51 @@ pub enum Profile {
 pub enum LogFormat {
     Human,
     Json,
+}
+
+/// `--rate`'s `value_parser` (final review, Epic 3 close): rejects
+/// non-positive rates at parse time rather than letting `triage.rs`'s
+/// `.max(0.001)` clamp silently turn e.g. `--rate 0` into a 1000s/probe
+/// crawl. No `RangedU64ValueParser`-equivalent exists for `f64` in clap, so
+/// this is a small hand-rolled parser matching the `humantime::parse_duration`
+/// pattern already used for `stale_claim_threshold` above.
+fn parse_positive_rate(s: &str) -> Result<f64, String> {
+    let v: f64 = s.parse().map_err(|_| format!("`{s}` is not a number"))?;
+    if v > 0.0 {
+        Ok(v)
+    } else {
+        Err(format!("--rate must be greater than 0, got {v}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        let mut full = vec!["ddp-transcribe"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full)
+    }
+
+    #[test]
+    fn triage_rejects_zero_rate() {
+        let err = parse(&["triage", "--rate", "0"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn triage_rejects_negative_rate() {
+        let err = parse(&["triage", "--rate=-1"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn triage_accepts_positive_rate() {
+        let cli = parse(&["triage", "--rate", "0.5"]).unwrap();
+        match cli.command {
+            Command::Triage { rate, .. } => assert_eq!(rate, 0.5),
+            other => panic!("expected Triage, got {other:?}"),
+        }
+    }
 }

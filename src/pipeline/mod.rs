@@ -18,14 +18,14 @@
 //!   mark_succeeded + cleanup). 0008 invariant lives here: artifacts are
 //!   durable on disk BEFORE `mark_succeeded`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
 
 use crate::audio;
-use crate::fetcher::{Acquisition, VideoFetcher};
+use crate::fetcher::{Acquisition, FetchOpts, VideoFetcher};
 use crate::output::artifacts::{RawSignals, TranscriptMetadata};
 use crate::output::{artifacts, shard};
 use crate::state::{Claim, Store, SuccessArtifacts};
@@ -37,16 +37,17 @@ mod serial;
 // T18: `run_pipelined` + `SharedStore` are now consumed by `main.rs`'s
 // Process arm; the other three (`fetch_worker`, `transcribe_worker`,
 // `FetchedItem`) are reached transitively via `run_pipelined` inside
-// the bin and DIRECTLY from `tests/pipeline_fakes.rs`. The direct test
-// reach is the reason these stay `pub` re-exports — bin compilation
-// doesn't see the direct reach, hence the `#[allow(unused_imports)]`
-// stays per 0002 (suppressed-at-re-export, not at definition).
+// the bin and DIRECTLY from the `tests/pipeline_fakes/` test files. The
+// direct test reach is the reason these stay `pub` re-exports — bin
+// compilation doesn't see the direct reach, hence the
+// `#[allow(unused_imports)]` stays per 0002 (suppressed-at-re-export, not
+// at definition).
 #[allow(unused_imports)]
 pub use pipelined::{fetch_worker, run_pipelined, transcribe_worker, FetchedItem, SharedStore};
 // `run_serial` is no longer on the bin's hot path after T18 (the
 // Process arm calls `run_pipelined`). It stays compiled for the
-// integration tests in `tests/pipeline_fakes.rs` which exercise the
-// serial helper's behavioral contract (retryable failure
+// integration tests in `tests/pipeline_fakes/serial_tests.rs` which
+// exercise the serial helper's behavioral contract (retryable failure
 // classification, stale-after-success). 0002 placeholder until a
 // follow-up either retires `run_serial` or restores a behind-a-flag
 // bin caller.
@@ -82,6 +83,11 @@ pub struct ProcessOptions {
     /// then per 0002.
     #[allow(dead_code)]
     pub channel_capacity: usize,
+    /// Netscape-format cookie file, flag-tunable via `--cookies-file`
+    /// (Epic 3 T08). Threaded to `fetcher.acquire` ONLY on claims whose
+    /// `last_retryable_kind` is `SensitiveLoginGated` — see
+    /// [`cookie_opts_for`]. ADR 0035: first attempts never get cookies.
+    pub cookies_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Default)]
@@ -127,6 +133,63 @@ pub enum ProcessOutcome {
     StaleAfterSuccess,
 }
 
+/// Typed error for phases 1+2 (fetch + decode), so the worker/serial callers
+/// can classify the failure without downcasting through anyhow (Epic 3 T07
+/// spec refinement #1). `#[from]` on both variants means `?` inside
+/// `fetch_and_decode` converts without an explicit `.map_err`; the anyhow
+/// boundary (where a caller needs `anyhow::Result`) is crossed via the
+/// blanket `From<E: std::error::Error + Send + Sync + 'static> for
+/// anyhow::Error` impl, which does NOT attach context — required so
+/// `serial.rs`'s `downcast_ref::<FetchPhaseError>()` can recover the typed
+/// error from the anyhow chain.
+#[derive(Debug, thiserror::Error)]
+pub enum FetchPhaseError {
+    #[error(transparent)]
+    Fetch(#[from] crate::errors::FetchError),
+    #[error("decoding fetched wav: {0}")]
+    Decode(#[from] crate::audio::AudioDecodeError),
+}
+
+/// Classify a [`FetchPhaseError`] into the three-arm verdict. Thin
+/// projection: `Fetch` delegates to [`crate::failure::classify_fetch_error`]
+/// (the message-table classifier); `Decode` is always `Retryable` — a
+/// corrupt/truncated WAV on disk doesn't indict the source video, and a
+/// refetch may produce a decodable file.
+pub fn classify_fetch_phase(e: &FetchPhaseError) -> crate::failure::ClassifiedFailure {
+    use crate::failure::{ClassifiedFailure, FailureContext, RetryableKind};
+    match e {
+        FetchPhaseError::Fetch(fe) => crate::failure::classify_fetch_error(fe),
+        FetchPhaseError::Decode(de) => ClassifiedFailure::Retryable {
+            kind: RetryableKind::TranscribeOther,
+            ctx: FailureContext {
+                tool: "hound",
+                exit_code: None,
+                signal: None,
+                stderr_excerpt: de.to_string(),
+                classification_reason: "wav decode failure: refetch may repair a corrupt download",
+            },
+        },
+    }
+}
+
+/// Kind-gated cookie routing (Epic 3 T08, ADR 0035): cookies ride on a
+/// fetch iff the claim's most recent retryable failure was
+/// `SensitiveLoginGated` AND the operator supplied `--cookies-file`. First
+/// attempts (`last_retryable_kind == None`) never get cookies, and no
+/// other retryable kind qualifies — the epic deliberately scopes cookie
+/// use to this one taxonomy kind.
+pub(crate) fn cookie_opts_for(claim: &Claim, cookies_file: Option<&Path>) -> FetchOpts {
+    let sensitive = claim.last_retryable_kind.as_deref()
+        == Some(crate::failure::RetryableKind::SensitiveLoginGated.tag());
+    FetchOpts {
+        cookies_file: if sensitive {
+            cookies_file.map(Path::to_path_buf)
+        } else {
+            None
+        },
+    }
+}
+
 /// Phase 1+2: acquire the audio and decode it to f32 PCM samples.
 ///
 /// Returns the owned samples + the WAV path on disk (needed downstream so
@@ -134,14 +197,23 @@ pub enum ProcessOutcome {
 ///
 /// Used by `run_serial`'s `process_one` AND (in Phase 2) by the fetch
 /// workers in `pipelined::fetch_worker`.
+///
+/// Returns a typed [`FetchPhaseError`] (rather than `anyhow::Result`, T15's
+/// original signature) so callers can classify the failure via
+/// [`classify_fetch_phase`] without downcasting through an anyhow chain
+/// (Epic 3 T07).
+///
+/// `opts` (Epic 3 T08) carries the per-claim cookie decision computed by
+/// [`cookie_opts_for`] at the call site — this function does not decide
+/// policy, only threads the decision to `fetcher.acquire`.
 pub(crate) async fn fetch_and_decode(
     fetcher: &dyn VideoFetcher,
     claim: &Claim,
-) -> Result<(Vec<f32>, PathBuf)> {
+    opts: &FetchOpts,
+) -> Result<(Vec<f32>, PathBuf), FetchPhaseError> {
     let acquisition = fetcher
-        .acquire(&claim.video_id, &claim.source_url)
-        .await
-        .with_context(|| format!("fetching {}", claim.video_id))?;
+        .acquire(&claim.video_id, &claim.source_url, opts)
+        .await?;
 
     // Plan A's `Acquisition` has only one variant; Plan B will add `Unavailable`
     // and `ReadyTranscript`, at which point the `match` becomes load-bearing.
@@ -150,13 +222,19 @@ pub(crate) async fn fetch_and_decode(
     let wav_path = match acquisition {
         Acquisition::AudioFile(p) => p,
     };
-    tracing::info!(video_id = claim.video_id.as_str(), wav = %wav_path.display(), "audio acquired");
+    // Tracing hygiene (Epic 3 T08, ADR 0035): log ONLY whether cookies were
+    // attached, never the path — the path must not reach logs or the state DB.
+    tracing::info!(
+        video_id = claim.video_id.as_str(),
+        wav = %wav_path.display(),
+        cookies = opts.cookies_file.is_some(),
+        "audio acquired"
+    );
 
     // Decode WAV → owned Vec<f32> samples (0014: 16 kHz mono validated
     // inside decode_wav). Owned samples cross the worker-thread boundary
     // per 0016.
-    let samples = audio::decode_wav(&wav_path)
-        .with_context(|| format!("decoding wav {}", wav_path.display()))?;
+    let samples = audio::decode_wav(&wav_path)?;
 
     Ok((samples, wav_path))
 }
@@ -374,4 +452,37 @@ pub(crate) fn write_artifacts_and_mark(
 
     tracing::info!(video_id = claim.video_id.as_str(), "succeeded");
     Ok(ProcessOutcome::Succeeded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Epic 3 T08 / ADR 0035: cookies ride ONLY when the claim's
+    /// `last_retryable_kind` is exactly `SensitiveLoginGated` AND a cookie
+    /// file was supplied. First attempts (`None`) and every other
+    /// taxonomy kind never get cookies, regardless of the flag.
+    #[test]
+    fn cookies_only_for_sensitive_login_gated_retries() {
+        let cookie = PathBuf::from("/secret/c.txt");
+        let mk = |kind: Option<&str>| Claim {
+            video_id: "7".into(),
+            source_url: "u".into(),
+            attempt_count: 1,
+            last_retryable_kind: kind.map(String::from),
+        };
+        assert_eq!(cookie_opts_for(&mk(None), Some(&cookie)).cookies_file, None);
+        assert_eq!(
+            cookie_opts_for(&mk(Some("NoDataBlocks")), Some(&cookie)).cookies_file,
+            None
+        );
+        assert_eq!(
+            cookie_opts_for(&mk(Some("SensitiveLoginGated")), Some(&cookie)).cookies_file,
+            Some(cookie.clone())
+        );
+        assert_eq!(
+            cookie_opts_for(&mk(Some("SensitiveLoginGated")), None).cookies_file,
+            None
+        );
+    }
 }

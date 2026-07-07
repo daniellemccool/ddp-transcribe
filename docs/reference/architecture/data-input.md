@@ -112,12 +112,12 @@ The fetcher applies an explicit per-invocation wall-clock timeout. The default i
 
 After a yt-dlp invocation, the fetcher distinguishes two exit paths from `process::run`:
 
-1. **Process-level error** (`RunError` → `FetchError` via `From`) — `ToolTimeout`, `NetworkError` (spawn failure or pipe I/O error). These never reach the exit-code check.
-2. **Non-zero exit code** — mapped to `FetchError::ToolFailed { tool, exit_code, stderr_excerpt }` (`src/fetcher/ytdlp.rs:109–113`).
+1. **Process-level error** (`RunError` → `FetchError` via `From`) — `ToolTimeout`, `ToolNotFound` (spawn failure), `SystemIo` (pipe I/O error). These never reach the exit-code check.
+2. **Non-zero exit code** — mapped to `FetchError::ToolFailed { tool, exit_code, signal, stderr_excerpt }` (`src/fetcher/ytdlp.rs:106–111`); `signal` carries the Unix kill signal when the child did not exit normally.
 
-`FetchError` also has a `ParseError` variant for the case where yt-dlp exits zero but the expected WAV file is absent (`src/fetcher/ytdlp.rs:117–121`).
+`FetchError` also has `WorkDirCreate` (filesystem failure creating the per-video work dir) and `MissingOutput` (yt-dlp exits zero but the expected WAV file is absent) variants (`src/fetcher/ytdlp.rs`).
 
-**Current state (post-Epic 2):** the fetch worker does not branch on these variants. Every `Err(e)` from `fetcher.acquire` collapses to `format!("{e:#}")` and is unconditionally passed to `mark_retryable_failure` with the literal placeholder kind `"Fetch"` (`src/pipeline/pipelined.rs:207`). There is no call to `mark_terminal_failure` in the fetch worker path. `mark_retryable_failure`'s `kind` parameter is typed `&str` per [ADR 0023](../../decisions/0023-minimum-mutator-signatures-kind-str-message-str-returning-result-usize-per-0006.md); a richer typed taxonomy (`RetryableKind`, `UnavailableReason`, etc.) and variant-driven routing are deferred to Epic 3. The in-code forward-pointers are at `src/pipeline/pipelined.rs:205–206` and `src/process.rs:70–73`.
+**Current state (post-Epic 3):** every `FetchError` (wrapped in the pipeline's `FetchPhaseError`) runs through `classify_fetch_phase` → the three-arm `ClassifiedFailure` per [ADR 0033](../../decisions/0033-evidence-derived-failure-taxonomy-with-inline-write-off-of-probe-validated-dead-message-classes.md): retryable kinds go to `mark_retryable_failure` with the taxonomy tag, the two probe-validated write-off message classes go to `mark_terminal_failure`, and Bug-class errors (e.g. tool missing) abort the run. See [`orchestration.md`](orchestration.md) §Failure handling and [`state-machine.md`](state-machine.md) §Failure classification; `mark_retryable_failure`'s `kind` parameter stays `&str` per [ADR 0023](../../decisions/0023-minimum-mutator-signatures-kind-str-message-str-returning-result-usize-per-0006.md) — the enums serialize via `tag()`.
 
 ### Audio extraction handoff
 
