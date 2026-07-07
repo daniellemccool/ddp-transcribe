@@ -108,5 +108,9 @@ name = "state_triage"
 required-features = ["test-helpers"]
 
 [[test]]
+name = "state_batch_runs"
+required-features = ["test-helpers"]
+
+[[test]]
 name = "triage"
 required-features = ["test-helpers"]

@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: &str = "2";
+pub const SCHEMA_VERSION: &str = "3";
 
 pub const SCHEMA_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS videos (
@@ -29,8 +29,8 @@ CREATE TABLE IF NOT EXISTS videos (
     updated_at          INTEGER NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_videos_pending
-    ON videos (status, first_seen_at, video_id)
+CREATE INDEX IF NOT EXISTS idx_videos_pending_v3
+    ON videos (status, attempt_count, first_seen_at, video_id)
     WHERE status = 'pending';
 
 CREATE TABLE IF NOT EXISTS watch_history (
@@ -59,5 +59,16 @@ CREATE TABLE IF NOT EXISTS meta (
     -- Guarded by state::tests::null_meta_key_rejected_by_meta_schema.
     key   TEXT PRIMARY KEY NOT NULL,
     value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS batch_runs (
+    run_id       INTEGER PRIMARY KEY,
+    started_at   INTEGER NOT NULL,
+    -- NULL means the run crashed or was interrupted before close — an
+    -- honest record the operator can see.
+    finished_at  INTEGER,
+    params_json  TEXT NOT NULL,
+    policy_toml  TEXT NOT NULL,
+    census_json  TEXT
 );
 ";

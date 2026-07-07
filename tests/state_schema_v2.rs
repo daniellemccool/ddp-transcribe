@@ -1,7 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-//! Confirm the v2 schema: new nullable columns present on `videos`,
-//! SCHEMA_VERSION constant is "2", fresh DB records "2" in meta.
+//! Confirm the v2 schema: new nullable columns present on `videos`.
+//! SCHEMA_VERSION constant is "3" as of Epic 4a (schema v3 layers batch_runs
+//! + the attempt-aware pending index on top; these Epic 2 columns are
+//! unchanged), fresh DB records the current version in meta.
 
 use anyhow::Result;
 use ddp_transcribe::state::{Store, SCHEMA_VERSION};
@@ -19,8 +21,8 @@ fn columns_in(conn: &Connection, table: &str) -> Vec<String> {
 }
 
 #[test]
-fn schema_version_constant_is_v2() {
-    assert_eq!(SCHEMA_VERSION, "2");
+fn schema_version_constant_is_v3() {
+    assert_eq!(SCHEMA_VERSION, "3");
 }
 
 #[test]
@@ -48,7 +50,7 @@ fn fresh_db_has_new_nullable_columns() -> Result<()> {
         [],
         |r| r.get(0),
     )?;
-    assert_eq!(v, "2");
+    assert_eq!(v, SCHEMA_VERSION);
     Ok(())
 }
 

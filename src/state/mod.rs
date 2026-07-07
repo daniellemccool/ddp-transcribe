@@ -712,6 +712,49 @@ impl Store {
         tx.commit().context("commit requeue_retryable")?;
         Ok(changed)
     }
+
+    /// Open a batch-run record (Epic 4a): one row per `process` invocation,
+    /// carrying the run parameters and the FULL active classification policy
+    /// TOML — the census without its generating policy is not reproducible
+    /// attrition documentation. Returns the new run_id.
+    ///
+    /// Signature note: this returns `Result<i64>` (the generated run_id),
+    /// not `Result<usize>` (ADR-0006's row-count contract). 0006 governs
+    /// guarded row-TRANSITION mutators, where the row count is the caller's
+    /// only way to know whether a predicate matched. This is an
+    /// identity-creating INSERT — there is no predicate to miss, and the
+    /// product the caller needs is the generated run_id itself, not a count
+    /// that would always be 1.
+    // 0002: consumed by Epic 4a T07 (batch lifecycle); lift when it lands.
+    #[allow(dead_code)]
+    pub fn open_batch_run(&mut self, params_json: &str, policy_toml: &str) -> Result<i64> {
+        let now = unix_now();
+        self.conn
+            .execute(
+                "INSERT INTO batch_runs (started_at, params_json, policy_toml)
+                 VALUES (?1, ?2, ?3)",
+                params![now, params_json, policy_toml],
+            )
+            .context("insert batch_runs row")?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Close a batch-run record with its census. Returns the row-change
+    /// count per 0006 (0 = unknown run_id or already closed by predicate
+    /// miss — callers log, never panic).
+    // 0002: consumed by Epic 4a T07 (batch lifecycle); lift when it lands.
+    #[allow(dead_code)]
+    pub fn close_batch_run(&mut self, run_id: i64, census_json: &str) -> Result<usize> {
+        let now = unix_now();
+        self.conn
+            .execute(
+                "UPDATE batch_runs
+                 SET finished_at = ?2, census_json = ?3
+                 WHERE run_id = ?1 AND finished_at IS NULL",
+                params![run_id, now, census_json],
+            )
+            .context("close batch_runs row")
+    }
 }
 
 impl Store {

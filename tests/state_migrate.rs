@@ -1,11 +1,14 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::type_complexity)]
 
 //! Migration test: synthesize a v1 DB (no new Epic 2 columns; meta.schema_version='1'),
-//! run the migrate function, confirm v2 columns are present and meta.schema_version='2'.
-//! Then run Store::open and confirm it succeeds (round-trip with T2's check).
+//! run the migrate function, confirm v2 columns are present and meta.schema_version
+//! lands on the current SCHEMA_VERSION (v3 as of Epic 4a — the ladder walks v1→v2→v3
+//! in one call). Then run Store::open and confirm it succeeds (round-trip with T2's
+//! check). Also covers the v2→v3 leg directly: a hand-built v2-shaped DB migrating
+//! to v3's `batch_runs` table + attempt-aware pending index.
 
 use anyhow::Result;
-use ddp_transcribe::state::{migrate::run_migrate, Store};
+use ddp_transcribe::state::{migrate::run_migrate, Store, SCHEMA_VERSION};
 use rusqlite::Connection;
 use tempfile::TempDir;
 
@@ -45,6 +48,53 @@ fn synthesize_v1_db(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Synthesize a v2-shaped schema (Epic 2 columns present, no `batch_runs`
+/// table, old `idx_videos_pending` index) at `path` — the pre-Epic-4a shape.
+/// Copies `synthesize_v1_db`'s hand-built-SQL style, adding the four v2
+/// columns to `videos` and recording `meta.schema_version = '2'`.
+fn synthesize_v2_db(path: &std::path::Path) -> Result<()> {
+    let conn = Connection::open(path)?;
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA foreign_keys = ON;
+
+         CREATE TABLE IF NOT EXISTS videos (
+             video_id            TEXT PRIMARY KEY NOT NULL,
+             source_url          TEXT NOT NULL,
+             canonical           INTEGER NOT NULL,
+             status              TEXT NOT NULL CHECK (status IN
+                                   ('pending','in_progress','succeeded','failed_terminal','failed_retryable')),
+             claimed_by          TEXT,
+             claimed_at          INTEGER,
+             attempt_count       INTEGER NOT NULL DEFAULT 0,
+             succeeded_at        INTEGER,
+             duration_s          REAL,
+             language_detected   TEXT,
+             fetcher             TEXT,
+             transcript_source   TEXT,
+             last_retryable_kind     TEXT,
+             last_retryable_message  TEXT,
+             terminal_reason         TEXT,
+             terminal_message        TEXT,
+             first_seen_at       INTEGER NOT NULL,
+             updated_at          INTEGER NOT NULL
+         );
+
+         CREATE INDEX IF NOT EXISTS idx_videos_pending
+             ON videos (status, first_seen_at, video_id)
+             WHERE status = 'pending';
+
+         CREATE TABLE IF NOT EXISTS meta (
+             key   TEXT PRIMARY KEY NOT NULL,
+             value TEXT NOT NULL
+         );
+
+         INSERT INTO meta (key, value) VALUES ('schema_version', '2');
+        ",
+    )?;
+    Ok(())
+}
+
 fn columns_in(conn: &Connection, table: &str) -> Vec<String> {
     let mut stmt = conn
         .prepare(&format!("PRAGMA table_info({table})"))
@@ -79,7 +129,8 @@ fn migrate_v1_to_v2_adds_columns_and_bumps_version() -> Result<()> {
 
     run_migrate(&path)?;
 
-    // Post-migrate: confirm v2 shape.
+    // Post-migrate: confirm v2 columns landed and the ladder walked all the
+    // way to the current version (v3 as of Epic 4a).
     {
         let raw = Connection::open(&path)?;
         let cols = columns_in(&raw, "videos");
@@ -92,7 +143,7 @@ fn migrate_v1_to_v2_adds_columns_and_bumps_version() -> Result<()> {
             [],
             |r| r.get(0),
         )?;
-        assert_eq!(v, "2");
+        assert_eq!(v, SCHEMA_VERSION);
     }
 
     // Round-trip with T2's Store::open: should succeed now.
@@ -104,10 +155,10 @@ fn migrate_v1_to_v2_adds_columns_and_bumps_version() -> Result<()> {
 fn migrate_is_idempotent_on_v2() -> Result<()> {
     let tmp = TempDir::new()?;
     let path = tmp.path().join("state.sqlite");
-    // Fresh DB at current SCHEMA_VERSION (v2 after T4).
+    // Fresh DB at current SCHEMA_VERSION.
     let _ = Store::open(&path)?;
 
-    // Migrate is a no-op on v2.
+    // Migrate is a no-op when already at the current version.
     run_migrate(&path)?;
     run_migrate(&path)?; // second run also no-op
 
@@ -117,7 +168,59 @@ fn migrate_is_idempotent_on_v2() -> Result<()> {
         [],
         |r| r.get(0),
     )?;
-    assert_eq!(v, "2");
+    assert_eq!(v, SCHEMA_VERSION);
+    Ok(())
+}
+
+/// Epic 4a: the v2→v3 leg in isolation. A v2-shaped DB (Epic 2 columns
+/// present, no `batch_runs`, old `idx_videos_pending`) migrates to v3:
+/// `batch_runs` exists, the old index is gone, the new attempt-aware index
+/// exists under its new name, and a second `run_migrate` call is idempotent.
+#[test]
+fn migrate_v2_to_v3_adds_batch_runs_and_attempt_aware_index() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let path = tmp.path().join("state.sqlite");
+    synthesize_v2_db(&path)?;
+
+    run_migrate(&path)?;
+
+    {
+        let raw = Connection::open(&path)?;
+
+        let v: String = raw.query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(v, SCHEMA_VERSION);
+
+        let batch_run_count: i64 =
+            raw.query_row("SELECT count(*) FROM batch_runs", [], |r| r.get(0))?;
+        assert_eq!(batch_run_count, 0, "batch_runs exists and is empty");
+
+        let mut stmt = raw.prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_videos_pending%'",
+        )?;
+        let index_names = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<String>, _>>()?;
+        assert_eq!(
+            index_names,
+            vec!["idx_videos_pending_v3".to_string()],
+            "old idx_videos_pending must be dropped; only the v3 index remains"
+        );
+    }
+
+    // Idempotence: a second call is a no-op and version stays put.
+    run_migrate(&path)?;
+    let raw = Connection::open(&path)?;
+    let v: String = raw.query_row(
+        "SELECT value FROM meta WHERE key = 'schema_version'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(v, SCHEMA_VERSION);
+
     Ok(())
 }
 
@@ -183,7 +286,7 @@ fn migrate_pre_plan_a_db_without_meta_row_records_current_version() -> Result<()
             [],
             |r| r.get(0),
         )?;
-        assert_eq!(v, "2");
+        assert_eq!(v, SCHEMA_VERSION);
     }
 
     // Round-trip with Store::open should succeed (the whole point of the migrate
