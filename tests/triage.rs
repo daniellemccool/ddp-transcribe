@@ -193,3 +193,63 @@ async fn triage_respects_attempt_cap() {
     assert_eq!(stats.kept_capped, 1);
     assert_eq!(status_of(&store, "7000000000000000026"), "failed_retryable");
 }
+
+/// Oracle that simulates a concurrent actor: on probe, it flips the row out
+/// of failed_retryable via a second SQLite connection (WAL allows this), so
+/// the subsequent triage_mark_terminal UPDATE's predicate misses. The row
+/// remains in the snapshot run_triage already listed — exactly the race the
+/// ADR-0006 row-change counts exist to detect.
+struct FlipOnProbeOracle {
+    db_path: std::path::PathBuf,
+}
+
+#[async_trait::async_trait]
+impl ddp_transcribe::probe::ProbeOracle for FlipOnProbeOracle {
+    async fn probe(&self, video_id: &str) -> ddp_transcribe::probe::ProbeVerdict {
+        let conn = rusqlite::Connection::open(&self.db_path).unwrap();
+        conn.execute(
+            "UPDATE videos SET status = 'succeeded' WHERE video_id = ?1",
+            [video_id],
+        )
+        .unwrap();
+        ProbeVerdict::Dead
+    }
+}
+
+#[tokio::test]
+async fn triage_predicate_miss_is_examined_but_not_counted_as_action() {
+    let (mut store, tmp) = fresh_store();
+    let db_path = tmp.path().join("state.sqlite");
+    seed_failed(
+        &mut store,
+        "7000000000000000027",
+        "Fetch",
+        "ERROR: Did not get any data blocks",
+    );
+    let oracle = FlipOnProbeOracle { db_path };
+    let stats = run_triage(
+        &mut store,
+        &oracle,
+        &TriageOptions {
+            dry_run: false,
+            rate_per_sec: 1000.0,
+            max_attempts: 3,
+        },
+    )
+    .await
+    .unwrap();
+
+    // The row was in the listed snapshot, so it counts as examined; the
+    // UPDATE predicate missed (row flipped to succeeded mid-pass), so no
+    // action counter moves. The examined-vs-actions gap is the honest signal.
+    assert_eq!(stats.examined, 1);
+    assert_eq!(
+        stats.marked_terminal, 0,
+        "predicate miss must not be counted"
+    );
+    assert_eq!(stats.requeued, 0);
+    assert_eq!(status_of(&store, "7000000000000000027"), "succeeded");
+    let k = &stats.by_kind["NoDataBlocks"];
+    assert_eq!(k.examined, 1);
+    assert_eq!(k.marked_terminal, 0);
+}

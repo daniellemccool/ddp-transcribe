@@ -58,15 +58,32 @@ pub async fn run_triage(
             MessageVerdict::Unavailable(reason) => {
                 let k = stats.by_kind.entry(reason.tag().to_string()).or_default();
                 k.examined += 1;
-                if !opts.dry_run {
+                // 0006: census increments are gated on the mutator's returned
+                // row-change count. A predicate miss (row left failed_retryable
+                // between list_failed_retryable's SELECT and this UPDATE) must
+                // not be recorded as an action taken — the census doubles as
+                // the study's attrition documentation. Dry-run reports the
+                // verdict unconditionally (plan-mandated: zero mutations, same
+                // counters).
+                let changed = if opts.dry_run {
+                    1
+                } else {
                     store.triage_mark_terminal(
                         &row.video_id,
                         reason.tag(),
                         "triage: message-class write-off",
-                    )?;
+                    )?
+                };
+                if changed > 0 {
+                    stats.marked_terminal += 1;
+                    k.marked_terminal += 1;
+                } else {
+                    tracing::warn!(
+                        video_id = row.video_id.as_str(),
+                        action = "triage_mark_terminal (message-class write-off)",
+                        "triage: predicate miss; row no longer failed_retryable — not counted"
+                    );
                 }
-                stats.marked_terminal += 1;
-                k.marked_terminal += 1;
             }
             MessageVerdict::Retryable(kind) => {
                 let verdict = oracle.probe(&row.video_id).await;
@@ -75,27 +92,49 @@ pub async fn run_triage(
                 k.examined += 1;
                 match verdict {
                     ProbeVerdict::Dead => {
-                        if !opts.dry_run {
+                        // 0006 row-count gating; see the Unavailable arm.
+                        let changed = if opts.dry_run {
+                            1
+                        } else {
                             store.triage_mark_terminal(
                                 &row.video_id,
                                 "ProbeDead",
                                 "triage: oEmbed probe returned dead",
-                            )?;
+                            )?
+                        };
+                        if changed > 0 {
+                            stats.marked_terminal += 1;
+                            k.marked_terminal += 1;
+                        } else {
+                            tracing::warn!(
+                                video_id = row.video_id.as_str(),
+                                action = "triage_mark_terminal (ProbeDead)",
+                                "triage: predicate miss; row no longer failed_retryable — not counted"
+                            );
                         }
-                        stats.marked_terminal += 1;
-                        k.marked_terminal += 1;
                     }
                     ProbeVerdict::Alive => {
                         if row.attempt_count < opts.max_attempts {
-                            if !opts.dry_run {
+                            // 0006 row-count gating; see the Unavailable arm.
+                            let changed = if opts.dry_run {
+                                1
+                            } else {
                                 store.requeue_retryable(
                                     &row.video_id,
                                     kind.tag(),
                                     opts.max_attempts,
-                                )?;
+                                )?
+                            };
+                            if changed > 0 {
+                                stats.requeued += 1;
+                                k.requeued += 1;
+                            } else {
+                                tracing::warn!(
+                                    video_id = row.video_id.as_str(),
+                                    action = "requeue_retryable",
+                                    "triage: predicate miss; row no longer failed_retryable — not counted"
+                                );
                             }
-                            stats.requeued += 1;
-                            k.requeued += 1;
                         } else {
                             stats.kept_capped += 1;
                             k.kept_capped += 1;
