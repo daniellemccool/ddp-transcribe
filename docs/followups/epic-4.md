@@ -139,3 +139,7 @@ far, ETA at current rate) would close it. (2) The startup config echo logs
 `whisper_model_path` for subcommands that never load the model (`triage`),
 which sent the operator chasing a "why is triage using tiny?" false alarm on
 first run. Scope the echo to config the command consumes, or annotate it.
+(3) The census prints bare taxonomy tags (`IpBlockedMessage  3900`) — a cold
+reader reliably re-derives the literal-but-wrong meaning (see the 0033
+recurring-misreading guard comment, 2026-07-07). Annotate write-off classes
+in operator-facing output, e.g. `IpBlockedMessage (video removed)`.

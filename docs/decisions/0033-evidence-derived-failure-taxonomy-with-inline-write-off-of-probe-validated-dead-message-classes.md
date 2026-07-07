@@ -8,6 +8,9 @@ comments:
     - author: Danielle McCool
       date: "2026-07-07 04:40:25"
       text: marked decision as decided
+    - author: Danielle McCool
+      date: "2026-07-07 11:16:07"
+      text: 'Recurring-misreading guard: the write-off class IpBlockedMessage describes yt-dlp''s stderr TEXT, not the cause. ''Your IP address is blocked'' is a yt-dlp misfire that TikTok returns for deleted/removed content — probe-validated 10/10 dead (2026-07-06), while ''no data blocks'' rows re-fetched 10/10 OK from the same workspace egress, affirmatively clearing the IP. This has been relitigated across multiple sessions (May–July 2026); it resurfaced again on 2026-07-07 during Epic 3 close-out ops. Anyone reading census output or this taxonomy: the class means VIDEO REMOVED. See src/failure.rs doc comment on the variant.'
 ---
 
 # Evidence-derived failure taxonomy with inline write-off of probe-validated dead message classes
@@ -55,3 +58,4 @@ Chosen option: "Evidence-derived enums (Retryable/Unavailable/Bug arms; variants
 
 * **2026-07-07 04:37:05 — @Danielle McCool:** marked decision as decided
 * **2026-07-07 04:40:25 — @Danielle McCool:** marked decision as decided
+* **2026-07-07 11:16:07 — @Danielle McCool:** Recurring-misreading guard: the write-off class IpBlockedMessage describes yt-dlp's stderr TEXT, not the cause. 'Your IP address is blocked' is a yt-dlp misfire that TikTok returns for deleted/removed content — probe-validated 10/10 dead (2026-07-06), while 'no data blocks' rows re-fetched 10/10 OK from the same workspace egress, affirmatively clearing the IP. This has been relitigated across multiple sessions (May–July 2026); it resurfaced again on 2026-07-07 during Epic 3 close-out ops. Anyone reading census output or this taxonomy: the class means VIDEO REMOVED. See src/failure.rs doc comment on the variant.
