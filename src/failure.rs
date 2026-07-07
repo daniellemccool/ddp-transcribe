@@ -353,6 +353,50 @@ mod tests {
         }
     }
 
+    /// A `requires-cookie`-dispositioned message class must surface as
+    /// `Retryable { requires_cookie: true, .. }` — Tasks 04/06 park these
+    /// rows via `record_fetch_failure` when no cookies are configured. A
+    /// plain-retryable class must keep `requires_cookie == false`.
+    #[test]
+    fn requires_cookie_disposition_sets_the_retryable_flag() {
+        use crate::errors::FetchError;
+        let table = ClassificationTable::compiled_default().unwrap();
+        let mk = |stderr: &str| FetchError::ToolFailed {
+            tool: "yt-dlp",
+            exit_code: 1,
+            signal: None,
+            stderr_excerpt: stderr.to_string(),
+        };
+        match classify_fetch_error(&mk(fixture!("sensitive_login_gated")), &table) {
+            ClassifiedFailure::Retryable {
+                label,
+                requires_cookie,
+                ..
+            } => {
+                assert_eq!(label, "SensitiveLoginGated");
+                assert!(
+                    requires_cookie,
+                    "requires-cookie disposition must set requires_cookie"
+                );
+            }
+            other => panic!("expected Retryable(SensitiveLoginGated), got {other:?}"),
+        }
+        match classify_fetch_error(&mk(fixture!("no_data_blocks")), &table) {
+            ClassifiedFailure::Retryable {
+                label,
+                requires_cookie,
+                ..
+            } => {
+                assert_eq!(label, "NoDataBlocks");
+                assert!(
+                    !requires_cookie,
+                    "plain retryable disposition must not set requires_cookie"
+                );
+            }
+            other => panic!("expected Retryable(NoDataBlocks), got {other:?}"),
+        }
+    }
+
     #[test]
     fn transcribe_bug_stays_bug_and_decode_is_retryable() {
         use crate::errors::TranscribeError;

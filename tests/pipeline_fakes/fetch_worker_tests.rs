@@ -281,7 +281,7 @@ async fn fetch_worker_threads_cookies_on_sensitive_login_gated_retry() -> anyhow
     let (store, tmp) = store_with_pending(&[video_id]);
 
     // Phase 1: first attempt fails with the sensitive-login-gated message —
-    // `classify_message` maps it to `RetryableKind::SensitiveLoginGated`.
+    // the classification table maps it to the "SensitiveLoginGated" label.
     // `run_single_fetch_worker` uses `ProcessOptions { cookies_file: None,
     // .. }`, so this first `acquire` call carries no cookies regardless
     // (kind is `None` at claim time — the gate would reject them anyway).

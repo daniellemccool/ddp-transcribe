@@ -42,8 +42,8 @@ pub struct TriageStats {
     pub requeued: usize,
     pub kept_unreachable: usize,
     pub kept_capped: usize,
-    /// Census keyed by normalized kind tag (write-off rows keyed by the
-    /// UnavailableReason tag). Attrition table for the paper.
+    /// Census keyed by classification label (write-off rows keyed by the
+    /// terminal-dispositioned label). Attrition table for the paper.
     pub by_kind: BTreeMap<String, KindCounts>,
 }
 

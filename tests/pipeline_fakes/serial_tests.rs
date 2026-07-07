@@ -249,9 +249,9 @@ async fn run_serial_classifies_fetch_failure_as_retryable_and_continues() -> any
     assert_eq!(stats.succeeded, 0);
     assert_eq!(stats.failed, 2);
 
-    // Both rows should be failed_retryable with the taxonomy kind
+    // Both rows should be failed_retryable with the taxonomy label
     // (Epic 3 T07: FakeFetcher::always_fails emits FetchError::NetworkError,
-    // which classify_fetch_error maps to RetryableKind::NetworkTransient —
+    // which classify_fetch_error maps to the "NetworkTransient" label —
     // the Epic 2 placeholder "FetchOrTranscribe" is gone).
     for vid in ["vid_a", "vid_b"] {
         let row = store.get_video_for_test(vid)?.expect("row");
@@ -300,7 +300,7 @@ async fn run_serial_classifies_fetch_failure_as_retryable_and_continues() -> any
 /// `FetchPhaseError` downcast misses; the `None` arm then walks the chain
 /// for a `TranscribeError` (`EmptyOutput` here, wrapped below a
 /// "transcribing …" context layer) and dispatches via
-/// `classify_transcribe_error` → `RetryableKind::TranscribeOther`.
+/// `classify_transcribe_error` → the "TranscribeOther" label.
 /// Confirms both arms (fetch and transcribe) route through the same Err
 /// branch in `run_serial`, landing on different (but both non-placeholder)
 /// kinds.
