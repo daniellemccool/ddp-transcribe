@@ -303,6 +303,24 @@ pub struct Claim {
     pub last_retryable_kind: Option<String>,
 }
 
+/// Outcome of `record_fetch_failure`'s one-transaction decision (Epic 4a):
+/// where did the failed row land, and did anything change at all.
+// 0002: consumed by Epic 4a T06 (worker dispatch); lift when it lands.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureRecordOutcome {
+    /// Row went back to 'pending' (end of queue via T05 ordering).
+    Requeued,
+    /// Attempt cap reached — row parked in 'failed_retryable' (exhausted pool).
+    Exhausted,
+    /// requires-cookie failure with no cookies configured this run — parked
+    /// in 'failed_retryable' without consuming the remaining retry budget.
+    ParkedForCookies,
+    /// Claim predicate missed (concurrent sweep re-claimed the row) — no
+    /// mutation happened; caller counts it as stale_after_failure.
+    StaleClaim,
+}
+
 /// Artifacts written to the database upon successful transcription.
 #[derive(Debug, Clone)]
 pub struct SuccessArtifacts {
@@ -492,6 +510,119 @@ impl Store {
 
         tx.commit().context("commit mark_retryable_failure")?;
         Ok(changed)
+    }
+
+    /// Failure-time retry decision (Epic 4a, supersedes the Epic 3 pattern
+    /// of always parking in failed_retryable). One IMMEDIATE transaction:
+    ///
+    /// - requires-cookie without cookies configured → park (failed_retryable);
+    ///   a cookie-less retry is a guaranteed refail that would burn budget.
+    /// - under the cap (`attempt_count < max_attempts`; attempt_count was
+    ///   already bumped at claim time by claim_next) → back to 'pending',
+    ///   unowned, rejoining the queue behind fresh work (T05 ordering).
+    /// - cap exhausted → failed_retryable (the "exhausted, adjudicate" pool).
+    /// - claim predicate miss everywhere → StaleClaim, nothing recorded.
+    ///
+    /// Always writes label+message to last_retryable_kind/_message on any
+    /// row it changes. Events: 'cookie_parked' / 'retry_requeued' /
+    /// 'failed_retryable' (existing vocabulary for the exhausted case).
+    ///
+    /// 0006 note: the `Result<usize>` row-count contract is honored
+    /// internally — each UPDATE's row count drives the outcome; the typed
+    /// enum IS the row-count information, made unambiguous for the caller.
+    // 0002: consumed by Epic 4a T06 (worker dispatch); lift when it lands.
+    #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)] // one logical decision; every arg participates
+    pub fn record_fetch_failure(
+        &mut self,
+        video_id: &str,
+        worker_id: &str,
+        label: &str,
+        message: &str,
+        max_attempts: i64,
+        requires_cookie: bool,
+        cookies_configured: bool,
+    ) -> Result<FailureRecordOutcome> {
+        let now = unix_now();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("begin immediate for record_fetch_failure")?;
+
+        let park = |tx: &rusqlite::Transaction<'_>, event: &str| -> Result<usize> {
+            let changed = tx
+                .execute(
+                    "UPDATE videos
+                     SET status = 'failed_retryable',
+                         last_retryable_kind = ?2,
+                         last_retryable_message = ?3,
+                         claimed_by = NULL,
+                         claimed_at = NULL,
+                         updated_at = ?4
+                     WHERE video_id = ?1
+                       AND status = 'in_progress'
+                       AND claimed_by = ?5",
+                    params![video_id, label, message, now, worker_id],
+                )
+                .with_context(|| format!("record_fetch_failure park for {video_id}"))?;
+            if changed > 0 {
+                let detail = serde_json::json!({ "label": label, "message": message }).to_string();
+                tx.execute(
+                    "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![video_id, now, event, worker_id, detail],
+                )
+                .with_context(|| format!("record_fetch_failure {event} event for {video_id}"))?;
+            }
+            Ok(changed)
+        };
+
+        let outcome = if requires_cookie && !cookies_configured {
+            if park(&tx, "cookie_parked")? > 0 {
+                FailureRecordOutcome::ParkedForCookies
+            } else {
+                FailureRecordOutcome::StaleClaim
+            }
+        } else {
+            let requeued = tx
+                .execute(
+                    "UPDATE videos
+                     SET status = 'pending',
+                         last_retryable_kind = ?2,
+                         last_retryable_message = ?3,
+                         claimed_by = NULL,
+                         claimed_at = NULL,
+                         updated_at = ?4
+                     WHERE video_id = ?1
+                       AND status = 'in_progress'
+                       AND claimed_by = ?5
+                       AND attempt_count < ?6",
+                    params![video_id, label, message, now, worker_id, max_attempts],
+                )
+                .with_context(|| format!("record_fetch_failure requeue for {video_id}"))?;
+            if requeued > 0 {
+                let detail = serde_json::json!({
+                    "label": label, "max_attempts": max_attempts
+                })
+                .to_string();
+                tx.execute(
+                    "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
+                     VALUES (?1, ?2, 'retry_requeued', ?3, ?4)",
+                    params![video_id, now, worker_id, detail],
+                )
+                .with_context(|| {
+                    format!("record_fetch_failure retry_requeued event for {video_id}")
+                })?;
+                FailureRecordOutcome::Requeued
+            } else if park(&tx, "failed_retryable")? > 0 {
+                FailureRecordOutcome::Exhausted
+            } else {
+                FailureRecordOutcome::StaleClaim
+            }
+        };
+
+        tx.commit().context("commit record_fetch_failure")?;
+        Ok(outcome)
     }
 
     /// Flip a video row from `in_progress` to `failed_terminal`, recording
