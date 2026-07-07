@@ -57,6 +57,8 @@ finding 3 → Epic 5, finding 4 → Plan C (see those groups below).
 - T13: `parse_watched_at` UTC assumption → Epic 4 (0027 resolution path)
 - Epic 3 final review: `requeued` event `detail_json` lacks attempt-count context → Epic 4 (`status` subcommand work)
 - Epic 3 final review: architecture-doc `uu-tiktok` naming sweep (four deepdive H1s, index.md:44, state-machine.md:151) → Epic 4 (bundle with doc touch)
+- Epic 3 close-out ops: operator interface is the tool itself; wrapper scripts non-normative (binding premise, ADR-0032 comment 2026-07-07) → Epic 4 planning input
+- Epic 3 close-out ops: `triage` has no progress output; config echo logs model path for commands that never load it → Epic 4 (`status`/operator-UX pass)
 - Full Epic 4 entries: [followups/epic-4.md](followups/epic-4.md)
 
 **Epic 5 (Plan A → Plan B cleanup sweep)**
