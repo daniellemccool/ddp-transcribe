@@ -204,20 +204,20 @@ pub fn classify_fetch_phase(
     }
 }
 
-/// Format-policy routing (frugal-default / deterministic-retry; 2026-07-08
-/// probe — evidence and rationale live on [`crate::fetcher::FetchPolicy`]
-/// and `ytdlp::build_yt_dlp_args`'s doc comment): a retry whose prior
-/// failure classified `FfprobePostprocess` gets
-/// [`crate::fetcher::FetchPolicy::DeterministicAudio`] — that class is the
-/// yt-dlp #15891/#16622 liar-metadata bug, and `download`'s pre-muxed asset
-/// sidesteps it. Every other kind (including `NoDataBlocks` — deliberate:
-/// the parked pilot backlog failed on the `download` path, so its retries
-/// must stay frugal, the format class proven to work for it) and fresh
-/// claims (`last_retryable_kind == None`) stay
-/// [`crate::fetcher::FetchPolicy::Frugal`].
+/// Format-policy routing (staged experiment, ADR 0038 — evidence and
+/// rationale live on [`crate::fetcher::FetchPolicy`] and
+/// `ytdlp::build_yt_dlp_args`'s doc comment): a retry whose prior failure
+/// classified `NoDataBlocks` gets [`crate::fetcher::FetchPolicy::Frugal`]
+/// — that class is `download`'s advertised-but-unservable failure
+/// mechanism (selection succeeds, the transfer dies with "Did not get any
+/// data blocks"), and a selection-time fallback chain cannot recover
+/// mid-transfer, so the retry must not re-pick `download`. Every other
+/// kind and fresh claims (`last_retryable_kind == None`) stay
+/// [`crate::fetcher::FetchPolicy::DeterministicAudio`], the pilot-proven
+/// default.
 ///
-/// `"FfprobePostprocess"` is not one of `failure::labels`'s four
-/// structural constants (`ToolTimeout`/`NetworkTransient`/`YtDlpOther`/
+/// `"NoDataBlocks"` is not one of `failure::labels`'s four structural
+/// constants (`ToolTimeout`/`NetworkTransient`/`YtDlpOther`/
 /// `TranscribeOther`, all code-mapped) — it's a
 /// classification-table-defined label (see
 /// `classification::DEFAULT_TABLE_TOML`), so it's compared here as a
@@ -226,15 +226,15 @@ pub fn classify_fetch_phase(
 fn format_policy_for(claim: &Claim) -> crate::fetcher::FetchPolicy {
     use crate::fetcher::FetchPolicy;
     match claim.last_retryable_kind.as_deref() {
-        // "FfprobePostprocess" is a PINNED (reserved) label: the override
+        // "NoDataBlocks" is a PINNED (reserved) label: the override
         // contract depends on this exact string, and — unlike the cookie
         // gate, which resolves through `table.disposition_of()` — it does
         // NOT consult the active classification table. A custom
         // `--classification` table that renames the label silently
-        // disables the deterministic retry, so custom tables must keep it
+        // disables the frugal retry, so custom tables must keep it
         // verbatim (ADR 0038 Consequences records this dependency).
-        Some("FfprobePostprocess") => FetchPolicy::DeterministicAudio,
-        _ => FetchPolicy::Frugal,
+        Some("NoDataBlocks") => FetchPolicy::Frugal,
+        _ => FetchPolicy::DeterministicAudio,
     }
 }
 
@@ -248,10 +248,10 @@ fn format_policy_for(claim: &Claim) -> crate::fetcher::FetchPolicy {
 /// table doesn't recognize (e.g. the historical placeholder `"Fetch"`)
 /// resolve to `None` and never qualify. Format-policy half: delegates to
 /// [`format_policy_for`]. The two gates key on different kinds
-/// (`SensitiveLoginGated` vs. `FfprobePostprocess`) so they never both
-/// apply to the same claim — a `SensitiveLoginGated` retry keeps its
-/// cookie behavior with `Frugal` format, and an `FfprobePostprocess` retry
-/// gets `DeterministicAudio` with `cookies_file: None`.
+/// (`SensitiveLoginGated` vs. `NoDataBlocks`) so they never both apply to
+/// the same claim — a `SensitiveLoginGated` retry keeps its cookie
+/// behavior with the `DeterministicAudio` default format, and a
+/// `NoDataBlocks` retry gets `Frugal` with `cookies_file: None`.
 pub(crate) fn cookie_opts_for(
     claim: &Claim,
     table: &crate::classification::ClassificationTable,
@@ -580,12 +580,15 @@ mod tests {
         );
     }
 
-    /// Frugal-default / deterministic-retry (2026-07-08 probe): a
-    /// `FfprobePostprocess` retry gets `DeterministicAudio` and no cookies;
-    /// a `SensitiveLoginGated` retry (existing behavior) keeps `Frugal` and
-    /// its cookie; `None`/other kinds stay `Frugal`.
+    /// Staged experiment (ADR 0038): a `NoDataBlocks` retry gets `Frugal`
+    /// and no cookies — the retry must not re-pick `download`, whose
+    /// mid-transfer failure is unrecoverable by a selection-time chain. A
+    /// `SensitiveLoginGated` retry keeps its cookie with the
+    /// `DeterministicAudio` default; `None` and every other kind
+    /// (explicitly including `FfprobePostprocess`, whose override was
+    /// retired by the operator reversal) stay `DeterministicAudio`.
     #[test]
-    fn format_policy_deterministic_audio_only_for_ffprobe_postprocess_retries() {
+    fn format_policy_frugal_only_for_no_data_blocks_retries() {
         use crate::fetcher::FetchPolicy;
 
         let table = crate::classification::ClassificationTable::compiled_default().unwrap();
@@ -597,31 +600,34 @@ mod tests {
             last_retryable_kind: kind.map(String::from),
         };
 
-        let opts = cookie_opts_for(&mk(Some("FfprobePostprocess")), &table, Some(&cookie));
-        assert_eq!(opts.format_policy, FetchPolicy::DeterministicAudio);
+        let opts = cookie_opts_for(&mk(Some("NoDataBlocks")), &table, Some(&cookie));
+        assert_eq!(opts.format_policy, FetchPolicy::Frugal);
         assert_eq!(
             opts.cookies_file, None,
-            "FfprobePostprocess never carries cookies"
+            "NoDataBlocks never carries cookies"
         );
 
         let opts = cookie_opts_for(&mk(Some("SensitiveLoginGated")), &table, Some(&cookie));
         assert_eq!(
             opts.format_policy,
-            FetchPolicy::Frugal,
+            FetchPolicy::DeterministicAudio,
             "the cookie gate's own retry kind must not affect format policy"
         );
         assert_eq!(opts.cookies_file, Some(cookie.clone()));
 
         let opts = cookie_opts_for(&mk(None), &table, Some(&cookie));
-        assert_eq!(opts.format_policy, FetchPolicy::Frugal);
-
-        let opts = cookie_opts_for(&mk(Some("NoDataBlocks")), &table, Some(&cookie));
         assert_eq!(
             opts.format_policy,
-            FetchPolicy::Frugal,
-            "NoDataBlocks must stay frugal — the parked pilot backlog \
-             failed on the download path, so its retries must use the \
-             format class proven to work for it"
+            FetchPolicy::DeterministicAudio,
+            "fresh claims fetch under the pilot-proven default"
+        );
+
+        let opts = cookie_opts_for(&mk(Some("FfprobePostprocess")), &table, Some(&cookie));
+        assert_eq!(
+            opts.format_policy,
+            FetchPolicy::DeterministicAudio,
+            "the retired FfprobePostprocess override must not linger — \
+             the default already IS the deterministic path"
         );
     }
 }

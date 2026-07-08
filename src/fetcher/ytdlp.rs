@@ -27,47 +27,46 @@ impl YtDlpFetcher {
 ///
 /// Pure function: no I/O, no global state. Unit-testable.
 ///
-/// `policy` selects the `-f` selector (frugal-default / deterministic-retry;
-/// 2026-07-08 probe of 20 fresh videos + pilot-DB failure/success classes):
+/// `policy` selects the `-f` selector (staged experiment, ADR 0038):
 ///
-/// - [`FetchPolicy::Frugal`] (`-f "b[acodec!=none]/b"`, the default): picks
-///   the smallest audio-tagged combined format and never selects TikTok's
-///   `download` static asset. Motivation: `download` (the pre-rendered
-///   watermarked share-link MP4) ran ~3x larger than the smallest ABR
-///   variant across the probe (116.1 MB vs 39.9 MB over the 14 videos where
-///   both landed, ~66% waste) while contributing no value here — we discard
-///   video frames during postprocessing, so `download`'s visible
-///   "watermarked" label has no effect on our output. Worse, `download`'s
-///   advertised-but-unservable failure mode (selection succeeds, transfer
-///   dies with "Did not get any data blocks") is exactly the pilot's
-///   `NoDataBlocks` class (2,318 rows) — a selection-time fallback chain
-///   cannot recover mid-transfer once `download` is picked. The smallest
-///   advertised audio-bearing format served 17/17 probe videos with a real
-///   audio stream (verified via ffprobe), including TikTok's occasional
-///   audio-only `audio` format (509 KB vs multi-MB video). Verified against
-///   probe fixtures: `-f "b[acodec!=none]/b"` + the `-S` sort below picked
-///   h264_540p_298119-1 (228 KB) on a poisoned-class video,
-///   h264_540p_235617-1 (261 KB) on a small video, and `audio` on a
-///   slideshow post. The bare `/b` fallback is load-bearing for the retry
-///   net: a video advertising only audio-less formats still downloads via
-///   `/b`, fails at wav extraction, and classifies as `FfprobePostprocess`
-///   — which routes it onto the deterministic retry below. A selector that
-///   failed at selection time instead would strand such videos on a
-///   generic label with no format-blamed retry path.
 /// - [`FetchPolicy::DeterministicAudio`] (`-f "download/b[vcodec=h264]/b"`,
-///   the previous unconditional default): pre-muxed audio with
-///   selection-time fallbacks (best h264, then any best). Applied only to a
-///   retry whose prior failure classified `FfprobePostprocess` — the
-///   retained caveat and the reason this override exists: yt-dlp issues
-///   #15891 / #16622 document that ABR variants intermittently serve h265
-///   video-only files despite being tagged `acodec=aac` by the extractor
+///   the default): TikTok's `download` format — the pre-rendered share-link
+///   MP4 served as a static asset, h264 at ~540p, pre-muxed
+///   deterministically — with selection-time fallbacks (best h264, then any
+///   best). Byte-identical to the selector the pilot ran, retained as
+///   default on that pilot-scale record (the frugal probe below is n=17).
+///   `download` comes from a different TikTok pipeline than the
+///   `bitrateInfo` ABR variants documented in yt-dlp issues #15891 /
+///   #16622, which intermittently serve h265 video-only files despite
+///   being tagged `acodec=aac` by the extractor
 ///   (`yt_dlp/extractor/tiktok.py` stamps the claim in
-///   `COMMON_FORMAT_INFO`, regardless of what TikTok's CDN actually muxes).
-///   Such a fetch fails at wav extraction and classifies as
-///   `FfprobePostprocess`; `download` comes from a different TikTok
-///   pipeline than the ABR variants and isn't subject to that liar-metadata
-///   bug, so retrying with it recovers the video at the cost of the 3x
-///   footprint for that one retry.
+///   `COMMON_FORMAT_INFO`, regardless of what TikTok's CDN actually muxes)
+///   — #16622 is still open against exactly the ABR formats the frugal
+///   selector prefers, part of why the frugal flip is staged rather than
+///   immediate. We discard video frames during postprocessing, so the
+///   visible "watermarked" label on `download` has no effect on our output.
+/// - [`FetchPolicy::Frugal`] (`-f "b[acodec!=none]/b"`): picks the smallest
+///   audio-tagged combined format and never selects `download`. Applied
+///   only to a retry whose prior failure classified `NoDataBlocks` —
+///   `download`'s advertised-but-unservable failure mode (selection
+///   succeeds, transfer dies with "Did not get any data blocks"; the
+///   entire 2,318-row pilot class), which a selection-time fallback chain
+///   cannot recover mid-transfer, so the retry must not re-pick `download`.
+///   2026-07-08 probe evidence: the smallest advertised audio-bearing
+///   format served 17/17 probe videos with a real audio stream (verified
+///   via ffprobe), including TikTok's occasional audio-only `audio` format
+///   (509 KB vs multi-MB video), at ~3x smaller footprint than `download`
+///   (39.9 MB vs 116.1 MB over the 14 videos where both landed). Verified
+///   against probe fixtures: `-f "b[acodec!=none]/b"` + the `-S` sort
+///   below picked h264_540p_298119-1 (228 KB) on a poisoned-class video,
+///   h264_540p_235617-1 (261 KB) on a small video, and `audio` on a
+///   slideshow post. The bare `/b` fallback keeps the retry net closed: a
+///   video advertising only audio-less formats (or an ABR liar per the
+///   issues above) still downloads via `/b`, fails at wav extraction,
+///   classifies as `FfprobePostprocess`, and simply retries on the
+///   deterministic default — no special routing needed. A selector that
+///   failed at selection time instead would strand such videos on a
+///   generic label.
 ///
 /// `cookies` (Epic 3, ADR 0035): when `Some`, appends `--cookies <path>`
 /// immediately before the trailing `source_url` positional. The returned
@@ -82,8 +81,8 @@ fn build_yt_dlp_args(
     cookies: Option<&Path>,
 ) -> (Vec<String>, PathBuf, Vec<usize>) {
     let selector = match policy {
-        FetchPolicy::Frugal => "b[acodec!=none]/b",
         FetchPolicy::DeterministicAudio => "download/b[vcodec=h264]/b",
+        FetchPolicy::Frugal => "b[acodec!=none]/b",
     };
     let output_template = format!("{}/{}.%(ext)s", video_dir.display(), video_id);
     let wav_path = video_dir.join(format!("{video_id}.wav"));
@@ -204,11 +203,11 @@ impl VideoFetcher for YtDlpFetcher {
 mod tests {
     use super::*;
 
-    /// Frugal-default (2026-07-08 probe): `FetchPolicy::Frugal` is `Default`
-    /// and must be the format `-f` emits when no policy override applies —
-    /// smallest audio-tagged combined format, never `download`.
+    /// Staged experiment (ADR 0038): `FetchPolicy::DeterministicAudio` is
+    /// `Default` and must be the format `-f` emits when no policy override
+    /// applies — byte-identical to the selector the pilot ran.
     #[test]
-    fn build_args_selects_frugal_format_by_default() {
+    fn build_args_selects_download_format_by_default() {
         let video_dir = PathBuf::from("/tmp/test-dir");
         let (args, _, _) = build_yt_dlp_args(
             "abc123",
@@ -217,7 +216,7 @@ mod tests {
             FetchPolicy::default(),
             None,
         );
-        assert_eq!(FetchPolicy::default(), FetchPolicy::Frugal);
+        assert_eq!(FetchPolicy::default(), FetchPolicy::DeterministicAudio);
 
         let f_idx = args
             .iter()
@@ -225,9 +224,10 @@ mod tests {
             .expect("-f flag must be present");
         assert_eq!(
             args.get(f_idx + 1).map(String::as_str),
-            Some("b[acodec!=none]/b"),
-            "frugal default must select the smallest audio-tagged combined \
-             format and never touch TikTok's `download` static asset"
+            Some("download/b[vcodec=h264]/b"),
+            "default must prefer TikTok's pre-muxed `download` static asset, \
+             fall back to best h264, then best — the pilot-proven selector; \
+             sidesteps yt-dlp #15891/#16622 ABR liar-metadata bug"
         );
 
         // T7 perf-tweaks: -S sort flag must be present with the agreed
@@ -243,17 +243,17 @@ mod tests {
         );
     }
 
-    /// `FetchPolicy::DeterministicAudio` (the format-blamed-retry override)
-    /// emits the previous unconditional default: `download` first, then the
-    /// h264/best selection-time fallbacks.
+    /// `FetchPolicy::Frugal` (the NoDataBlocks-retry experiment variant,
+    /// ADR 0038) emits the smallest-audio-tagged selector and never
+    /// `download`.
     #[test]
-    fn build_args_deterministic_audio_selects_download_first() {
+    fn build_args_frugal_selects_smallest_audio_tagged() {
         let video_dir = PathBuf::from("/tmp/test-dir");
         let (args, _, _) = build_yt_dlp_args(
             "abc123",
             "https://example.com/v",
             &video_dir,
-            FetchPolicy::DeterministicAudio,
+            FetchPolicy::Frugal,
             None,
         );
 
@@ -263,10 +263,11 @@ mod tests {
             .expect("-f flag must be present");
         assert_eq!(
             args.get(f_idx + 1).map(String::as_str),
-            Some("download/b[vcodec=h264]/b"),
-            "DeterministicAudio must prefer TikTok's pre-muxed `download` \
-             static asset, fall back to best h264, then best — sidesteps \
-             yt-dlp #15891/#16622 ABR liar-metadata bug"
+            Some("b[acodec!=none]/b"),
+            "Frugal must select the smallest audio-tagged combined format \
+             and never touch TikTok's `download` static asset — a \
+             NoDataBlocks retry must not re-pick the format that died \
+             mid-transfer"
         );
     }
 

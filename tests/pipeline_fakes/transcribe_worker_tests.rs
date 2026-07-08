@@ -73,6 +73,7 @@ async fn transcribe_worker_processes_one_item_then_exits_on_channel_close() -> a
         samples_len,
         wav_path: wav_path.clone(),
         fetcher_name: "fake-fetcher",
+        fetch_policy_tag: "deterministic-audio",
     };
     tx.send(item).await.unwrap();
     drop(tx); // close channel after first item → worker exits after processing
@@ -272,6 +273,7 @@ async fn transcribe_worker_increments_stale_after_failure_on_swept_claim() -> an
         samples_len,
         wav_path,
         fetcher_name: "fake-fetcher",
+        fetch_policy_tag: "deterministic-audio",
     })
     .await
     .unwrap();

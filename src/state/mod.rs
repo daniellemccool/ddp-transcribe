@@ -555,10 +555,17 @@ impl Store {
     /// Always writes label+message to last_retryable_kind/_message on any
     /// row it changes. Events: 'cookie_parked' / 'retry_requeued' /
     /// 'failed_retryable' (existing vocabulary for the exhausted case), all
-    /// with the uniform `{"kind": …, "message": …}` detail_json shape shared
-    /// with `mark_retryable_failure` — post-Task-03 the kind vocabulary IS
-    /// the label strings, so 'failed_retryable' events stay one schema
-    /// regardless of which mutator emitted them.
+    /// with the uniform `{"kind": …, "message": …, "policy": …}`
+    /// detail_json shape. `"policy"` (ADR 0038) carries the short stable
+    /// [`crate::fetcher::FetchPolicy::tag`] of the format policy the fetch
+    /// actually ran under ("deterministic-audio" / "frugal"), making the
+    /// failure mix attributable per policy — the observability that lets
+    /// the backlog retry batch double as the at-scale frugal experiment.
+    /// This extends the Epic 4a uniform-shape contract ADDITIVELY:
+    /// consumers reading `{"kind", "message"}` are unaffected.
+    /// `mark_retryable_failure` (bin-dead, test-seeding only) still emits
+    /// the two-key shape, so 'failed_retryable' events written by THIS
+    /// mutator are a superset of that legacy schema rather than divergent.
     ///
     /// 0006 note: the `Result<usize>` row-count contract is honored
     /// internally — each UPDATE's row count drives the outcome; the typed
@@ -573,6 +580,7 @@ impl Store {
         worker_id: &str,
         label: &str,
         message: &str,
+        fetch_policy: &str,
         max_attempts: i64,
         requires_cookie: bool,
         cookies_configured: bool,
@@ -600,7 +608,9 @@ impl Store {
                 )
                 .with_context(|| format!("record_fetch_failure park for {video_id}"))?;
             if changed > 0 {
-                let detail = serde_json::json!({ "kind": label, "message": message }).to_string();
+                let detail =
+                    serde_json::json!({ "kind": label, "message": message, "policy": fetch_policy })
+                        .to_string();
                 tx.execute(
                     "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
                      VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -635,7 +645,9 @@ impl Store {
                 )
                 .with_context(|| format!("record_fetch_failure requeue for {video_id}"))?;
             if requeued > 0 {
-                let detail = serde_json::json!({ "kind": label, "message": message }).to_string();
+                let detail =
+                    serde_json::json!({ "kind": label, "message": message, "policy": fetch_policy })
+                        .to_string();
                 tx.execute(
                     "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
                      VALUES (?1, ?2, 'retry_requeued', ?3, ?4)",

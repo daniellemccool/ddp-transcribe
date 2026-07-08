@@ -380,17 +380,16 @@ async fn fetch_worker_threads_cookies_on_sensitive_login_gated_retry() -> anyhow
     Ok(())
 }
 
-/// Frugal-default / deterministic-retry (2026-07-08 probe): a claim whose
-/// `last_retryable_kind` is `FfprobePostprocess` (the yt-dlp #15891/#16622
-/// ABR liar-metadata class) must fetch with `FetchPolicy::DeterministicAudio`
-/// and no cookies, through the real `fetch_worker` dispatch path — mirrors
+/// Staged experiment (ADR 0038): a claim whose `last_retryable_kind` is
+/// `NoDataBlocks` (the download-advertised-but-unservable class — the
+/// parked pilot backlog) must fetch with `FetchPolicy::Frugal` and no
+/// cookies, through the real `fetch_worker` dispatch path — mirrors
 /// `fetch_worker_threads_cookies_on_sensitive_login_gated_retry` above, but
 /// seeds the retryable kind via a raw UPDATE on a still-pending row (no
 /// requeue-cycle needed since the format gate only reads
 /// `last_retryable_kind`, not status).
 #[tokio::test]
-async fn fetch_worker_uses_deterministic_audio_on_ffprobe_postprocess_retry() -> anyhow::Result<()>
-{
+async fn fetch_worker_uses_frugal_on_no_data_blocks_retry() -> anyhow::Result<()> {
     use std::sync::Arc;
 
     use ddp_transcribe::fetcher::{FetchPolicy, VideoFetcher};
@@ -405,13 +404,10 @@ async fn fetch_worker_uses_deterministic_audio_on_ffprobe_postprocess_retry() ->
         let db = tmp.path().join("state.sqlite");
         let raw = rusqlite::Connection::open(&db)?;
         let changed = raw.execute(
-            "UPDATE videos SET last_retryable_kind = 'FfprobePostprocess' WHERE video_id = ?1",
+            "UPDATE videos SET last_retryable_kind = 'NoDataBlocks' WHERE video_id = ?1",
             [video_id],
         )?;
-        assert_eq!(
-            changed, 1,
-            "row must be seeded with FfprobePostprocess kind"
-        );
+        assert_eq!(changed, 1, "row must be seeded with NoDataBlocks kind");
     }
 
     let wav = tmp.path().join(format!("{video_id}.wav"));
@@ -432,12 +428,12 @@ async fn fetch_worker_uses_deterministic_audio_on_ffprobe_postprocess_retry() ->
     assert_eq!(recorded.len(), 1, "exactly one acquire call");
     assert_eq!(
         recorded[0].format_policy,
-        FetchPolicy::DeterministicAudio,
-        "a format-blamed (FfprobePostprocess) retry must use the deterministic selector"
+        FetchPolicy::Frugal,
+        "a NoDataBlocks retry must not re-pick the format that died mid-transfer"
     );
     assert_eq!(
         recorded[0].cookies_file, None,
-        "FfprobePostprocess never carries cookies"
+        "NoDataBlocks never carries cookies"
     );
 
     Ok(())
