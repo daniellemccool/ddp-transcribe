@@ -723,3 +723,24 @@ disposition and its evidence comment — is snapshotted into
 documented in the policy file itself (the compiled default's inline evidence
 comments, e.g. `IpBlockedMessage` → "video removed, NOT an IP issue"), which
 is a durable and reproducible home for them.
+
+### `CurlProber` doesn't pass `--location`; redirect responses are unhandled
+
+**Found in:** Epic 3 final whole-branch review (was Plan-C-scoped, bundled
+with the ADR-0034 oEmbed-drift re-validation trigger).
+**Resolution:** Moot — `src/probe.rs` (`CurlProber` and its
+`verdict_from_http_code` mapping) was deleted in Epic 4a's triage retirement
+(`551580a`), and ADR 0034's oEmbed-oracle model is superseded by ADR 0036
+(the re-fetch is the liveness oracle; no oEmbed HTTP-code table exists to
+re-validate). No surviving code path issues the probe request.
+
+### `run_serial` discards mutator row-change counts (half of the mutator-return-value bundle)
+
+**Found in:** Epic 3 final whole-branch review.
+**Resolution:** Epic 4a T06 (`c7c4f1b`): `run_serial`'s terminal arm gates
+its census increment on `mark_terminal_failure`'s `changed > 0`, and the
+retryable arms dispatch through `record_fetch_failure_serial`, whose typed
+`StaleClaim` outcome is counted as `stale_after_failure` (+ warn) — an
+`Ok(0)` predicate miss is no longer uncounted or unlogged on the serial
+path. The bundle's surviving half (the fetch/transcribe downcast asymmetry)
+remains active in `docs/followups/epic-5.md`.

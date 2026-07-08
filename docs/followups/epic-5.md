@@ -319,9 +319,12 @@ Three gaps in current coverage, none blocking:
 
 ---
 
-### `state/mod.rs` hygiene bundle (post-Epic-3 triage mutators)
+### `state/mod.rs` hygiene bundle (sweep mutators — formerly Epic-3 triage mutators)
 
-**Found in:** Epic 3 final whole-branch review.
+**Found in:** Epic 3 final whole-branch review. Items 3–4 re-pointed at the
+Epic 4a surfaces (T08: triage retired; `triage_mark_terminal`/`requeue_retryable`
+became `sweep_mark_terminal`/`sweep_requeue`, `run_triage` became
+`batch::run_sweep`) — the underlying concerns carry over unchanged.
 **Disposition:** Grouped cleanup; low risk, no behavior change expected.
 **Trigger to revisit:** next edit to `src/state/mod.rs`, or Epic 5 sweep.
 
@@ -332,36 +335,36 @@ Three gaps in current coverage, none blocking:
 2. No test pins `attempt_count == 2` after a row is claimed, fails, and is
    requeued+reclaimed once — the attempt-counting invariant across the
    claim→fail→requeue→reclaim cycle is exercised piecemeal, not end-to-end.
-3. `triage_mark_terminal` and `requeue_retryable` operate on
+3. `sweep_mark_terminal` and `sweep_requeue` operate on
    `failed_retryable` rows, which per the current schema are never
    `claimed_by`/`claimed_at`-set — so the missing defensive clear is inert
    today. Worth adding anyway if a future schema change ever lets a
    claimed row reach these mutators.
-4. The `kept_capped` path in `run_triage` (`src/triage.rs`) writes no
+4. The `kept_capped` path in `batch::run_sweep` (`src/batch.rs` — a
+   `sweep_requeue` predicate miss on the attempt cap) writes no
    `video_events` row and no test asserts that absence — currently correct
-   (nothing happened to the row), but an implicit invariant that should be
-   pinned so a future change doesn't accidentally start emitting spurious
-   events.
+   (nothing happened to the row; the event insert is gated on `changed > 0`),
+   but an implicit invariant that should be pinned so a future change
+   doesn't accidentally start emitting spurious events.
 
 ---
 
-### `run_serial` mutator-return-value bundle
+### `run_serial` fetch/transcribe downcast asymmetry
 
-**Found in:** Epic 3 final whole-branch review.
-**Disposition:** Grouped opportunistic hardening.
+**Found in:** Epic 3 final whole-branch review. The bundle's other half —
+discarded mutator row-change counts — was resolved by Epic 4a T06
+(`c7c4f1b`: `mark_terminal_failure` gated on `changed > 0`; retryable
+dispatch goes through `record_fetch_failure_serial`, whose typed
+`StaleClaim` outcome is counted as `stale_after_failure`); archived.
+**Disposition:** Opportunistic hardening.
 **Trigger to revisit:** `run_serial` retirement decision (see "Deferred / open" in `docs/superpowers/plans/2026-07-07-plan-b-epic-3/EPIC-3-CLOSE.md`), or Epic 5 sweep.
 
-`src/pipeline/serial.rs`'s failure arms call `mark_terminal_failure` /
-`mark_retryable_failure` and discard the returned `usize` row-change count
-(unlike `triage.rs`, which per ADR 0006 gates its census counters on it) —
-an `Ok(0)` predicate miss (row swept out from under the running claim)
-goes uncounted and unlogged on the `run_serial` path. Related: the
-fetch-side classification downcasts the top-level anyhow error
-(`downcast_ref::<FetchPhaseError>`) while the transcribe-side walks the
-whole chain (`e.chain().find_map(...)`) — an asymmetry now flagged inline
-by a tripwire comment at `src/pipeline/serial.rs` (near the `downcast_ref`
-call, ~line 79). Fix both if `run_serial` survives the retirement
-decision; moot if it's deleted.
+`src/pipeline/serial.rs`'s fetch-side classification downcasts the
+top-level anyhow error (`downcast_ref::<FetchPhaseError>`) while the
+transcribe-side walks the whole chain (`e.chain().find_map(...)`) — an
+asymmetry flagged inline by a tripwire comment at `src/pipeline/serial.rs`
+(near the `downcast_ref` call). Fix if `run_serial` survives the
+retirement decision; moot if it's deleted.
 
 ---
 

@@ -74,8 +74,8 @@ resolved entries archived under "Resolved by Plan B Epic 4a".
 - SRC-bake + T11: `--whisper-model` (and 5 other GlobalArgs flags) rejected after subcommand → Epic 5 (one-line `global = true` per flag)
 - T11 (split at Epic 3 close): `YtDlpFetcher::acquire` coupling to `{video_id}.wav` output filename → Epic 5 (fetch hardening)
 - Epic 3 final review: test-hardening bundle (signal-capture spawn+kill test, `classify_message` precedence/case test, `transcribe_worker` kind-string end-to-end assertion) → Epic 5
-- Epic 3 final review: `state/mod.rs` hygiene bundle (bare `tx.commit()?`, attempt_count==2 assertion, defensive claimed_by/claimed_at clearing, capped-requeue no-event assertion) → Epic 5
-- Epic 3 final review: `run_serial` mutator-return-value bundle (discarded row-change counts; fetch/transcribe downcast asymmetry, see tripwire in `src/pipeline/serial.rs`) → Epic 5 (or moot if `run_serial` retires)
+- Epic 3 final review: `state/mod.rs` hygiene bundle — sweep mutators post-4a rename (bare `tx.commit()?`, attempt_count==2 assertion, defensive claimed_by/claimed_at clearing, sweep capped-requeue no-event assertion) → Epic 5
+- Epic 3 final review: `run_serial` fetch/transcribe downcast asymmetry (see tripwire in `src/pipeline/serial.rs`; the bundle's discarded-count half resolved by Epic 4a T06, archived) → Epic 5 (or moot if `run_serial` retires)
 - Epic 3 final review: `FetchOpts` derived `Debug` doesn't redact `cookies_file` → Epic 5
 - Epic 3 final review: `scrub_cookie_path` empty-path guard → Epic 5
 - Full Epic 5 entries: [followups/epic-5.md](followups/epic-5.md)
@@ -88,7 +88,6 @@ resolved entries archived under "Resolved by Plan B Epic 4a".
 - T10-Epic1: Per-token text field doubles raw_signals payload → Plan C (compact JSON landed in perf-tweaks decdf6f; drop-text still deferred pending 0010 amendment)
 - T11 (split at Epic 3 close): yt-dlp argv `--` separator before `source_url` → Plan C (when resolved URLs reach the fetcher)
 - Epic 3 final review: `scrub_cookie_path` canonicalized/relative path-variant hardening → Plan C (multi-engine work)
-- Epic 3 final review: `CurlProber` missing `--location`; bundle with ADR-0034 oEmbed-drift re-validation → Plan C
 - Full Plan C entries: [followups/plan-c.md](followups/plan-c.md)
 
 **Cross-epic / ADR maintenance / verify-then-archive**

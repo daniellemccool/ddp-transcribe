@@ -16,7 +16,7 @@
 | 07 | `f24a433` + `7cc2a6e` | Start-of-batch sweep; `batch_runs` open/close in Process arm; census struct + persist + print; review fixes (UTF-8-safe truncation, preserve-kind-on-fallback, honest sweep-census doc) |
 | 08 | `551580a` + this commit | Retire triage/probe/`curl`; ADR slate (0036, 0037; 0034 superseded; 0033 comment) via `adg`; architecture-doc + src-vm updates; FOLLOWUPS archived with SHAs; this close doc |
 
-Verification at close: `cargo fmt` clean, `clippy --all-targets -D warnings` clean, `cargo test --features test-helpers -- --test-threads=1` green (244 pass, 0 fail; the deleted triage suite dropped 7 tests), `adg validate` clean (34 ADRs).
+Verification at close: `cargo fmt` clean, `clippy --all-targets -D warnings` clean, `cargo test --features test-helpers -- --test-threads=1` green (244 pass, 0 fail; the triage retirement dropped 9 tests — 4 triage integration + 3 cli parse-rate + 2 probe unit; corrects `551580a`'s disclosed delta of 7, which overlooked `probe.rs`'s 2 unit tests), `adg validate` clean (34 ADRs).
 
 ## Five shipped-behavior deltas from the plan's literal snippets
 

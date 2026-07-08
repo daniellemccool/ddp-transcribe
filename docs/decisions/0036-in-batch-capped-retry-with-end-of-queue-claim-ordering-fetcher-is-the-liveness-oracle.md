@@ -10,6 +10,9 @@ comments:
     - author: Danielle McCool
       date: "2026-07-08 12:05:09"
       text: marked decision as decided
+    - author: Danielle McCool
+      date: "2026-07-08 12:39:35"
+      text: marked decision as decided
 ---
 
 # In-batch capped retry with end-of-queue claim ordering; fetcher is the liveness oracle
@@ -30,7 +33,7 @@ ruled retry must be pipeline behavior.
 
 ## Decision Outcome
 
-Chosen option: "In-batch capped retry: failure-time requeue to end-of-queue, re-fetch adjudicates liveness (fetch-as-oracle)".
+Chosen option: "In-batch capped retry: failure-time requeue to end-of-queue, re-fetch adjudicates liveness (fetch-as-oracle)", because in-pipeline retry replaces operator triage; the re-fetch is the liveness oracle, and the census shows self-classification handles impure classes where blanket write-offs would discard recoverable videos.
 
 ### Consequences
 
@@ -58,3 +61,4 @@ age/attempt interleave) only if a daemon mode lands.
 
 * **2026-07-08 12:03:58 — @Danielle McCool:** marked decision as decided
 * **2026-07-08 12:05:09 — @Danielle McCool:** marked decision as decided
+* **2026-07-08 12:39:35 — @Danielle McCool:** marked decision as decided

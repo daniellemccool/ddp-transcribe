@@ -164,27 +164,3 @@ the persisted `stderr_excerpt` uncorrected. Today's single fetcher/single
 call site doesn't hit this; worth a normalize-before-compare pass (e.g.
 `std::fs::canonicalize` both sides, or match on the basename as a fallback)
 before a second engine's stderr conventions are in scope.
-
----
-
-### `CurlProber` doesn't pass `--location`; redirect responses are unhandled
-
-**Found in:** Epic 3 final whole-branch review.
-**Disposition:** Deferred to Plan C; bundle with the ADR-0034 oEmbed-drift
-re-validation trigger below (both concern the oEmbed probe's assumptions
-about TikTok's HTTP behavior holding steady).
-**Trigger to revisit:** any oEmbed 3xx observed in production triage logs,
-or when Plan C's periodic re-validation of ADR 0034's classifier table
-(HTTP code → verdict mapping was empirically derived 2026-07-06/07, n=36)
-is scheduled and the oEmbed corpus is re-sampled.
-
-`src/probe.rs::CurlProber::probe`'s curl invocation has no `--location`
-flag, so a redirect response (3xx) is not followed; the redirect's own
-status code falls through `verdict_from_http_code`'s wildcard arm to
-`Unreachable`, not misclassified as `Alive`/`Dead` — safe by accident
-rather than by design. If TikTok's oEmbed endpoint starts redirecting
-(domain migration, protocol upgrade) whole classes of otherwise-`Alive`
-videos would silently degrade to `kept_unreachable`. Add `--location`
-(with a `--max-redirs` cap) once oEmbed drift is worth re-validating, and
-fold it into the same pass that re-checks the empirical HTTP-code table
-against a fresh sample.
