@@ -204,14 +204,47 @@ pub fn classify_fetch_phase(
     }
 }
 
-/// Kind-gated cookie routing (Epic 3 T08, ADR 0035; Epic 4a T03: the gate
-/// now consults the active [`crate::classification::ClassificationTable`]
-/// instead of a hardcoded tag): cookies ride on a fetch iff the claim's
-/// most recent retryable failure's label resolves to disposition
-/// `requires-cookie` in the active table AND the operator supplied
-/// `--cookies-file`. First attempts (`last_retryable_kind == None`) never
-/// get cookies, and labels the active table doesn't recognize (e.g. the
-/// historical placeholder `"Fetch"`) resolve to `None` and never qualify.
+/// Format-policy routing (frugal-default / deterministic-retry; 2026-07-08
+/// probe — evidence and rationale live on [`crate::fetcher::FetchPolicy`]
+/// and `ytdlp::build_yt_dlp_args`'s doc comment): a retry whose prior
+/// failure classified `FfprobePostprocess` gets
+/// [`crate::fetcher::FetchPolicy::DeterministicAudio`] — that class is the
+/// yt-dlp #15891/#16622 liar-metadata bug, and `download`'s pre-muxed asset
+/// sidesteps it. Every other kind (including `NoDataBlocks` — deliberate:
+/// the parked pilot backlog failed on the `download` path, so its retries
+/// must stay frugal, the format class proven to work for it) and fresh
+/// claims (`last_retryable_kind == None`) stay
+/// [`crate::fetcher::FetchPolicy::Frugal`].
+///
+/// `"FfprobePostprocess"` is not one of `failure::labels`'s four
+/// structural constants (`ToolTimeout`/`NetworkTransient`/`YtDlpOther`/
+/// `TranscribeOther`, all code-mapped) — it's a
+/// classification-table-defined label (see
+/// `classification::DEFAULT_TABLE_TOML`), so it's compared here as a
+/// literal, the same way [`cookie_opts_for`] would if the active table had
+/// no dedicated disposition to key its own gate on.
+fn format_policy_for(claim: &Claim) -> crate::fetcher::FetchPolicy {
+    use crate::fetcher::FetchPolicy;
+    match claim.last_retryable_kind.as_deref() {
+        Some("FfprobePostprocess") => FetchPolicy::DeterministicAudio,
+        _ => FetchPolicy::Frugal,
+    }
+}
+
+/// Kind-gated per-claim fetch-options routing. Cookie half (Epic 3 T08, ADR
+/// 0035; Epic 4a T03: the gate now consults the active
+/// [`crate::classification::ClassificationTable`] instead of a hardcoded
+/// tag): cookies ride on a fetch iff the claim's most recent retryable
+/// failure's label resolves to disposition `requires-cookie` in the active
+/// table AND the operator supplied `--cookies-file`. First attempts
+/// (`last_retryable_kind == None`) never get cookies, and labels the active
+/// table doesn't recognize (e.g. the historical placeholder `"Fetch"`)
+/// resolve to `None` and never qualify. Format-policy half: delegates to
+/// [`format_policy_for`]. The two gates key on different kinds
+/// (`SensitiveLoginGated` vs. `FfprobePostprocess`) so they never both
+/// apply to the same claim — a `SensitiveLoginGated` retry keeps its
+/// cookie behavior with `Frugal` format, and an `FfprobePostprocess` retry
+/// gets `DeterministicAudio` with `cookies_file: None`.
 pub(crate) fn cookie_opts_for(
     claim: &Claim,
     table: &crate::classification::ClassificationTable,
@@ -229,6 +262,7 @@ pub(crate) fn cookie_opts_for(
         } else {
             None
         },
+        format_policy: format_policy_for(claim),
     }
 }
 
@@ -536,6 +570,51 @@ mod tests {
         assert_eq!(
             cookie_opts_for(&mk(Some("Fetch")), &table, Some(&cookie)).cookies_file,
             None
+        );
+    }
+
+    /// Frugal-default / deterministic-retry (2026-07-08 probe): a
+    /// `FfprobePostprocess` retry gets `DeterministicAudio` and no cookies;
+    /// a `SensitiveLoginGated` retry (existing behavior) keeps `Frugal` and
+    /// its cookie; `None`/other kinds stay `Frugal`.
+    #[test]
+    fn format_policy_deterministic_audio_only_for_ffprobe_postprocess_retries() {
+        use crate::fetcher::FetchPolicy;
+
+        let table = crate::classification::ClassificationTable::compiled_default().unwrap();
+        let cookie = PathBuf::from("/secret/c.txt");
+        let mk = |kind: Option<&str>| Claim {
+            video_id: "7".into(),
+            source_url: "u".into(),
+            attempt_count: 1,
+            last_retryable_kind: kind.map(String::from),
+        };
+
+        let opts = cookie_opts_for(&mk(Some("FfprobePostprocess")), &table, Some(&cookie));
+        assert_eq!(opts.format_policy, FetchPolicy::DeterministicAudio);
+        assert_eq!(
+            opts.cookies_file, None,
+            "FfprobePostprocess never carries cookies"
+        );
+
+        let opts = cookie_opts_for(&mk(Some("SensitiveLoginGated")), &table, Some(&cookie));
+        assert_eq!(
+            opts.format_policy,
+            FetchPolicy::Frugal,
+            "the cookie gate's own retry kind must not affect format policy"
+        );
+        assert_eq!(opts.cookies_file, Some(cookie.clone()));
+
+        let opts = cookie_opts_for(&mk(None), &table, Some(&cookie));
+        assert_eq!(opts.format_policy, FetchPolicy::Frugal);
+
+        let opts = cookie_opts_for(&mk(Some("NoDataBlocks")), &table, Some(&cookie));
+        assert_eq!(
+            opts.format_policy,
+            FetchPolicy::Frugal,
+            "NoDataBlocks must stay frugal — the parked pilot backlog \
+             failed on the download path, so its retries must use the \
+             format class proven to work for it"
         );
     }
 }

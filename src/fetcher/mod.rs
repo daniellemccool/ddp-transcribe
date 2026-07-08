@@ -12,12 +12,36 @@ pub enum Acquisition {
     AudioFile(PathBuf),
 }
 
-/// Per-request fetch options (Epic 3). Cookie scope is policy: ADR 0035
-/// pins cookies to SensitiveLoginGated retries only; this struct just
-/// carries the decision to the tool adapter.
+/// Fetch-format selection policy (frugal-default / deterministic-retry;
+/// 2026-07-08 probe — see `ytdlp::build_yt_dlp_args`'s doc comment for the
+/// full evidence and the yt-dlp-issue caveat that motivates the override).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FetchPolicy {
+    /// Smallest audio-tagged combined format (`-f "b[acodec!=none]/b"`).
+    /// Never selects TikTok's `download` static asset. Default for fresh
+    /// claims and for every retry kind except `FfprobePostprocess`.
+    #[default]
+    Frugal,
+    /// Pre-muxed audio with selection-time fallbacks (`-f
+    /// "download/b[vcodec=h264]/b"`) — the previous unconditional default.
+    /// Applied only to a retry whose prior failure classified
+    /// `FfprobePostprocess`: yt-dlp issues #15891/#16622 mean an ABR
+    /// variant can intermittently serve video-only despite `acodec=aac`
+    /// metadata, and `download`'s pre-muxed asset sidesteps that
+    /// liar-metadata class.
+    DeterministicAudio,
+}
+
+/// Per-request fetch options (Epic 3 cookies; frugal-default/deterministic-
+/// retry format policy). Cookie scope is policy: ADR 0035 pins cookies to
+/// SensitiveLoginGated retries only. Format-policy scope is likewise
+/// policy: keyed on `FfprobePostprocess` retries (see
+/// `pipeline::cookie_opts_for`). This struct just carries both decisions to
+/// the tool adapter.
 #[derive(Debug, Clone, Default)]
 pub struct FetchOpts {
     pub cookies_file: Option<PathBuf>,
+    pub format_policy: FetchPolicy,
 }
 
 #[async_trait]
