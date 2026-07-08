@@ -8,8 +8,8 @@
 use anyhow::{anyhow, Context, Result};
 
 use super::{
-    classify_fetch_phase, cookie_opts_for, fetch_and_decode, transcribe_and_write, FetchPhaseError,
-    ProcessOptions, ProcessOutcome, ProcessStats,
+    classify_fetch_phase, cookie_opts_for, fetch_and_decode, format_policy_for,
+    transcribe_and_write, FetchPhaseError, ProcessOptions, ProcessOutcome, ProcessStats,
 };
 use crate::errors::TranscribeError;
 use crate::failure::{classify_transcribe_error, labels, ClassifiedFailure};
@@ -203,6 +203,13 @@ pub async fn run_serial(
 /// pipelined helper: `Requeued`/`Exhausted`/`ParkedForCookies` bump the named
 /// counter; `StaleClaim` bumps `stale_after_failure` (+ warn) — nothing was
 /// recorded, symmetric to the success-side stale routing.
+///
+/// ADR 0038: the serial path has no `FetchOpts` carried alongside the claim
+/// the way the pipelined workers do, so it recomputes the policy tag via
+/// `format_policy_for(claim).tag()` instead of threading one through.
+/// `format_policy_for` is a pure function of `claim.last_retryable_kind`
+/// (the immutable claim this failure was dispatched for), so this
+/// recomputation is equivalent to the tag the actual fetch ran under.
 fn record_fetch_failure_serial(
     store: &mut Store,
     stats: &mut ProcessStats,
@@ -218,6 +225,7 @@ fn record_fetch_failure_serial(
             &opts.worker_id,
             label,
             message,
+            format_policy_for(claim).tag(),
             opts.retries + 1,
             requires_cookie,
             opts.cookies_file.is_some(),

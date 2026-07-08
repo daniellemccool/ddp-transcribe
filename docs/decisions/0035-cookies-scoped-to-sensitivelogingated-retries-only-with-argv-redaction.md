@@ -1,6 +1,9 @@
 ---
 status: accepted
-date: "2026-07-07"
+date: "2026-07-08"
+links:
+    precedent-for:
+        - "0038"
 comments:
     - author: Danielle McCool
       date: "2026-07-07 04:37:05"

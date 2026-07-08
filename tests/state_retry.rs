@@ -44,9 +44,10 @@ fn events_with_detail(tmp: &TempDir, id: &str) -> Vec<(String, Option<String>)> 
     rows
 }
 
-/// Assert the named event exists with the uniform `{"kind", "message"}`
-/// detail_json shape (shared with `mark_retryable_failure` — one schema per
-/// event type) and return its "kind" value.
+/// Assert the named event exists with the uniform `{"kind", "message",
+/// "policy"}` detail_json shape (ADR 0038 additive extension of the
+/// Epic 4a uniform-shape contract shared with `mark_retryable_failure` —
+/// one schema per event type) and return its "kind" value.
 fn detail_kind_of(events: &[(String, Option<String>)], event_type: &str) -> String {
     let (_, detail) = events
         .iter()
@@ -67,13 +68,28 @@ fn detail_kind_of(events: &[(String, Option<String>)], event_type: &str) -> Stri
         .to_string()
 }
 
+/// Assert the named event's `"policy"` key (ADR 0038) matches `expected`.
+fn assert_detail_policy(events: &[(String, Option<String>)], event_type: &str, expected: &str) {
+    let (_, detail) = events
+        .iter()
+        .find(|(t, _)| t == event_type)
+        .unwrap_or_else(|| panic!("expected a {event_type} event; got {events:?}"));
+    let detail: serde_json::Value =
+        serde_json::from_str(detail.as_deref().expect("detail_json present")).unwrap();
+    assert_eq!(
+        detail.get("policy").and_then(|p| p.as_str()),
+        Some(expected),
+        "{event_type} detail_json[\"policy\"] must be {expected:?}; got {detail}"
+    );
+}
+
 #[test]
 fn under_cap_requeues_to_pending_unowned() {
     let tmp = TempDir::new().unwrap();
     // attempt_count is now 1 (claim bumped 0→1); cap 2 ⇒ retry budget remains.
     let (mut store, id) = store_with_claimed_row(&tmp, 0);
     let out = store
-        .record_fetch_failure(&id, "w1", "NoDataBlocks", "msg", 2, false, false)
+        .record_fetch_failure(&id, "w1", "NoDataBlocks", "msg", "frugal", 2, false, false)
         .unwrap();
     assert!(matches!(out, FailureRecordOutcome::Requeued));
     let (status, kind, attempts) = status_of(&tmp, &id);
@@ -105,7 +121,7 @@ fn at_cap_lands_in_exhausted_pool() {
     // Seeded at 1, claim bumps to 2; cap 2 ⇒ attempt_count < 2 is false.
     let (mut store, id) = store_with_claimed_row(&tmp, 1);
     let out = store
-        .record_fetch_failure(&id, "w1", "NoDataBlocks", "msg", 2, false, false)
+        .record_fetch_failure(&id, "w1", "NoDataBlocks", "msg", "frugal", 2, false, false)
         .unwrap();
     assert!(matches!(out, FailureRecordOutcome::Exhausted));
     assert_eq!(status_of(&tmp, &id).0, "failed_retryable");
@@ -116,7 +132,16 @@ fn requires_cookie_without_cookies_parks_regardless_of_budget() {
     let tmp = TempDir::new().unwrap();
     let (mut store, id) = store_with_claimed_row(&tmp, 0);
     let out = store
-        .record_fetch_failure(&id, "w1", "SensitiveLoginGated", "msg", 2, true, false)
+        .record_fetch_failure(
+            &id,
+            "w1",
+            "SensitiveLoginGated",
+            "msg",
+            "deterministic-audio",
+            2,
+            true,
+            false,
+        )
         .unwrap();
     assert!(matches!(out, FailureRecordOutcome::ParkedForCookies));
     let (status, kind, _) = status_of(&tmp, &id);
@@ -129,7 +154,16 @@ fn requires_cookie_with_cookies_requeues() {
     let tmp = TempDir::new().unwrap();
     let (mut store, id) = store_with_claimed_row(&tmp, 0);
     let out = store
-        .record_fetch_failure(&id, "w1", "SensitiveLoginGated", "msg", 2, true, true)
+        .record_fetch_failure(
+            &id,
+            "w1",
+            "SensitiveLoginGated",
+            "msg",
+            "deterministic-audio",
+            2,
+            true,
+            true,
+        )
         .unwrap();
     assert!(matches!(out, FailureRecordOutcome::Requeued));
     assert_eq!(status_of(&tmp, &id).0, "pending");
@@ -145,6 +179,7 @@ fn stale_claim_mutates_nothing() {
             "DIFFERENT-WORKER",
             "NoDataBlocks",
             "msg",
+            "frugal",
             2,
             false,
             false,
@@ -162,7 +197,7 @@ fn cap_of_one_exhausts_on_first_failure() {
     // off-by-one contract at the boundary.
     let (mut store, id) = store_with_claimed_row(&tmp, 0);
     let out = store
-        .record_fetch_failure(&id, "w1", "NoDataBlocks", "msg", 1, false, false)
+        .record_fetch_failure(&id, "w1", "NoDataBlocks", "msg", "frugal", 1, false, false)
         .unwrap();
     assert!(matches!(out, FailureRecordOutcome::Exhausted));
     assert_eq!(status_of(&tmp, &id).0, "failed_retryable");
@@ -170,51 +205,71 @@ fn cap_of_one_exhausts_on_first_failure() {
 
 #[test]
 fn events_record_each_outcome() {
-    // Requeued → 'retry_requeued' with uniform {"kind", "message"} detail.
+    // Requeued → 'retry_requeued' with uniform {"kind", "message", "policy"}
+    // detail. Pins the "frugal" pass-through (ADR 0038 observability): the
+    // caller-supplied tag must land verbatim in the event detail.
     let tmp = TempDir::new().unwrap();
     let (mut store, id) = store_with_claimed_row(&tmp, 0);
     store
-        .record_fetch_failure(&id, "w1", "NoDataBlocks", "msg", 2, false, false)
+        .record_fetch_failure(&id, "w1", "NoDataBlocks", "msg", "frugal", 2, false, false)
         .unwrap();
     let events = store.get_events_for_test(&id).unwrap();
     assert!(
         events.iter().any(|e| e.event_type == "retry_requeued"),
         "requeue must leave a retry_requeued event; got {events:?}"
     );
-    assert_eq!(
-        detail_kind_of(&events_with_detail(&tmp, &id), "retry_requeued"),
-        "NoDataBlocks"
-    );
+    let detail = events_with_detail(&tmp, &id);
+    assert_eq!(detail_kind_of(&detail, "retry_requeued"), "NoDataBlocks");
+    assert_detail_policy(&detail, "retry_requeued", "frugal");
 
     // ParkedForCookies → 'cookie_parked', same detail shape.
     let tmp = TempDir::new().unwrap();
     let (mut store, id) = store_with_claimed_row(&tmp, 0);
     store
-        .record_fetch_failure(&id, "w1", "SensitiveLoginGated", "msg", 2, true, false)
+        .record_fetch_failure(
+            &id,
+            "w1",
+            "SensitiveLoginGated",
+            "msg",
+            "deterministic-audio",
+            2,
+            true,
+            false,
+        )
         .unwrap();
+    let detail = events_with_detail(&tmp, &id);
     assert_eq!(
-        detail_kind_of(&events_with_detail(&tmp, &id), "cookie_parked"),
+        detail_kind_of(&detail, "cookie_parked"),
         "SensitiveLoginGated"
     );
+    assert_detail_policy(&detail, "cookie_parked", "deterministic-audio");
 
-    // Exhausted → 'failed_retryable' with the SAME {"kind", "message"} shape
-    // mark_retryable_failure writes: one detail schema per event type,
-    // regardless of which mutator emitted it.
+    // Exhausted → 'failed_retryable' with the SAME {"kind", "message",
+    // "policy"} shape mark_retryable_failure writes: one detail schema per
+    // event type, regardless of which mutator emitted it.
     let tmp = TempDir::new().unwrap();
     let (mut store, id) = store_with_claimed_row(&tmp, 1);
     store
-        .record_fetch_failure(&id, "w1", "NoDataBlocks", "msg", 2, false, false)
+        .record_fetch_failure(&id, "w1", "NoDataBlocks", "msg", "frugal", 2, false, false)
         .unwrap();
-    assert_eq!(
-        detail_kind_of(&events_with_detail(&tmp, &id), "failed_retryable"),
-        "NoDataBlocks"
-    );
+    let detail = events_with_detail(&tmp, &id);
+    assert_eq!(detail_kind_of(&detail, "failed_retryable"), "NoDataBlocks");
+    assert_detail_policy(&detail, "failed_retryable", "frugal");
 
     // StaleClaim → no event row at all; only claim_next's 'claimed' remains.
     let tmp = TempDir::new().unwrap();
     let (mut store, id) = store_with_claimed_row(&tmp, 0);
     let out = store
-        .record_fetch_failure(&id, "OTHER-WORKER", "NoDataBlocks", "msg", 2, false, false)
+        .record_fetch_failure(
+            &id,
+            "OTHER-WORKER",
+            "NoDataBlocks",
+            "msg",
+            "frugal",
+            2,
+            false,
+            false,
+        )
         .unwrap();
     assert!(matches!(out, FailureRecordOutcome::StaleClaim));
     let events = events_with_detail(&tmp, &id);

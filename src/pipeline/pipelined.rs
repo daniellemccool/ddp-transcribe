@@ -166,6 +166,15 @@ pub type SharedStore = std::sync::Arc<tokio::sync::Mutex<Store>>;
 /// `run_pipelined` is wired in `main.rs`, every field is read on the
 /// bin path (via destructuring inside `transcribe_worker`) — no
 /// `dead_code` suppression needed.
+///
+/// `fetch_policy_tag` (ADR 0038) is the [`crate::fetcher::FetchPolicy::tag`]
+/// of the format policy this item was actually fetched under, stamped by
+/// `fetch_worker` from its `FetchOpts` at fetch time. `transcribe_worker`
+/// passes it straight through to `record_fetch_failure` on a
+/// transcribe-side retryable — recomputing from `claim` there would be
+/// correct too (the policy is a pure function of `last_retryable_kind`,
+/// per `format_policy_for`), but stamping it here avoids a second
+/// classification-table-shaped lookup off the hot path.
 #[derive(Debug)]
 pub struct FetchedItem {
     pub claim: Claim,
@@ -173,6 +182,7 @@ pub struct FetchedItem {
     pub samples_len: usize,
     pub wav_path: PathBuf,
     pub fetcher_name: &'static str,
+    pub fetch_policy_tag: &'static str,
 }
 
 /// Phase 2 fetch worker. Claims pending rows; fetches + decodes WAVs;
@@ -315,6 +325,10 @@ pub async fn fetch_worker(
                     // `write_artifacts_and_mark` (instead of a hardcoded
                     // "ytdlp" literal).
                     fetcher_name: fetcher.name(),
+                    // ADR 0038: stamp the policy this item was actually
+                    // fetched under, so a transcribe-side retryable can
+                    // record the accurate tag instead of recomputing.
+                    fetch_policy_tag: fetch_opts.format_policy.tag(),
                 };
                 if sender.send(item).await.is_err() {
                     // Channel closed — transcribe_worker exited (panic or
@@ -395,6 +409,7 @@ pub async fn fetch_worker(
                                 &worker_id,
                                 &label,
                                 &ctx.message(),
+                                fetch_opts.format_policy.tag(),
                                 opts.retries + 1,
                                 requires_cookie,
                                 opts.cookies_file.is_some(),
@@ -520,6 +535,7 @@ pub async fn transcribe_worker(
             samples_len,
             wav_path,
             fetcher_name,
+            fetch_policy_tag,
         } = item;
 
         tracing::info!(
@@ -651,6 +667,7 @@ pub async fn transcribe_worker(
                                 &worker_id,
                                 &label,
                                 &ctx.message(),
+                                fetch_policy_tag,
                                 opts.retries + 1,
                                 requires_cookie,
                                 opts.cookies_file.is_some(),

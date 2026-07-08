@@ -12,12 +12,54 @@ pub enum Acquisition {
     AudioFile(PathBuf),
 }
 
-/// Per-request fetch options (Epic 3). Cookie scope is policy: ADR 0035
-/// pins cookies to SensitiveLoginGated retries only; this struct just
-/// carries the decision to the tool adapter.
+/// Fetch-format selection policy (staged experiment, ADR 0038 — see
+/// `ytdlp::build_yt_dlp_args`'s doc comment for the selector strings,
+/// probe evidence, and the yt-dlp-issue caveat).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FetchPolicy {
+    /// Pre-muxed audio with selection-time fallbacks (`-f
+    /// "download/b[vcodec=h264]/b"`) — byte-identical to the selector the
+    /// pilot ran, and the default for fresh claims and every retry kind
+    /// except `NoDataBlocks`. Retained as default on pilot-scale evidence:
+    /// the 2026-07-08 frugal probe is n=17, yt-dlp #16622 is an open issue
+    /// against exactly the ABR formats the frugal selector prefers, and
+    /// there is no evidence yet about differential rate-limiting between
+    /// the two format populations.
+    #[default]
+    DeterministicAudio,
+    /// Smallest audio-tagged combined format (`-f "b[acodec!=none]/b"`).
+    /// Never selects TikTok's `download` static asset. Applied only to a
+    /// retry whose prior failure classified `NoDataBlocks` — the
+    /// download-advertised-but-unservable mechanism, where re-picking
+    /// `download` would reproduce the mid-transfer failure. The parked
+    /// pilot backlog (~2,318 rows) retried under this policy is the
+    /// at-scale experiment that a future frugal-default flip is contingent
+    /// on (ADR 0038 names the decision trigger).
+    Frugal,
+}
+
+impl FetchPolicy {
+    /// Short stable tag recorded as the `"policy"` key in the detail JSON
+    /// of every event `Store::record_fetch_failure` writes (ADR 0038
+    /// observability: the failure mix must be attributable to the format
+    /// policy the fetch actually ran under).
+    pub fn tag(&self) -> &'static str {
+        match self {
+            FetchPolicy::DeterministicAudio => "deterministic-audio",
+            FetchPolicy::Frugal => "frugal",
+        }
+    }
+}
+
+/// Per-request fetch options (Epic 3 cookies; ADR 0038 format policy).
+/// Cookie scope is policy: ADR 0035 pins cookies to SensitiveLoginGated
+/// retries only. Format-policy scope is likewise policy: `Frugal` is keyed
+/// on `NoDataBlocks` retries (see `pipeline::cookie_opts_for`). This
+/// struct just carries both decisions to the tool adapter.
 #[derive(Debug, Clone, Default)]
 pub struct FetchOpts {
     pub cookies_file: Option<PathBuf>,
+    pub format_policy: FetchPolicy,
 }
 
 #[async_trait]

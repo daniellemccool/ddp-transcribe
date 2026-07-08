@@ -401,3 +401,30 @@ observed in the wild.
 replacement between every character of `excerpt`, corrupting the stderr
 excerpt beyond readability. A one-line guard (`if path.as_os_str().is_empty()
 { return excerpt; }`) closes it.
+
+---
+
+### Pipelined transcribe worker holds the Store mutex across artifact writes, not just `mark_succeeded`
+
+**Found in:** transcript-storage assessment (Epic 4a close-out, format-selector
+worktree). Related to, but narrower than, the T17 entry above (that entry is
+about stall risk under `TOKIO_WORKER_THREADS=1`; this one is about lock-scope
+minimization specifically).
+**Disposition:** Deferred; today's per-video artifact-write cost (~5-20ms, 4
+fsyncs, ~10-25KB) is small next to the ~1-2s transcription call it follows, so
+the extra mutex hold time is not currently a measured bottleneck.
+**Trigger to revisit:** Epic 5 perf sweep, or if a future bake shows fetch
+workers starved on `claim_next` during the write+mark phase.
+
+`src/pipeline/pipelined.rs` (`transcribe_worker`, ~lines 562-574) acquires the
+shared `Store` mutex once and holds it across the whole
+`write_artifacts_and_mark` call — both the artifact writes/fsyncs (which need
+no `Store` access) and the `mark_succeeded` DB write (which does). Per 0008,
+the ordering (artifacts durable before `mark_succeeded`) is load-bearing and
+must not change; only the *lock scope* is the finding. A future perf pass
+could split `write_artifacts_and_mark` into a lock-free artifact-write phase
+followed by a narrowly-scoped `store.lock().await` around just
+`mark_succeeded`, preserving the 0008 ordering while shrinking the window
+other fetch workers are blocked from `claim_next`. Any such change is
+0008-ordering-sensitive and should land as its own reviewed change, not
+bundled into an unrelated task.

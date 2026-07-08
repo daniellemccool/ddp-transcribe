@@ -4,7 +4,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::errors::FetchError;
-use crate::fetcher::{Acquisition, FetchOpts, VideoFetcher};
+use crate::fetcher::{Acquisition, FetchOpts, FetchPolicy, VideoFetcher};
 use crate::process::{run, CommandSpec};
 
 pub struct YtDlpFetcher {
@@ -27,18 +27,46 @@ impl YtDlpFetcher {
 ///
 /// Pure function: no I/O, no global state. Unit-testable.
 ///
-/// The `-f` selector prefers TikTok's `download` format — the pre-rendered
-/// share-link MP4 served as a static asset, h264 at ~540p, pre-muxed
-/// deterministically. It comes from a different TikTok pipeline than the
-/// `bitrateInfo` ABR variants documented in yt-dlp issues #15891 / #16622,
-/// which intermittently serve h265 video-only files despite being tagged
-/// `acodec=aac` by the extractor (`yt_dlp/extractor/tiktok.py` stamps the
-/// claim in `COMMON_FORMAT_INFO`, regardless of what TikTok's CDN actually
-/// muxes). We discard video frames during postprocessing, so the visible
-/// "watermarked" label on `download` has no effect on our output.
+/// `policy` selects the `-f` selector (staged experiment, ADR 0038):
 ///
-/// Fallbacks: best h264 (for videos where the creator has disabled
-/// download), then any best (defense against extractor changes).
+/// - [`FetchPolicy::DeterministicAudio`] (`-f "download/b[vcodec=h264]/b"`,
+///   the default): TikTok's `download` format — the pre-rendered share-link
+///   MP4 served as a static asset, h264 at ~540p, pre-muxed
+///   deterministically — with selection-time fallbacks (best h264, then any
+///   best). Byte-identical to the selector the pilot ran, retained as
+///   default on that pilot-scale record (the frugal probe below is n=17).
+///   `download` comes from a different TikTok pipeline than the
+///   `bitrateInfo` ABR variants documented in yt-dlp issues #15891 /
+///   #16622, which intermittently serve h265 video-only files despite
+///   being tagged `acodec=aac` by the extractor
+///   (`yt_dlp/extractor/tiktok.py` stamps the claim in
+///   `COMMON_FORMAT_INFO`, regardless of what TikTok's CDN actually muxes)
+///   — #16622 is still open against exactly the ABR formats the frugal
+///   selector prefers, part of why the frugal flip is staged rather than
+///   immediate. We discard video frames during postprocessing, so the
+///   visible "watermarked" label on `download` has no effect on our output.
+/// - [`FetchPolicy::Frugal`] (`-f "b[acodec!=none]/b"`): picks the smallest
+///   audio-tagged combined format and never selects `download`. Applied
+///   only to a retry whose prior failure classified `NoDataBlocks` —
+///   `download`'s advertised-but-unservable failure mode (selection
+///   succeeds, transfer dies with "Did not get any data blocks"; the
+///   entire 2,318-row pilot class), which a selection-time fallback chain
+///   cannot recover mid-transfer, so the retry must not re-pick `download`.
+///   2026-07-08 probe evidence: the smallest advertised audio-bearing
+///   format served 17/17 probe videos with a real audio stream (verified
+///   via ffprobe), including TikTok's occasional audio-only `audio` format
+///   (509 KB vs multi-MB video), at ~3x smaller footprint than `download`
+///   (39.9 MB vs 116.1 MB over the 14 videos where both landed). Verified
+///   against probe fixtures: `-f "b[acodec!=none]/b"` + the `-S` sort
+///   below picked h264_540p_298119-1 (228 KB) on a poisoned-class video,
+///   h264_540p_235617-1 (261 KB) on a small video, and `audio` on a
+///   slideshow post. The bare `/b` fallback keeps the retry net closed: a
+///   video advertising only audio-less formats (or an ABR liar per the
+///   issues above) still downloads via `/b`, fails at wav extraction,
+///   classifies as `FfprobePostprocess`, and simply retries on the
+///   deterministic default — no special routing needed. A selector that
+///   failed at selection time instead would strand such videos on a
+///   generic label.
 ///
 /// `cookies` (Epic 3, ADR 0035): when `Some`, appends `--cookies <path>`
 /// immediately before the trailing `source_url` positional. The returned
@@ -49,8 +77,13 @@ fn build_yt_dlp_args(
     video_id: &str,
     source_url: &str,
     video_dir: &Path,
+    policy: FetchPolicy,
     cookies: Option<&Path>,
 ) -> (Vec<String>, PathBuf, Vec<usize>) {
+    let selector = match policy {
+        FetchPolicy::DeterministicAudio => "download/b[vcodec=h264]/b",
+        FetchPolicy::Frugal => "b[acodec!=none]/b",
+    };
     let output_template = format!("{}/{}.%(ext)s", video_dir.display(), video_id);
     let wav_path = video_dir.join(format!("{video_id}.wav"));
     let mut args = vec![
@@ -58,15 +91,16 @@ fn build_yt_dlp_args(
         "--no-warnings".into(),
         "--quiet".into(),
         "-f".into(),
-        "download/b[vcodec=h264]/b".into(),
+        selector.into(),
         // T7 perf-tweaks: `-S` only affects format ordering within a
-        // selector match. `download` is a literal format ID, so the
-        // success path is unaffected. The fallback `b[vcodec=h264]/b`
-        // benefits — prefer smallest viable combined format, defensive
-        // against future extractor drift or larger-than-needed h264
-        // streams. T13 A10 bake reported 100% selector hit rate on
-        // news_orgs (0/20 fallback); T8 bake against the same fixture
-        // confirms this change is inert on the current data set.
+        // selector match. When `policy` is `DeterministicAudio`, `download`
+        // is a literal format ID, so the success path is unaffected there;
+        // the `b[vcodec=h264]/b` fallback (and the `Frugal` selector's own
+        // match) benefit — prefer smallest viable combined format, defensive
+        // against future extractor drift or larger-than-needed streams.
+        // T13 A10 bake reported 100% selector hit rate on news_orgs (0/20
+        // fallback); T8 bake against the same fixture confirms this change
+        // is inert on the current data set.
         "-S".into(),
         "+size,+br,+res,+fps".into(),
         "-x".into(),
@@ -128,6 +162,7 @@ impl VideoFetcher for YtDlpFetcher {
             video_id,
             source_url,
             &video_dir,
+            opts.format_policy,
             opts.cookies_file.as_deref(),
         );
 
@@ -168,10 +203,20 @@ impl VideoFetcher for YtDlpFetcher {
 mod tests {
     use super::*;
 
+    /// Staged experiment (ADR 0038): `FetchPolicy::DeterministicAudio` is
+    /// `Default` and must be the format `-f` emits when no policy override
+    /// applies — byte-identical to the selector the pilot ran.
     #[test]
-    fn build_args_selects_download_format_first() {
+    fn build_args_selects_download_format_by_default() {
         let video_dir = PathBuf::from("/tmp/test-dir");
-        let (args, _, _) = build_yt_dlp_args("abc123", "https://example.com/v", &video_dir, None);
+        let (args, _, _) = build_yt_dlp_args(
+            "abc123",
+            "https://example.com/v",
+            &video_dir,
+            FetchPolicy::default(),
+            None,
+        );
+        assert_eq!(FetchPolicy::default(), FetchPolicy::DeterministicAudio);
 
         let f_idx = args
             .iter()
@@ -180,17 +225,13 @@ mod tests {
         assert_eq!(
             args.get(f_idx + 1).map(String::as_str),
             Some("download/b[vcodec=h264]/b"),
-            "selector must prefer TikTok's pre-muxed `download` static asset, \
-             fall back to best h264, then best — sidesteps yt-dlp #15891 \
-             bitrateInfo h265 muxing bug"
+            "default must prefer TikTok's pre-muxed `download` static asset, \
+             fall back to best h264, then best — the pilot-proven selector; \
+             sidesteps yt-dlp #15891/#16622 ABR liar-metadata bug"
         );
 
         // T7 perf-tweaks: -S sort flag must be present with the agreed
-        // value. -S does not change which selector matches; it orders
-        // within a match. Since `download` is a literal format ID, the
-        // success path is unaffected; -S only sorts when the
-        // b[vcodec=h264]/b fallback runs, preferring smallest viable
-        // combined format.
+        // value, and applies regardless of policy.
         let s_idx = args
             .iter()
             .position(|a| a == "-S")
@@ -202,6 +243,34 @@ mod tests {
         );
     }
 
+    /// `FetchPolicy::Frugal` (the NoDataBlocks-retry experiment variant,
+    /// ADR 0038) emits the smallest-audio-tagged selector and never
+    /// `download`.
+    #[test]
+    fn build_args_frugal_selects_smallest_audio_tagged() {
+        let video_dir = PathBuf::from("/tmp/test-dir");
+        let (args, _, _) = build_yt_dlp_args(
+            "abc123",
+            "https://example.com/v",
+            &video_dir,
+            FetchPolicy::Frugal,
+            None,
+        );
+
+        let f_idx = args
+            .iter()
+            .position(|a| a == "-f")
+            .expect("-f flag must be present");
+        assert_eq!(
+            args.get(f_idx + 1).map(String::as_str),
+            Some("b[acodec!=none]/b"),
+            "Frugal must select the smallest audio-tagged combined format \
+             and never touch TikTok's `download` static asset — a \
+             NoDataBlocks retry must not re-pick the format that died \
+             mid-transfer"
+        );
+    }
+
     #[test]
     fn build_args_enforces_audio_input_invariant() {
         // 0014: audio input is float32 PCM 16 kHz mono. The yt-dlp
@@ -210,7 +279,13 @@ mod tests {
         // stream-selection contract explicit (drop video/subtitle/data
         // streams, map first audio stream, pin pcm_s16le).
         let video_dir = PathBuf::from("/tmp/test-dir");
-        let (args, _, _) = build_yt_dlp_args("abc123", "https://example.com/v", &video_dir, None);
+        let (args, _, _) = build_yt_dlp_args(
+            "abc123",
+            "https://example.com/v",
+            &video_dir,
+            FetchPolicy::default(),
+            None,
+        );
         assert!(
             args.iter()
                 .any(|a| a == "ffmpeg:-vn -sn -dn -map 0:a:0 -c:a pcm_s16le -ar 16000 -ac 1"),
@@ -222,21 +297,32 @@ mod tests {
     #[test]
     fn build_args_wav_path_matches_output_template() {
         let video_dir = PathBuf::from("/tmp/test-dir");
-        let (_, wav_path, _) =
-            build_yt_dlp_args("xyz789", "https://example.com/v", &video_dir, None);
+        let (_, wav_path, _) = build_yt_dlp_args(
+            "xyz789",
+            "https://example.com/v",
+            &video_dir,
+            FetchPolicy::default(),
+            None,
+        );
         assert_eq!(wav_path, PathBuf::from("/tmp/test-dir/xyz789.wav"));
     }
 
     /// Epic 3 T08: when a cookie path is supplied, `--cookies <path>` is
     /// appended before the trailing `source_url` positional, and the path
     /// arg's index is reported for `CommandSpec::redact_arg_indices` so it
-    /// never lands in the structured subprocess log.
+    /// never lands in the structured subprocess log. Cookie-arg behavior is
+    /// unaffected by `FetchPolicy`.
     #[test]
     fn build_args_appends_cookies_and_reports_redact_index() {
         let video_dir = PathBuf::from("/tmp/test-dir");
         let cookie = PathBuf::from("/secret/tiktok-cookies.txt");
-        let (args, _, redact) =
-            build_yt_dlp_args("abc123", "https://example.com/v", &video_dir, Some(&cookie));
+        let (args, _, redact) = build_yt_dlp_args(
+            "abc123",
+            "https://example.com/v",
+            &video_dir,
+            FetchPolicy::default(),
+            Some(&cookie),
+        );
         let ci = args
             .iter()
             .position(|a| a == "--cookies")
@@ -262,8 +348,13 @@ mod tests {
     #[test]
     fn build_args_without_cookies_is_unchanged() {
         let video_dir = PathBuf::from("/tmp/test-dir");
-        let (args, _, redact) =
-            build_yt_dlp_args("abc123", "https://example.com/v", &video_dir, None);
+        let (args, _, redact) = build_yt_dlp_args(
+            "abc123",
+            "https://example.com/v",
+            &video_dir,
+            FetchPolicy::default(),
+            None,
+        );
         assert!(!args.iter().any(|a| a == "--cookies"));
         assert!(redact.is_empty());
     }

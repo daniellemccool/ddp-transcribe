@@ -380,6 +380,65 @@ async fn fetch_worker_threads_cookies_on_sensitive_login_gated_retry() -> anyhow
     Ok(())
 }
 
+/// Staged experiment (ADR 0038): a claim whose `last_retryable_kind` is
+/// `NoDataBlocks` (the download-advertised-but-unservable class — the
+/// parked pilot backlog) must fetch with `FetchPolicy::Frugal` and no
+/// cookies, through the real `fetch_worker` dispatch path — mirrors
+/// `fetch_worker_threads_cookies_on_sensitive_login_gated_retry` above, but
+/// seeds the retryable kind via a raw UPDATE on a still-pending row (no
+/// requeue-cycle needed since the format gate only reads
+/// `last_retryable_kind`, not status).
+#[tokio::test]
+async fn fetch_worker_uses_frugal_on_no_data_blocks_retry() -> anyhow::Result<()> {
+    use std::sync::Arc;
+
+    use ddp_transcribe::fetcher::{FetchPolicy, VideoFetcher};
+
+    let video_id = "7000000000000000099";
+    let (store, tmp) = store_with_pending(&[video_id]);
+
+    // Seed the still-pending row's last_retryable_kind via raw UPDATE — the
+    // sweep-free flow that makes a format-blamed retry claimable (same
+    // technique as the parked-row reseed in the cookie-parking test above).
+    {
+        let db = tmp.path().join("state.sqlite");
+        let raw = rusqlite::Connection::open(&db)?;
+        let changed = raw.execute(
+            "UPDATE videos SET last_retryable_kind = 'NoDataBlocks' WHERE video_id = ?1",
+            [video_id],
+        )?;
+        assert_eq!(changed, 1, "row must be seeded with NoDataBlocks kind");
+    }
+
+    let wav = tmp.path().join(format!("{video_id}.wav"));
+    std::fs::copy(silence_fixture(), &wav)?;
+    let map = HashMap::from([(video_id.to_string(), wav)]);
+    let fetcher = Arc::new(FakeFetcher {
+        canned: Mutex::new(map),
+        always_fails: false,
+        first_call_gate: tokio::sync::Mutex::new(None),
+        canned_stderr: std::sync::Mutex::new(None),
+        received_opts: std::sync::Mutex::new(Vec::new()),
+        fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
+    });
+
+    run_single_fetch_worker(store.clone(), Arc::clone(&fetcher) as Arc<dyn VideoFetcher>).await;
+
+    let recorded = fetcher.received_opts.lock().expect("received_opts mutex");
+    assert_eq!(recorded.len(), 1, "exactly one acquire call");
+    assert_eq!(
+        recorded[0].format_policy,
+        FetchPolicy::Frugal,
+        "a NoDataBlocks retry must not re-pick the format that died mid-transfer"
+    );
+    assert_eq!(
+        recorded[0].cookies_file, None,
+        "NoDataBlocks never carries cookies"
+    );
+
+    Ok(())
+}
+
 /// Epic 4a T06: a retryable fetch failure requeues the row to 'pending'
 /// (end of queue, T05 ordering) and the SAME batch re-claims and recovers
 /// it. `fails_n_times_then_succeeds(1, ..)` fails once with a NoDataBlocks

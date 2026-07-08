@@ -204,14 +204,54 @@ pub fn classify_fetch_phase(
     }
 }
 
-/// Kind-gated cookie routing (Epic 3 T08, ADR 0035; Epic 4a T03: the gate
-/// now consults the active [`crate::classification::ClassificationTable`]
-/// instead of a hardcoded tag): cookies ride on a fetch iff the claim's
-/// most recent retryable failure's label resolves to disposition
-/// `requires-cookie` in the active table AND the operator supplied
-/// `--cookies-file`. First attempts (`last_retryable_kind == None`) never
-/// get cookies, and labels the active table doesn't recognize (e.g. the
-/// historical placeholder `"Fetch"`) resolve to `None` and never qualify.
+/// Format-policy routing (staged experiment, ADR 0038 — evidence and
+/// rationale live on [`crate::fetcher::FetchPolicy`] and
+/// `ytdlp::build_yt_dlp_args`'s doc comment): a retry whose prior failure
+/// classified `NoDataBlocks` gets [`crate::fetcher::FetchPolicy::Frugal`]
+/// — that class is `download`'s advertised-but-unservable failure
+/// mechanism (selection succeeds, the transfer dies with "Did not get any
+/// data blocks"), and a selection-time fallback chain cannot recover
+/// mid-transfer, so the retry must not re-pick `download`. Every other
+/// kind and fresh claims (`last_retryable_kind == None`) stay
+/// [`crate::fetcher::FetchPolicy::DeterministicAudio`], the pilot-proven
+/// default.
+///
+/// `"NoDataBlocks"` is not one of `failure::labels`'s four structural
+/// constants (`ToolTimeout`/`NetworkTransient`/`YtDlpOther`/
+/// `TranscribeOther`, all code-mapped) — it's a
+/// classification-table-defined label (see
+/// `classification::DEFAULT_TABLE_TOML`), so it's compared here as a
+/// literal, the same way [`cookie_opts_for`] would if the active table had
+/// no dedicated disposition to key its own gate on.
+fn format_policy_for(claim: &Claim) -> crate::fetcher::FetchPolicy {
+    use crate::fetcher::FetchPolicy;
+    match claim.last_retryable_kind.as_deref() {
+        // "NoDataBlocks" is a PINNED (reserved) label: the override
+        // contract depends on this exact string, and — unlike the cookie
+        // gate, which resolves through `table.disposition_of()` — it does
+        // NOT consult the active classification table. A custom
+        // `--classification` table that renames the label silently
+        // disables the frugal retry, so custom tables must keep it
+        // verbatim (ADR 0038 Consequences records this dependency).
+        Some("NoDataBlocks") => FetchPolicy::Frugal,
+        _ => FetchPolicy::DeterministicAudio,
+    }
+}
+
+/// Kind-gated per-claim fetch-options routing. Cookie half (Epic 3 T08, ADR
+/// 0035; Epic 4a T03: the gate now consults the active
+/// [`crate::classification::ClassificationTable`] instead of a hardcoded
+/// tag): cookies ride on a fetch iff the claim's most recent retryable
+/// failure's label resolves to disposition `requires-cookie` in the active
+/// table AND the operator supplied `--cookies-file`. First attempts
+/// (`last_retryable_kind == None`) never get cookies, and labels the active
+/// table doesn't recognize (e.g. the historical placeholder `"Fetch"`)
+/// resolve to `None` and never qualify. Format-policy half: delegates to
+/// [`format_policy_for`]. The two gates key on different kinds
+/// (`SensitiveLoginGated` vs. `NoDataBlocks`) so they never both apply to
+/// the same claim — a `SensitiveLoginGated` retry keeps its cookie
+/// behavior with the `DeterministicAudio` default format, and a
+/// `NoDataBlocks` retry gets `Frugal` with `cookies_file: None`.
 pub(crate) fn cookie_opts_for(
     claim: &Claim,
     table: &crate::classification::ClassificationTable,
@@ -229,6 +269,7 @@ pub(crate) fn cookie_opts_for(
         } else {
             None
         },
+        format_policy: format_policy_for(claim),
     }
 }
 
@@ -536,6 +577,57 @@ mod tests {
         assert_eq!(
             cookie_opts_for(&mk(Some("Fetch")), &table, Some(&cookie)).cookies_file,
             None
+        );
+    }
+
+    /// Staged experiment (ADR 0038): a `NoDataBlocks` retry gets `Frugal`
+    /// and no cookies — the retry must not re-pick `download`, whose
+    /// mid-transfer failure is unrecoverable by a selection-time chain. A
+    /// `SensitiveLoginGated` retry keeps its cookie with the
+    /// `DeterministicAudio` default; `None` and every other kind
+    /// (explicitly including `FfprobePostprocess`, whose override was
+    /// retired by the operator reversal) stay `DeterministicAudio`.
+    #[test]
+    fn format_policy_frugal_only_for_no_data_blocks_retries() {
+        use crate::fetcher::FetchPolicy;
+
+        let table = crate::classification::ClassificationTable::compiled_default().unwrap();
+        let cookie = PathBuf::from("/secret/c.txt");
+        let mk = |kind: Option<&str>| Claim {
+            video_id: "7".into(),
+            source_url: "u".into(),
+            attempt_count: 1,
+            last_retryable_kind: kind.map(String::from),
+        };
+
+        let opts = cookie_opts_for(&mk(Some("NoDataBlocks")), &table, Some(&cookie));
+        assert_eq!(opts.format_policy, FetchPolicy::Frugal);
+        assert_eq!(
+            opts.cookies_file, None,
+            "NoDataBlocks never carries cookies"
+        );
+
+        let opts = cookie_opts_for(&mk(Some("SensitiveLoginGated")), &table, Some(&cookie));
+        assert_eq!(
+            opts.format_policy,
+            FetchPolicy::DeterministicAudio,
+            "the cookie gate's own retry kind must not affect format policy"
+        );
+        assert_eq!(opts.cookies_file, Some(cookie.clone()));
+
+        let opts = cookie_opts_for(&mk(None), &table, Some(&cookie));
+        assert_eq!(
+            opts.format_policy,
+            FetchPolicy::DeterministicAudio,
+            "fresh claims fetch under the pilot-proven default"
+        );
+
+        let opts = cookie_opts_for(&mk(Some("FfprobePostprocess")), &table, Some(&cookie));
+        assert_eq!(
+            opts.format_policy,
+            FetchPolicy::DeterministicAudio,
+            "the retired FfprobePostprocess override must not linger — \
+             the default already IS the deterministic path"
         );
     }
 }
