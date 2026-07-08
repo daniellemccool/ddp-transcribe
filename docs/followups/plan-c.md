@@ -164,3 +164,27 @@ the persisted `stderr_excerpt` uncorrected. Today's single fetcher/single
 call site doesn't hit this; worth a normalize-before-compare pass (e.g.
 `std::fs::canonicalize` both sides, or match on the basename as a fallback)
 before a second engine's stderr conventions are in scope.
+
+---
+
+### Revisit DB-at-runtime transcript storage only under a concrete scale or research trigger
+
+**Found in:** transcript-storage assessment (Epic 4a close-out, format-selector
+worktree).
+**Disposition:** Deferred — measured evidence says the current
+artifacts-on-disk design is the right one at present scale. Runtime artifact
+writing costs ~5-20ms/video (4 fsyncs, ~10-25KB) against a ~1-2s transcription
+call, i.e. noise; and moving transcripts into the DB would make
+sync-to-storage strictly worse, because a sqlite `.backup` of a 10-25GB
+database re-ships the whole file where incremental rsync of per-video
+artifacts ships only deltas.
+**Trigger to revisit:** either (1) the ADR-0004 ~1M-small-files ceiling
+approaches on the transcripts tree, or (2) SQL-queryable transcripts become an
+actual research need. Absent one of those, do not open this.
+
+If a trigger fires, the change is its own epic, not a task: schema v4 (a
+transcripts table + migration), an export subcommand (DB → per-video files for
+researchers who want files), and a redesign of the sync-to-storage path away
+from whole-file DB shipping. The pipelined write path's 0008 invariant
+(artifacts durable before `mark_succeeded`) would need a DB-transactional
+restatement.

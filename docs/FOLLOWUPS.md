@@ -78,6 +78,7 @@ resolved entries archived under "Resolved by Plan B Epic 4a".
 - Epic 3 final review: `run_serial` fetch/transcribe downcast asymmetry (see tripwire in `src/pipeline/serial.rs`; the bundle's discarded-count half resolved by Epic 4a T06, archived) → Epic 5 (or moot if `run_serial` retires)
 - Epic 3 final review: `FetchOpts` derived `Debug` doesn't redact `cookies_file` → Epic 5
 - Epic 3 final review: `scrub_cookie_path` empty-path guard → Epic 5
+- Transcript-storage assessment: pipelined transcribe worker holds Store mutex across artifact writes+fsyncs though only `mark_succeeded` needs it (0008-ordering-sensitive; own reviewed change) → Epic 5 (perf sweep)
 - Full Epic 5 entries: [followups/epic-5.md](followups/epic-5.md)
 
 **Plan C (short-link resolution, multi-engine, storage scale)**
@@ -88,6 +89,7 @@ resolved entries archived under "Resolved by Plan B Epic 4a".
 - T10-Epic1: Per-token text field doubles raw_signals payload → Plan C (compact JSON landed in perf-tweaks decdf6f; drop-text still deferred pending 0010 amendment)
 - T11 (split at Epic 3 close): yt-dlp argv `--` separator before `source_url` → Plan C (when resolved URLs reach the fetcher)
 - Epic 3 final review: `scrub_cookie_path` canonicalized/relative path-variant hardening → Plan C (multi-engine work)
+- Transcript-storage assessment: DB-at-runtime transcript storage (schema v4 + export subcommand + sync redesign; own epic) only if the ADR-0004 ~1M-small-files ceiling approaches or SQL-queryable transcripts become a research need → Plan C (storage scale)
 - Full Plan C entries: [followups/plan-c.md](followups/plan-c.md)
 
 **Cross-epic / ADR maintenance / verify-then-archive**
