@@ -16,11 +16,9 @@ mod fetcher;
 mod ingest;
 mod output;
 mod pipeline;
-mod probe;
 mod process;
 mod state;
 mod transcribe;
-mod triage;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -282,26 +280,6 @@ async fn main() -> Result<()> {
             }
             state::migrate::run_migrate(path).context("running migrate")?;
             tracing::info!(path = %path.display(), "migrate complete");
-        }
-        cli::Command::Triage {
-            dry_run,
-            rate,
-            max_attempts,
-        } => {
-            let mut store = state::Store::open(&cfg.state_db).context("opening state DB")?;
-            let oracle = probe::CurlProber {
-                timeout: std::time::Duration::from_secs(15),
-            };
-            let opts = triage::TriageOptions {
-                dry_run,
-                rate_per_sec: rate,
-                max_attempts,
-            };
-            let stats = triage::run_triage(&mut store, &oracle, &opts).await?;
-            if dry_run {
-                println!("DRY RUN — no rows were modified");
-            }
-            print!("{stats}");
         }
     }
 

@@ -156,6 +156,12 @@ fn truncate_to_char_boundary(s: &mut String, max_bytes: usize) {
 /// pool moves only when cookies are configured — no attempt bump either
 /// way (sweeping isn't fetching). Idempotent: a concurrent second sweep's
 /// predicates all miss.
+///
+/// Note on a `terminal` fallback: an operator table whose fallback is
+/// `terminal` write-offs even non-fetch rows (e.g. a stored `ToolTimeout`)
+/// under the fallback label, since a fallback hit relabels on the terminal
+/// arm. The audit trail survives — `last_retryable_kind`/`last_retryable_message`
+/// still carry the row's real pre-sweep classification.
 pub fn run_sweep(
     store: &mut Store,
     table: &ClassificationTable,

@@ -51,14 +51,23 @@ pub struct VideoRow {
 #[derive(Debug)]
 pub struct ParkedRow {
     pub video_id: String,
-    // 0002: genuinely unread by `batch::run_sweep` — the sweep re-derives
-    // the kind from `last_retryable_message` via `ClassificationTable::classify`
-    // and never consults the previously-stored (possibly placeholder, e.g.
-    // "Fetch") kind. Kept for Debug/audit visibility and API symmetry with
-    // the column set; not dead per se, just not read outside Debug.
-    #[allow(dead_code)]
+    /// The previously-stored retryable kind. `batch::run_sweep` reads it on a
+    /// FALLBACK classification hit (no rule matched): a fallback carries no
+    /// positive evidence about the message class, so a real stored kind (e.g.
+    /// `ToolTimeout` — a non-fetch failure the fetch-stderr table never
+    /// matches) is preserved rather than relabelled. Empty/NULL kinds and the
+    /// legacy placeholder `"Fetch"` still take the fallback label so they
+    /// normalize before the row becomes claimable. (0002 note removed: the
+    /// preserve-kind-on-fallback fix made this field a live read.)
     pub last_retryable_kind: Option<String>,
     pub last_retryable_message: Option<String>,
+    // 0002: read only by `Debug` and the integration tests since Epic 4a T08
+    // deleted the triage subcommand (its `run_triage` compared this against
+    // `--max-attempts`). `batch::run_sweep` caps via `retries + 1` passed to
+    // `sweep_requeue`, not from the snapshot, so the bin no longer reads this
+    // field. Suppressed rather than removed — the row-shape and the tests want
+    // it. Lift when a raw-connection consumer reads it again.
+    #[allow(dead_code)]
     pub attempt_count: i64,
 }
 
@@ -302,8 +311,9 @@ pub struct Claim {
     pub attempt_count: i64,
     /// Kind tag recorded by the most recent retryable failure, if any.
     /// None on first attempt. Epic 3 cookie routing keys on this being
-    /// "SensitiveLoginGated" (ADR 0035); triage's requeue normalizes
-    /// historical placeholder kinds before the row becomes claimable again.
+    /// "SensitiveLoginGated" (ADR 0035); the start-of-batch sweep's requeue
+    /// normalizes historical placeholder kinds before the row becomes
+    /// claimable again.
     // 0002: `#[allow(dead_code)]` lifted here (Task 08) — now read by
     // `pipeline::cookie_opts_for`'s kind-gated cookie routing.
     pub last_retryable_kind: Option<String>,
@@ -484,9 +494,10 @@ impl Store {
     // 0002: Epic 4a T06 switched every pipeline caller (fetch_worker,
     // transcribe_worker, run_serial) to `record_fetch_failure`, so the bin
     // no longer reaches this mutator. Integration tests
-    // (`tests/state_claims.rs`, `tests/triage.rs`, `tests/state_triage.rs`)
-    // still exercise it directly, hence dead_code-suppressed rather than
-    // deleted; revisit at the Epic 4a triage retirement (Task 08).
+    // (`tests/state_claims.rs`, `tests/state_sweep.rs`) still exercise it
+    // directly as a failed_retryable seeding helper, hence dead_code-suppressed
+    // rather than deleted. (Epic 4a T08 checked at triage retirement: retained —
+    // the direct-mutator tests still depend on it.)
     #[allow(dead_code)]
     pub fn mark_retryable_failure(
         &mut self,

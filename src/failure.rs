@@ -2,7 +2,7 @@
 //! maps `FetchError` / `TranscribeError` to a three-arm verdict the pipeline
 //! dispatches on. Patterns are evidence-derived from the 65k production run;
 //! see the fixture corpus in tests/fixtures/yt_dlp_stderr/ and ADR 0033 for
-//! the probe validation behind each verdict. Default-cautious: unmatched
+//! the evidence behind each verdict. Default-cautious: unmatched
 //! input is Retryable, never Bug.
 
 use crate::classification::{ClassificationTable, Disposition};
@@ -27,13 +27,13 @@ pub mod labels {
 pub struct FailureContext {
     // 0002: `tool`/`exit_code`/`signal` are populated for every verdict but
     // only read by `Debug` (dead-code analysis ignores derived-trait reads,
-    // per rustc's own diagnostic). Epic 3 T10 landed the triage subcommand
-    // WITHOUT reading these: triage classifies the *stored* message text
-    // directly via the classification table's `classify` (never
-    // reconstructing a `FailureContext`), and its census aggregates on the
-    // label string only — there is no raw tool/exit_code/signal display.
-    // Still genuinely dead; re-tagged rather than lifted. Revisit if a
-    // future task adds an operator-facing raw-context view.
+    // per rustc's own diagnostic). Nothing reconstructs a `FailureContext`
+    // to display them: the start-of-batch sweep classifies the *stored*
+    // message text directly via the classification table's `classify`, and
+    // both the sweep and run censuses aggregate on the label string only —
+    // there is no raw tool/exit_code/signal display anywhere. Still
+    // genuinely dead; re-tagged rather than lifted. Revisit if a future task
+    // adds an operator-facing raw-context view.
     #[allow(dead_code)]
     pub tool: &'static str,
     #[allow(dead_code)]

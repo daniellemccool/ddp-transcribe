@@ -116,9 +116,5 @@ name = "state_retry"
 required-features = ["test-helpers"]
 
 [[test]]
-name = "triage"
-required-features = ["test-helpers"]
-
-[[test]]
 name = "batch_census"
 required-features = ["test-helpers"]
