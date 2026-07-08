@@ -14,7 +14,7 @@
 | 05 | `11ef379` | `claim_next` orders `attempt_count ASC` (end-of-queue retries) + ordering tests |
 | 06 | `472ab9f` + `c7c4f1b` | Workers + serial dispatch through `record_fetch_failure`; `--retries` (default 1) + `--classification` CLI; review-adjudicated accounting (census gated on landed writes; `ProcessStats` input-side per ADR-0007; `compute_process_stats` deleted) |
 | 07 | `f24a433` + `7cc2a6e` | Start-of-batch sweep; `batch_runs` open/close in Process arm; census struct + persist + print; review fixes (UTF-8-safe truncation, preserve-kind-on-fallback, honest sweep-census doc) |
-| 08 | `551580a` + this commit | Retire triage/probe/`curl`; ADR slate (0036, 0037; 0034 superseded; 0033 comment) via `adg`; architecture-doc + src-vm updates; FOLLOWUPS archived with SHAs; this close doc |
+| 08 | `551580a` + `38857c1` + `6067c08` + final-review docs fixes | Retire triage/probe/`curl`; ADR slate (0036, 0037; 0034 superseded; 0033 comment) via `adg`; architecture-doc + src-vm updates; FOLLOWUPS archived with SHAs; this close doc |
 
 Verification at close: `cargo fmt` clean, `clippy --all-targets -D warnings` clean, `cargo test --features test-helpers -- --test-threads=1` green (244 pass, 0 fail; the triage retirement dropped 9 tests — 4 triage integration + 3 cli parse-rate + 2 probe unit; corrects `551580a`'s disclosed delta of 7, which overlooked `probe.rs`'s 2 unit tests), `adg validate` clean (34 ADRs).
 

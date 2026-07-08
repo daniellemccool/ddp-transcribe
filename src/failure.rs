@@ -39,7 +39,8 @@ pub struct FailureContext {
     #[allow(dead_code)]
     pub exit_code: Option<i32>,
     /// Unix signal that killed the tool, when applicable. Not read by the
-    /// classifiers themselves or by T10's triage census (see note above).
+    /// classifiers themselves or by the start-of-batch sweep/run census
+    /// (see note above).
     #[allow(dead_code)]
     pub signal: Option<i32>,
     pub stderr_excerpt: String,

@@ -63,7 +63,10 @@ CUDA_VISIBLE_DEVICES=0 ddp-transcribe \
 ```
 
 - Second GPU instance: same command with `CUDA_VISIBLE_DEVICES=1`. Concurrent
-  claiming against one state DB is designed-for.
+  claiming against one state DB is designed-for. Both instances run the
+  start-of-batch sweep; the mutator predicates make this safe, but the
+  second instance's sweep census will report the first's wins as
+  `kept_capped` (with warns) — expected, not a bug.
 - `--retries` (default 1) is the automatic in-batch retry budget per video:
   it caps **lifetime** attempts at `retries + 1` (compared against the row's
   `attempt_count`, which is bumped at claim time). Retries drain at the end of
@@ -95,7 +98,7 @@ CUDA_VISIBLE_DEVICES=0 ddp-transcribe \
   invisible to review. The repo lives on the workstation.
 - Terminal garbling over SSH: `export TERM=xterm-256color`.
 - The config log line prints `whisper_model_path` even for subcommands that never
-  load a model — cosmetic (FOLLOWUPS, Epic 4).
+  load a model — cosmetic (FOLLOWUPS, Epic 4b).
 - Bulk file transfer off the volume: iRODS/Yoda per-file overhead dominates below
   ~1 MB/file; parallelize disjoint shard ranges or use a bundle transfer. 120k
   files single-stream ≈ 24 h (measured 2026-07-07).

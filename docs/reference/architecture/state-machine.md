@@ -43,7 +43,7 @@ The schema is declared in `src/state/schema.rs`. Three application tables and on
 
 **`batch_runs`** — one row per `process` invocation (Epic 4a): the durable census and its generating policy. Opened at batch start with the params JSON and the active classification TOML (`policy_toml`), closed at batch end with the census JSON. A census without its policy is not reproducible attrition documentation, so both ride in the same row. (`src/state/schema.rs`)
 
-The schema currently ships at version `"3"` (`src/state/schema.rs`; `SCHEMA_VERSION` constant). A partial index on `(attempt_count, first_seen_at, video_id) WHERE status = 'pending'` accelerates `claim_next`'s attempt-aware scan — Epic 4a reordered it to `attempt_count ASC` first so retries drain behind fresh work (`src/state/schema.rs`).
+The schema currently ships at version `"3"` (`src/state/schema.rs`; `SCHEMA_VERSION` constant). A partial index on `(status, attempt_count, first_seen_at, video_id) WHERE status = 'pending'` accelerates `claim_next`'s attempt-aware scan — Epic 4a reordered it to `attempt_count ASC` first so retries drain behind fresh work (`src/state/schema.rs`).
 
 ### Lifecycle states
 

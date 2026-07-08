@@ -264,12 +264,13 @@ ALL `GlobalArgs` fields except `compute_lang_probs`. As of T11
 | `whisper_model` | no (this entry's original scope) |
 | `compute_lang_probs` | **yes** (the lone outlier) |
 | `stale_claim_threshold` | no (added in T11) |
+| `classification` | no (added in Epic 4a) |
 
-The Epic 5 cleanup sweep should add `global = true` to all six
+The Epic 5 cleanup sweep should add `global = true` to all seven
 non-`compute_lang_probs` flags in one commit. T11's
 `stale_claim_threshold` was deliberately left without `global = true`
 to match the prevailing project convention rather than create
-two-of-eight inconsistency.
+two-of-nine inconsistency.
 
 ---
 

@@ -686,13 +686,18 @@ work.
 **Resolution:** Superseded by Epic 4a. The Epic 3 `requeued` event whose
 `detail_json` carried only `{ "new_kind": ... }` is gone from the pipeline
 path; the in-pipeline retry decision writes a `retry_requeued` event whose
-detail carries the label and the lifetime `max_attempts` (`retries + 1`) at
-requeue time (`src/state/mod.rs::record_fetch_failure`). The start-of-batch
-sweep's `sweep_requeue` still writes a `requeued` event, but an operator
-reading the durable `batch_runs` census now sees per-attempt requeue/exhaust
-counts directly, so the original "can't tell how many attempts a requeue used
-up" gap is closed. (A richer per-event detail surface remains a 4b `status`
-concern, tracked there.)
+detail carries only `{"kind","message"}` (`src/state/mod.rs::record_fetch_failure`)
+— `max_attempts` was deliberately left out of the event shape for
+event-shape uniformity across `retry_requeued`/`cookie_parked` (adjudicated
+Task 04 decision), not an oversight. The start-of-batch sweep's
+`sweep_requeue` still writes a `requeued` event. Attempt context is durably
+reconstructable without a richer event: the `batch_runs` row's census
+(requeued/exhausted counts per batch) plus the same row's params JSON
+`retries` snapshot together tell an operator how many attempts a requeue
+used up, so the original "can't tell how many attempts a requeue used up"
+gap is closed at the `batch_runs` layer rather than the event layer. (A
+richer per-event detail surface remains a 4b `status` concern, tracked
+there.)
 
 ### Architecture-doc `uu-tiktok` naming sweep
 
