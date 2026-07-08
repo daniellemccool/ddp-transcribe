@@ -6,15 +6,15 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod audio;
+pub mod batch;
 pub mod canonical;
+pub mod classification;
 pub mod errors;
 pub mod failure;
 pub mod fetcher;
 pub mod ingest;
 pub mod output;
 pub mod pipeline;
-pub mod probe;
 pub mod process;
 pub mod state;
 pub mod transcribe;
-pub mod triage;

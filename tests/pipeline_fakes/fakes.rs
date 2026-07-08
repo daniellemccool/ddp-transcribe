@@ -9,7 +9,7 @@ use tempfile::TempDir;
 use tokio::sync::Mutex as TokioMutex;
 
 use ddp_transcribe::errors::TranscribeError;
-use ddp_transcribe::fetcher::VideoFetcher;
+use ddp_transcribe::fetcher::{FakeFetcher, VideoFetcher};
 use ddp_transcribe::pipeline::{fetch_worker, FetchedItem, ProcessOptions, SharedStore};
 use ddp_transcribe::state::Store;
 use ddp_transcribe::transcribe::{PerCallConfig, TranscribeOutput, Transcriber};
@@ -105,6 +105,33 @@ pub(crate) fn silence_fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/audio/silence_16khz_mono.wav")
 }
 
+/// A `FakeFetcher` that fails the first `n` acquires of `video_id` (with
+/// `stderr` as the failure text, so the classifier produces a specific
+/// verdict) and then returns the canned `wav` — the Epic 4a in-batch retry
+/// harness. Mirrors the `always_fails_*` constructor style, but builds the
+/// struct directly since its fields are `pub`.
+pub(crate) fn fails_n_times_then_succeeds(
+    n: u32,
+    video_id: &str,
+    wav: PathBuf,
+    stderr: &str,
+) -> FakeFetcher {
+    FakeFetcher {
+        canned: std::sync::Mutex::new(std::collections::HashMap::from([(
+            video_id.to_string(),
+            wav,
+        )])),
+        always_fails: false,
+        first_call_gate: tokio::sync::Mutex::new(None),
+        canned_stderr: std::sync::Mutex::new(Some(stderr.to_string())),
+        received_opts: std::sync::Mutex::new(Vec::new()),
+        fail_first_n: std::sync::Mutex::new(std::collections::HashMap::from([(
+            video_id.to_string(),
+            n,
+        )])),
+    }
+}
+
 /// Fresh `Store` (in a scratch `TempDir`) with one `pending` row per
 /// `video_id`, wrapped as a [`SharedStore`] so callers can hand it straight
 /// to `fetch_worker`/`run_pipelined`. The `TempDir` must outlive the store
@@ -144,6 +171,11 @@ pub(crate) async fn run_single_fetch_worker(store: SharedStore, fetcher: Arc<dyn
         download_workers: 3,
         channel_capacity: 2,
         cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
+        retries: 1,
     });
 
     let worker = tokio::spawn(fetch_worker(
@@ -151,8 +183,13 @@ pub(crate) async fn run_single_fetch_worker(store: SharedStore, fetcher: Arc<dyn
         store,
         fetcher,
         tx,
-        Arc::new(AtomicUsize::new(0)),
-        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)), // stale_after_failure
+        Arc::new(AtomicUsize::new(0)), // requeued_for_retry
+        Arc::new(AtomicUsize::new(0)), // exhausted_retries
+        Arc::new(AtomicUsize::new(0)), // parked_for_cookies
+        Arc::new(AtomicUsize::new(0)), // failed
+        Arc::new(TokioMutex::new(std::collections::BTreeMap::new())), // terminal_by_label
+        Arc::new(AtomicUsize::new(0)), // claims_counter
         opts,
     ));
 

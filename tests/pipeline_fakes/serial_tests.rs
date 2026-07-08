@@ -33,6 +33,7 @@ async fn pipeline_processes_one_video_to_succeeded_with_fake_fetcher() {
         first_call_gate: tokio::sync::Mutex::new(None),
         canned_stderr: std::sync::Mutex::new(None),
         received_opts: std::sync::Mutex::new(Vec::new()),
+        fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
     };
 
     let transcriber = FakeTranscriber::scripted(TranscribeOutput {
@@ -53,6 +54,11 @@ async fn pipeline_processes_one_video_to_succeeded_with_fake_fetcher() {
         download_workers: 3,
         channel_capacity: 2,
         cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
+        retries: 1,
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts)
@@ -108,6 +114,7 @@ async fn pipeline_writes_raw_signals_to_json_artifact() {
         first_call_gate: tokio::sync::Mutex::new(None),
         canned_stderr: std::sync::Mutex::new(None),
         received_opts: std::sync::Mutex::new(Vec::new()),
+        fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
     };
 
     // Scripted output with one realistic segment+token so the projection
@@ -139,6 +146,11 @@ async fn pipeline_writes_raw_signals_to_json_artifact() {
         download_workers: 3,
         channel_capacity: 2,
         cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
+        retries: 1,
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts)
@@ -230,6 +242,12 @@ async fn run_serial_classifies_fetch_failure_as_retryable_and_continues() -> any
         download_workers: 3,
         channel_capacity: 2,
         cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
+        // retries: 0 → immediate exhaust, isolating the marking behavior under test
+        retries: 0,
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts).await?;
@@ -237,9 +255,9 @@ async fn run_serial_classifies_fetch_failure_as_retryable_and_continues() -> any
     assert_eq!(stats.succeeded, 0);
     assert_eq!(stats.failed, 2);
 
-    // Both rows should be failed_retryable with the taxonomy kind
+    // Both rows should be failed_retryable with the taxonomy label
     // (Epic 3 T07: FakeFetcher::always_fails emits FetchError::NetworkError,
-    // which classify_fetch_error maps to RetryableKind::NetworkTransient —
+    // which classify_fetch_error maps to the "NetworkTransient" label —
     // the Epic 2 placeholder "FetchOrTranscribe" is gone).
     for vid in ["vid_a", "vid_b"] {
         let row = store.get_video_for_test(vid)?.expect("row");
@@ -288,7 +306,7 @@ async fn run_serial_classifies_fetch_failure_as_retryable_and_continues() -> any
 /// `FetchPhaseError` downcast misses; the `None` arm then walks the chain
 /// for a `TranscribeError` (`EmptyOutput` here, wrapped below a
 /// "transcribing …" context layer) and dispatches via
-/// `classify_transcribe_error` → `RetryableKind::TranscribeOther`.
+/// `classify_transcribe_error` → the "TranscribeOther" label.
 /// Confirms both arms (fetch and transcribe) route through the same Err
 /// branch in `run_serial`, landing on different (but both non-placeholder)
 /// kinds.
@@ -315,6 +333,7 @@ async fn run_serial_classifies_transcribe_failure_as_retryable_and_continues() -
         first_call_gate: tokio::sync::Mutex::new(None),
         canned_stderr: std::sync::Mutex::new(None),
         received_opts: std::sync::Mutex::new(Vec::new()),
+        fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
     };
     let transcriber = FakeTranscriber::always_fails_retryable();
 
@@ -328,6 +347,12 @@ async fn run_serial_classifies_transcribe_failure_as_retryable_and_continues() -
         download_workers: 3,
         channel_capacity: 2,
         cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
+        // retries: 0 → immediate exhaust, isolating the marking behavior under test
+        retries: 0,
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts).await?;
@@ -398,6 +423,11 @@ async fn run_serial_writes_off_ip_blocked_as_terminal() -> anyhow::Result<()> {
         download_workers: 3,
         channel_capacity: 2,
         cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
+        retries: 1,
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts).await?;
@@ -436,6 +466,7 @@ async fn run_serial_escalates_transcribe_bug_as_err() -> anyhow::Result<()> {
         first_call_gate: tokio::sync::Mutex::new(None),
         canned_stderr: std::sync::Mutex::new(None),
         received_opts: std::sync::Mutex::new(Vec::new()),
+        fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
     };
     let transcriber = FakeTranscriber::always_fails_bug();
 
@@ -449,6 +480,11 @@ async fn run_serial_escalates_transcribe_bug_as_err() -> anyhow::Result<()> {
         download_workers: 3,
         channel_capacity: 2,
         cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
+        retries: 1,
     };
 
     let result = run_serial(&mut store, &fetcher, &transcriber, opts).await;
@@ -468,6 +504,73 @@ async fn run_serial_escalates_transcribe_bug_as_err() -> anyhow::Result<()> {
     assert_eq!(
         row.last_retryable_kind, None,
         "no retryable mark must be recorded for a Bug"
+    );
+    Ok(())
+}
+
+/// Epic 4a T06: `--max-videos` caps total CLAIMS including retries. With one
+/// video, a fetcher that fails-once-then-succeeds, `retries: 1`, and
+/// `max_videos: Some(1)`, the single budget slot is spent on the first
+/// (failing) attempt: the row requeues to 'pending' but the budget is
+/// exhausted, so it is NOT re-claimed in this run. A follow-up run with a
+/// fresh budget completes it. Pins that the shared claims counter counts
+/// retry claims, not just fresh work.
+#[tokio::test]
+async fn max_videos_budget_counts_retries() -> anyhow::Result<()> {
+    use crate::fakes::fails_n_times_then_succeeds;
+
+    let tmp = TempDir::new()?;
+    let mut store = Store::open(&tmp.path().join("state.sqlite"))?;
+    store.upsert_video("vid_a", "https://example/a", false)?;
+
+    let wav = tmp.path().join("vid_a.wav");
+    std::fs::copy(silence_fixture(), &wav)?;
+    let fetcher = fails_n_times_then_succeeds(
+        1,
+        "vid_a",
+        wav,
+        "ERROR: [TikTok] vid_a: Did not get any data blocks; please try again later.",
+    );
+    let transcriber = FakeTranscriber::echo();
+
+    let mk_opts = || ProcessOptions {
+        worker_id: "test-worker".into(),
+        transcripts_root: tmp.path().join("transcripts"),
+        max_videos: Some(1),
+        compute_lang_probs: false,
+        transcribe_timeout: Duration::from_secs(5),
+        stale_claim_threshold: Duration::from_secs(60),
+        download_workers: 3,
+        channel_capacity: 2,
+        cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
+        retries: 1,
+    };
+
+    // Run 1: budget of 1 is consumed by the first (failing) attempt; the row
+    // requeues but is not re-claimed in this run.
+    let stats1 = run_serial(&mut store, &fetcher, &transcriber, mk_opts()).await?;
+    assert_eq!(stats1.claimed, 1, "budget honest: one claim only");
+    assert_eq!(stats1.requeued_for_retry, 1, "the failing attempt requeued");
+    assert_eq!(stats1.succeeded, 0);
+    let row = store.get_video_for_test("vid_a")?.expect("row");
+    assert_eq!(
+        row.status, "pending",
+        "requeued but never re-claimed this run (budget spent)"
+    );
+
+    // Run 2: fresh budget of 1 completes the requeued row (gate is now spent,
+    // so this attempt succeeds).
+    let stats2 = run_serial(&mut store, &fetcher, &transcriber, mk_opts()).await?;
+    assert_eq!(stats2.succeeded, 1, "the retry lands under a fresh budget");
+    let row = store.get_video_for_test("vid_a")?.expect("row");
+    assert_eq!(row.status, "succeeded");
+    assert_eq!(
+        row.attempt_count, 2,
+        "two real attempts across the two runs"
     );
     Ok(())
 }

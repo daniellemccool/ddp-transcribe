@@ -66,14 +66,16 @@ pub enum FetchError {
 #[derive(Debug, Error)]
 pub enum TranscribeError {
     // 0002: Plan A's whisper-cli subprocess constructed these (T11 deleted
-    // the legacy `transcribe()` fn). Epic 3 (ADR 0033) closed and put the
-    // richer failure taxonomy (`RetryableKind`, `UnavailableReason`, etc.) in
-    // `src/failure.rs` instead of rebuilding this enum — Epic 1's whisper-rs
-    // path surfaces deadline-elapse via `Cancelled` and internal failures via
-    // `Bug`, so `Timeout`, `Failed`, `EmptyOutput` remain unconstructed by the
-    // embedded engine. The errors.rs unit test keeps `Failed` alive; `Timeout`
-    // and `EmptyOutput` need the explicit suppression. Revisit if a
-    // subprocess engine returns, or at the Epic 5 dead-code sweep.
+    // the legacy `transcribe()` fn). Epic 3 (ADR 0033) closed without
+    // rebuilding this enum; as of Epic 4a the failure taxonomy is label
+    // strings driven by the classification table (`src/classification.rs`),
+    // with structural errors code-mapped in `src/failure.rs` — Epic 1's
+    // whisper-rs path surfaces deadline-elapse via `Cancelled` and internal
+    // failures via `Bug`, so `Timeout`, `Failed`, `EmptyOutput` remain
+    // unconstructed by the embedded engine. The errors.rs unit test keeps
+    // `Failed` alive; `Timeout` and `EmptyOutput` need the explicit
+    // suppression. Revisit if a subprocess engine returns, or at the Epic 5
+    // dead-code sweep.
     #[allow(dead_code)]
     #[error("whisper.cpp timed out after {duration:?}")]
     Timeout { duration: Duration },

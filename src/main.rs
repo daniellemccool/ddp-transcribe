@@ -5,7 +5,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 mod audio;
+mod batch;
 mod canonical;
+mod classification;
 mod cli;
 mod config;
 mod errors;
@@ -14,11 +16,9 @@ mod fetcher;
 mod ingest;
 mod output;
 mod pipeline;
-mod probe;
 mod process;
 mod state;
 mod transcribe;
-mod triage;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -72,8 +72,9 @@ async fn main() -> Result<()> {
         cli::Command::Process {
             max_videos,
             cookies_file,
+            retries,
         } => {
-            let store = state::Store::open(&cfg.state_db).context("opening state DB")?;
+            let mut store = state::Store::open(&cfg.state_db).context("opening state DB")?;
             std::fs::create_dir_all(&cfg.transcripts).context("creating transcripts dir")?;
             // Tmp cleanup at startup
             let removed = output::artifacts::cleanup_tmp_files(&cfg.transcripts)?;
@@ -83,6 +84,48 @@ async fn main() -> Result<()> {
 
             let work_dir = cfg.transcripts.join(".work");
             std::fs::create_dir_all(&work_dir).context("creating work dir")?;
+
+            // Epic 4a: the active classification policy — the operator's
+            // `--classification` TOML (validated, hard-fail) or the
+            // evidence-derived compiled default. Built before the sweep
+            // (which consumes it) and before the engine (fail fast on
+            // policy before paying model load).
+            let table = match &cfg.classification_path {
+                Some(p) => {
+                    let text = std::fs::read_to_string(p)
+                        .with_context(|| format!("reading classification file {}", p.display()))?;
+                    classification::ClassificationTable::from_toml_str(&text).with_context(
+                        || format!("validating classification file {}", p.display()),
+                    )?
+                }
+                None => classification::ClassificationTable::compiled_default()
+                    .context("loading compiled-default classification policy")?,
+            };
+            tracing::info!(
+                source = %cfg.classification_path.as_deref().map_or_else(
+                    || "compiled-default".to_string(),
+                    |p| p.display().to_string()
+                ),
+                rules = table.rule_count(),
+                "classification policy active"
+            );
+            let classification = std::sync::Arc::new(table);
+
+            // Epic 4a: open the batch_runs row (policy snapshot + params) and
+            // run the start-of-batch sweep of parked failures BEFORE the
+            // engine loads its model — fail fast on policy before paying
+            // that cost.
+            let params_json = serde_json::json!({
+                "retries": retries,
+                "max_videos": max_videos,
+                "cookies_present": cookies_file.is_some(),
+                "download_workers": cfg.download_workers,
+                "worker_host": hostname_or_default(),
+            })
+            .to_string();
+            let run_id = store.open_batch_run(&params_json, classification.source_toml())?;
+            let sweep_stats =
+                batch::run_sweep(&mut store, &classification, retries, cookies_file.is_some())?;
 
             // Construct WhisperEngine once at the top of Process. Loads the
             // model on the worker thread and blocks until init succeeds or
@@ -116,6 +159,8 @@ async fn main() -> Result<()> {
             let fetcher: std::sync::Arc<dyn fetcher::VideoFetcher> = std::sync::Arc::new(
                 fetcher::ytdlp::YtDlpFetcher::new(&work_dir, cfg.ytdlp_timeout),
             );
+            // `store` moves into `shared` here — AFTER the sweep + open_batch_run
+            // block above, which needed `&mut store` directly.
             let shared: pipeline::SharedStore = std::sync::Arc::new(tokio::sync::Mutex::new(store));
 
             let opts = pipeline::ProcessOptions {
@@ -128,6 +173,8 @@ async fn main() -> Result<()> {
                 download_workers: cfg.download_workers,
                 channel_capacity: cfg.channel_capacity,
                 cookies_file,
+                classification: std::sync::Arc::clone(&classification),
+                retries,
             };
 
             // ────────────────────────────────────────────────────────────
@@ -158,9 +205,17 @@ async fn main() -> Result<()> {
             // 4 (engine teardown): the engine's worker thread only exits
             // blocking_recv when the LAST request_tx clone goes away.
             // ────────────────────────────────────────────────────────────
-            let stats_result =
-                pipeline::run_pipelined(shared, fetcher, std::sync::Arc::clone(&transcriber), opts)
-                    .await;
+            let stats_result = pipeline::run_pipelined(
+                // 0003 disclosed deviation from the brief's literal snippet:
+                // clone the Arc rather than moving `shared` into
+                // run_pipelined, so this binding survives past `.await` for
+                // the census-close block below (which needs `shared.try_lock()`).
+                std::sync::Arc::clone(&shared),
+                fetcher,
+                std::sync::Arc::clone(&transcriber),
+                opts,
+            )
+            .await;
 
             // Drop main's own `Arc<dyn Transcriber>` clone — this is the
             // last clone in this scope (workers dropped theirs as they
@@ -186,8 +241,31 @@ async fn main() -> Result<()> {
                 // see them in the process-complete line.
                 stale_after_success = stats.stale_after_success,
                 stale_after_failure = stats.stale_after_failure,
+                // Epic 4a: capped-retry outcome counters.
+                requeued_for_retry = stats.requeued_for_retry,
+                exhausted_retries = stats.exhausted_retries,
+                parked_for_cookies = stats.parked_for_cookies,
                 "process complete"
             );
+
+            let census = batch::BatchCensus {
+                sweep: sweep_stats,
+                run: batch::RunCensus::from(&stats),
+            };
+            {
+                let mut guard = shared.try_lock().context(
+                    "store lock free after run_pipelined resolved — workers have exited",
+                )?;
+                let closed = guard.close_batch_run(
+                    run_id,
+                    &serde_json::to_string(&census).context("serializing census")?,
+                )?;
+                if closed == 0 {
+                    tracing::warn!(run_id, "close_batch_run matched no open row");
+                }
+            }
+            print!("{census}");
+
             if stats.claimed == 0 {
                 std::process::exit(3);
             }
@@ -202,26 +280,6 @@ async fn main() -> Result<()> {
             }
             state::migrate::run_migrate(path).context("running migrate")?;
             tracing::info!(path = %path.display(), "migrate complete");
-        }
-        cli::Command::Triage {
-            dry_run,
-            rate,
-            max_attempts,
-        } => {
-            let mut store = state::Store::open(&cfg.state_db).context("opening state DB")?;
-            let oracle = probe::CurlProber {
-                timeout: std::time::Duration::from_secs(15),
-            };
-            let opts = triage::TriageOptions {
-                dry_run,
-                rate_per_sec: rate,
-                max_attempts,
-            };
-            let stats = triage::run_triage(&mut store, &oracle, &opts).await?;
-            if dry_run {
-                println!("DRY RUN — no rows were modified");
-            }
-            print!("{stats}");
         }
     }
 

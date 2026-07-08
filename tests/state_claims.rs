@@ -694,3 +694,40 @@ fn claim_next_carries_last_retryable_kind() {
         Some("SensitiveLoginGated")
     );
 }
+
+/// Epic 4a: retries rejoin the queue BEHIND fresh work. A row that failed
+/// and was requeued (attempt_count = 1) must not be re-claimed while any
+/// never-attempted row (attempt_count = 0) is still pending — regardless
+/// of first_seen_at order.
+#[test]
+fn fresh_rows_claim_before_requeued_retries() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = tmp.path().join("state.sqlite");
+    let mut store = ddp_transcribe::state::Store::open(&db).unwrap();
+
+    // OLDER row that has already been attempted once and requeued…
+    store
+        .upsert_video("vid_retry", "https://example/r", false)
+        .unwrap();
+    // …and a NEWER never-attempted row.
+    std::thread::sleep(std::time::Duration::from_secs(1)); // distinct first_seen_at
+    store
+        .upsert_video("vid_fresh", "https://example/f", false)
+        .unwrap();
+
+    // Simulate the retry state directly: attempted once, back in pending.
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute(
+        "UPDATE videos SET attempt_count = 1 WHERE video_id = 'vid_retry'",
+        [],
+    )
+    .unwrap();
+
+    let first = store.claim_next("w1").unwrap().expect("first claim");
+    assert_eq!(
+        first.video_id, "vid_fresh",
+        "fresh work must drain before retries even when the retry is older"
+    );
+    let second = store.claim_next("w1").unwrap().expect("second claim");
+    assert_eq!(second.video_id, "vid_retry");
+}

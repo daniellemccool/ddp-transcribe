@@ -88,12 +88,29 @@ pub struct ProcessOptions {
     /// `last_retryable_kind` is `SensitiveLoginGated` — see
     /// [`cookie_opts_for`]. ADR 0035: first attempts never get cookies.
     pub cookies_file: Option<PathBuf>,
+    /// Active classification policy (Epic 4a): compiled default or the
+    /// operator's `--classification` file, validated at startup. Shared
+    /// read-only with every worker.
+    pub classification: std::sync::Arc<crate::classification::ClassificationTable>,
+    /// Epic 4a: automatic retry budget. A video gets at most `retries`
+    /// automatic requeues (lifetime cap = retries + 1 total attempts,
+    /// compared against attempt_count which claim_next bumps at claim
+    /// time). Default 1 — pilot evidence: one retry recovers the dominant
+    /// recoverable class (NoDataBlocks re-fetch 10/10 OK).
+    pub retries: i64,
 }
 
 #[derive(Debug, Default)]
 pub struct ProcessStats {
+    /// Input-side, per-attempt (ADR-0007): every successful `claim_next`
+    /// this run, INCLUDING retry re-claims. Both orchestrators count this
+    /// way — a fail-once-then-recover video is `claimed: 2`.
     pub claimed: usize,
+    /// Attempts whose `mark_succeeded` changed a row this run.
     pub succeeded: usize,
+    /// Failure-dispatched attempts this run (one per classified failure,
+    /// regardless of which arm handled it) — per-attempt, so a video that
+    /// failed then recovered contributes to BOTH `failed` and `succeeded`.
     pub failed: usize,
     /// T5-review carry-forward: rows where `process_one` wrote artifacts and
     /// then `mark_succeeded` returned `Ok(0)` — meaning a concurrent sweep
@@ -107,18 +124,29 @@ pub struct ProcessStats {
     /// counter should stay at 0 in practice. It's surfaced for Phase 2's
     /// concurrent workers where stale-after-success is reachable.
     pub stale_after_success: usize,
-    /// T18: symmetric counter for the failure path. Rows where
-    /// `mark_retryable_failure` returned `Ok(0)` — predicate
-    /// `status='in_progress' AND claimed_by=?` missed because a concurrent
-    /// sweep cleared the claim between `claim_next` and the failure-flip.
-    /// Both `fetch_worker` and `transcribe_worker` increment this on the
-    /// retryable-error path. The row stays where the sweep left it
-    /// (`pending`) and will be re-claimed on the next iteration.
+    /// T18: symmetric counter for the failure path. Rows where the failure
+    /// mutator missed the `status='in_progress' AND claimed_by=?` predicate
+    /// (`record_fetch_failure` → `StaleClaim` outcome on the retryable
+    /// path; `mark_terminal_failure` → `Ok(0)` on the write-off path)
+    /// because a concurrent sweep cleared the claim between `claim_next`
+    /// and the failure-flip. Both `fetch_worker` and `transcribe_worker`
+    /// increment this. The row stays where the sweep left it (`pending`)
+    /// and will be re-claimed on the next iteration.
     ///
     /// In Phase 1 (serial loop) this counter doesn't exist on the path
     /// because `run_serial` doesn't run a mid-loop sweep. Phase 2's
     /// concurrent workers reach it via the swept-claim race.
     pub stale_after_failure: usize,
+    /// Epic 4a: rows a worker sent back to 'pending' for an in-batch retry.
+    pub requeued_for_retry: usize,
+    /// Epic 4a: rows whose failure exhausted the attempt cap this run.
+    pub exhausted_retries: usize,
+    /// Epic 4a: requires-cookie rows parked because no cookies-file was
+    /// configured for this run.
+    pub parked_for_cookies: usize,
+    /// Epic 4a: inline write-offs this run, keyed by label — the census's
+    /// run-side terminal-by-label breakdown (attrition documentation).
+    pub terminal_by_label: std::collections::BTreeMap<String, usize>,
 }
 
 /// Outcome of a single `process_one` call. `StaleAfterSuccess` is the
@@ -152,15 +180,19 @@ pub enum FetchPhaseError {
 
 /// Classify a [`FetchPhaseError`] into the three-arm verdict. Thin
 /// projection: `Fetch` delegates to [`crate::failure::classify_fetch_error`]
-/// (the message-table classifier); `Decode` is always `Retryable` — a
-/// corrupt/truncated WAV on disk doesn't indict the source video, and a
-/// refetch may produce a decodable file.
-pub fn classify_fetch_phase(e: &FetchPhaseError) -> crate::failure::ClassifiedFailure {
-    use crate::failure::{ClassifiedFailure, FailureContext, RetryableKind};
+/// (the classification-table-driven classifier); `Decode` is always
+/// `Retryable` — a corrupt/truncated WAV on disk doesn't indict the source
+/// video, and a refetch may produce a decodable file.
+pub fn classify_fetch_phase(
+    e: &FetchPhaseError,
+    table: &crate::classification::ClassificationTable,
+) -> crate::failure::ClassifiedFailure {
+    use crate::failure::{labels, ClassifiedFailure, FailureContext};
     match e {
-        FetchPhaseError::Fetch(fe) => crate::failure::classify_fetch_error(fe),
+        FetchPhaseError::Fetch(fe) => crate::failure::classify_fetch_error(fe, table),
         FetchPhaseError::Decode(de) => ClassifiedFailure::Retryable {
-            kind: RetryableKind::TranscribeOther,
+            label: labels::TRANSCRIBE_OTHER.to_string(),
+            requires_cookie: false,
             ctx: FailureContext {
                 tool: "hound",
                 exit_code: None,
@@ -172,17 +204,27 @@ pub fn classify_fetch_phase(e: &FetchPhaseError) -> crate::failure::ClassifiedFa
     }
 }
 
-/// Kind-gated cookie routing (Epic 3 T08, ADR 0035): cookies ride on a
-/// fetch iff the claim's most recent retryable failure was
-/// `SensitiveLoginGated` AND the operator supplied `--cookies-file`. First
-/// attempts (`last_retryable_kind == None`) never get cookies, and no
-/// other retryable kind qualifies — the epic deliberately scopes cookie
-/// use to this one taxonomy kind.
-pub(crate) fn cookie_opts_for(claim: &Claim, cookies_file: Option<&Path>) -> FetchOpts {
-    let sensitive = claim.last_retryable_kind.as_deref()
-        == Some(crate::failure::RetryableKind::SensitiveLoginGated.tag());
+/// Kind-gated cookie routing (Epic 3 T08, ADR 0035; Epic 4a T03: the gate
+/// now consults the active [`crate::classification::ClassificationTable`]
+/// instead of a hardcoded tag): cookies ride on a fetch iff the claim's
+/// most recent retryable failure's label resolves to disposition
+/// `requires-cookie` in the active table AND the operator supplied
+/// `--cookies-file`. First attempts (`last_retryable_kind == None`) never
+/// get cookies, and labels the active table doesn't recognize (e.g. the
+/// historical placeholder `"Fetch"`) resolve to `None` and never qualify.
+pub(crate) fn cookie_opts_for(
+    claim: &Claim,
+    table: &crate::classification::ClassificationTable,
+    cookies_file: Option<&Path>,
+) -> FetchOpts {
+    use crate::classification::Disposition;
+    let needs_cookie = claim
+        .last_retryable_kind
+        .as_deref()
+        .and_then(|k| table.disposition_of(k))
+        == Some(Disposition::RequiresCookie);
     FetchOpts {
-        cookies_file: if sensitive {
+        cookies_file: if needs_cookie {
             cookies_file.map(Path::to_path_buf)
         } else {
             None
@@ -464,6 +506,7 @@ mod tests {
     /// taxonomy kind never get cookies, regardless of the flag.
     #[test]
     fn cookies_only_for_sensitive_login_gated_retries() {
+        let table = crate::classification::ClassificationTable::compiled_default().unwrap();
         let cookie = PathBuf::from("/secret/c.txt");
         let mk = |kind: Option<&str>| Claim {
             video_id: "7".into(),
@@ -471,17 +514,27 @@ mod tests {
             attempt_count: 1,
             last_retryable_kind: kind.map(String::from),
         };
-        assert_eq!(cookie_opts_for(&mk(None), Some(&cookie)).cookies_file, None);
         assert_eq!(
-            cookie_opts_for(&mk(Some("NoDataBlocks")), Some(&cookie)).cookies_file,
+            cookie_opts_for(&mk(None), &table, Some(&cookie)).cookies_file,
             None
         );
         assert_eq!(
-            cookie_opts_for(&mk(Some("SensitiveLoginGated")), Some(&cookie)).cookies_file,
+            cookie_opts_for(&mk(Some("NoDataBlocks")), &table, Some(&cookie)).cookies_file,
+            None
+        );
+        assert_eq!(
+            cookie_opts_for(&mk(Some("SensitiveLoginGated")), &table, Some(&cookie)).cookies_file,
             Some(cookie.clone())
         );
         assert_eq!(
-            cookie_opts_for(&mk(Some("SensitiveLoginGated")), None).cookies_file,
+            cookie_opts_for(&mk(Some("SensitiveLoginGated")), &table, None).cookies_file,
+            None
+        );
+        // Historical placeholder kind → unknown label → table's
+        // disposition_of returns None → no cookies, regardless of the
+        // cookie file being supplied.
+        assert_eq!(
+            cookie_opts_for(&mk(Some("Fetch")), &table, Some(&cookie)).cookies_file,
             None
         );
     }

@@ -9,6 +9,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -103,9 +104,17 @@ name = "state_migrate"
 required-features = ["test-helpers"]
 
 [[test]]
-name = "state_triage"
+name = "state_sweep"
 required-features = ["test-helpers"]
 
 [[test]]
-name = "triage"
+name = "state_batch_runs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "state_retry"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "batch_census"
 required-features = ["test-helpers"]

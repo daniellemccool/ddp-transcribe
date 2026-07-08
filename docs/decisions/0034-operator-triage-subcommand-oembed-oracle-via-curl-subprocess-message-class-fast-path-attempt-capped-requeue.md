@@ -1,6 +1,6 @@
 ---
-status: accepted
-date: "2026-07-07"
+status: superseded by ADR-0036
+date: "2026-07-08"
 comments:
     - author: Danielle McCool
       date: "2026-07-07 04:37:05"

@@ -30,6 +30,9 @@ pub struct Config {
     pub download_workers: usize,
     /// 0027: default 2 (small backpressure smoothing).
     pub channel_capacity: usize,
+    /// Epic 4a: `--classification` TOML override. `None` → the compiled
+    /// default policy. `main`'s Process arm loads + validates the file.
+    pub classification_path: Option<PathBuf>,
 }
 
 impl Config {
@@ -52,6 +55,7 @@ impl Config {
                     .unwrap_or_else(|| Duration::from_secs(30 * 60)),
                 download_workers: args.download_workers.unwrap_or(3),
                 channel_capacity: args.channel_capacity.unwrap_or(2),
+                classification_path: args.classification.clone(),
             },
         }
     }
@@ -69,6 +73,7 @@ mod tests {
             transcripts: PathBuf::from("/tmp/out"),
             log_format: crate::cli::LogFormat::Human,
             whisper_model: None,
+            classification: None,
             compute_lang_probs: false,
             stale_claim_threshold: None,
             download_workers: None,

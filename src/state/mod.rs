@@ -44,19 +44,30 @@ pub struct VideoRow {
     pub last_retryable_kind: Option<String>,
 }
 
-/// One failed_retryable row, as triage sees it. Message included because
-/// triage classifies stored messages (fast path) before deciding to probe.
+/// One failed_retryable row, as the sweep sees it: a snapshot of rows
+/// awaiting sweep adjudication. Message included because the sweep
+/// classifies stored messages directly through the active
+/// `ClassificationTable` (no probe step post-Epic-4a).
 #[derive(Debug)]
-pub struct TriageRow {
+pub struct ParkedRow {
     pub video_id: String,
-    // 0002: genuinely unread by T10's `run_triage` — triage re-derives the
-    // kind from `last_retryable_message` via `classify_message` and never
-    // consults the previously-stored (possibly placeholder, e.g. "Fetch")
-    // kind. Kept for Debug/audit visibility and API symmetry with the
-    // column set; not dead per se, just not read outside Debug.
-    #[allow(dead_code)]
+    /// The previously-stored retryable kind. `batch::run_sweep` reads it on a
+    /// FALLBACK classification hit (no rule matched): a fallback carries no
+    /// positive evidence about the message class, so a real stored kind (e.g.
+    /// `ToolTimeout` — a non-fetch failure the fetch-stderr table never
+    /// matches) is preserved rather than relabelled. Empty/NULL kinds and the
+    /// legacy placeholder `"Fetch"` still take the fallback label so they
+    /// normalize before the row becomes claimable. (0002 note removed: the
+    /// preserve-kind-on-fallback fix made this field a live read.)
     pub last_retryable_kind: Option<String>,
     pub last_retryable_message: Option<String>,
+    // 0002: read only by `Debug` and the integration tests since Epic 4a T08
+    // deleted the triage subcommand (its `run_triage` compared this against
+    // `--max-attempts`). `batch::run_sweep` caps via `retries + 1` passed to
+    // `sweep_requeue`, not from the snapshot, so the bin no longer reads this
+    // field. Suppressed rather than removed — the row-shape and the tests want
+    // it. Lift when a raw-connection consumer reads it again.
+    #[allow(dead_code)]
     pub attempt_count: i64,
 }
 
@@ -167,9 +178,13 @@ impl Store {
     /// Borrow the underlying connection for advanced operations. Internal use
     /// for now; the public API will grow as Tasks 9+ add methods.
     ///
-    /// T18 (pipelined orchestrator's `compute_process_stats`) is the first
-    /// in-bin consumer; the `#[allow(dead_code)]` placeholder is lifted as
-    /// part of that wiring per 0002.
+    /// T18 (pipelined orchestrator's `compute_process_stats`) was the first
+    /// in-bin consumer; the Epic 4a T06 review fix retired that fn
+    /// (`ProcessStats` is assembled from input-side counters per 0007), so
+    /// no bin caller remains. In-module `#[cfg(test)]` schema tests still
+    /// call it — suppressed per 0002; lift when the next raw-connection
+    /// consumer lands.
+    #[allow(dead_code)]
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
     }
@@ -296,11 +311,31 @@ pub struct Claim {
     pub attempt_count: i64,
     /// Kind tag recorded by the most recent retryable failure, if any.
     /// None on first attempt. Epic 3 cookie routing keys on this being
-    /// "SensitiveLoginGated" (ADR 0035); triage's requeue normalizes
-    /// historical placeholder kinds before the row becomes claimable again.
+    /// "SensitiveLoginGated" (ADR 0035); the start-of-batch sweep's requeue
+    /// normalizes historical placeholder kinds before the row becomes
+    /// claimable again.
     // 0002: `#[allow(dead_code)]` lifted here (Task 08) — now read by
     // `pipeline::cookie_opts_for`'s kind-gated cookie routing.
     pub last_retryable_kind: Option<String>,
+}
+
+/// Outcome of `record_fetch_failure`'s one-transaction decision (Epic 4a):
+/// where did the failed row land, and did anything change at all.
+// 0002: `#[allow(dead_code)]` lifted in Epic 4a T06 — the pipelined workers
+// (via the shared record-failure helper) and `record_fetch_failure_serial`
+// match on every variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureRecordOutcome {
+    /// Row went back to 'pending' (end of queue via T05 ordering).
+    Requeued,
+    /// Attempt cap reached — row parked in 'failed_retryable' (exhausted pool).
+    Exhausted,
+    /// requires-cookie failure with no cookies configured this run — parked
+    /// in 'failed_retryable' without consuming the remaining retry budget.
+    ParkedForCookies,
+    /// Claim predicate missed (concurrent sweep re-claimed the row) — no
+    /// mutation happened; caller counts it as stale_after_failure.
+    StaleClaim,
 }
 
 /// Artifacts written to the database upon successful transcription.
@@ -313,7 +348,10 @@ pub struct SuccessArtifacts {
 }
 
 impl Store {
-    /// Atomically claim the oldest pending video for processing.
+    /// Atomically claim the next pending video: fresh work first
+    /// (`attempt_count ASC` — Epic 4a end-of-queue retries), FIFO by
+    /// first_seen_at within each attempt tier. Matches
+    /// idx_videos_pending_v3's column order.
     ///
     /// Uses `BEGIN IMMEDIATE` to serialize concurrent claim attempts across
     /// multiple connections to the same SQLite file.
@@ -329,7 +367,7 @@ impl Store {
                 "SELECT video_id, source_url, attempt_count, last_retryable_kind
                  FROM videos
                  WHERE status = 'pending'
-                 ORDER BY first_seen_at ASC, video_id ASC
+                 ORDER BY attempt_count ASC, first_seen_at ASC, video_id ASC
                  LIMIT 1",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
@@ -452,6 +490,15 @@ impl Store {
     // T9 wired this into `run_serial`'s error arm with a placeholder kind
     // ("FetchOrTranscribe" per 0023); Epic 3 T07 replaced the placeholder
     // with typed classifier dispatch (`RetryableKind::tag()`).
+    //
+    // 0002: Epic 4a T06 switched every pipeline caller (fetch_worker,
+    // transcribe_worker, run_serial) to `record_fetch_failure`, so the bin
+    // no longer reaches this mutator. Integration tests
+    // (`tests/state_claims.rs`, `tests/state_sweep.rs`) still exercise it
+    // directly as a failed_retryable seeding helper, hence dead_code-suppressed
+    // rather than deleted. (Epic 4a T08 checked at triage retirement: retained —
+    // the direct-mutator tests still depend on it.)
+    #[allow(dead_code)]
     pub fn mark_retryable_failure(
         &mut self,
         video_id: &str,
@@ -492,6 +539,121 @@ impl Store {
 
         tx.commit().context("commit mark_retryable_failure")?;
         Ok(changed)
+    }
+
+    /// Failure-time retry decision (Epic 4a, supersedes the Epic 3 pattern
+    /// of always parking in failed_retryable). One IMMEDIATE transaction:
+    ///
+    /// - requires-cookie without cookies configured → park (failed_retryable);
+    ///   a cookie-less retry is a guaranteed refail that would burn budget.
+    /// - under the cap (`attempt_count < max_attempts`; attempt_count was
+    ///   already bumped at claim time by claim_next) → back to 'pending',
+    ///   unowned, rejoining the queue behind fresh work (T05 ordering).
+    /// - cap exhausted → failed_retryable (the "exhausted, adjudicate" pool).
+    /// - claim predicate miss everywhere → StaleClaim, nothing recorded.
+    ///
+    /// Always writes label+message to last_retryable_kind/_message on any
+    /// row it changes. Events: 'cookie_parked' / 'retry_requeued' /
+    /// 'failed_retryable' (existing vocabulary for the exhausted case), all
+    /// with the uniform `{"kind": …, "message": …}` detail_json shape shared
+    /// with `mark_retryable_failure` — post-Task-03 the kind vocabulary IS
+    /// the label strings, so 'failed_retryable' events stay one schema
+    /// regardless of which mutator emitted them.
+    ///
+    /// 0006 note: the `Result<usize>` row-count contract is honored
+    /// internally — each UPDATE's row count drives the outcome; the typed
+    /// enum IS the row-count information, made unambiguous for the caller.
+    // 0002: `#[allow(dead_code)]` lifted in Epic 4a T06 — first callers:
+    // fetch_worker + transcribe_worker (via the shared pipelined
+    // record-failure helper) and run_serial's `record_fetch_failure_serial`.
+    #[allow(clippy::too_many_arguments)] // one logical decision; every arg participates
+    pub fn record_fetch_failure(
+        &mut self,
+        video_id: &str,
+        worker_id: &str,
+        label: &str,
+        message: &str,
+        max_attempts: i64,
+        requires_cookie: bool,
+        cookies_configured: bool,
+    ) -> Result<FailureRecordOutcome> {
+        let now = unix_now();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("begin immediate for record_fetch_failure")?;
+
+        let park = |tx: &rusqlite::Transaction<'_>, event: &str| -> Result<usize> {
+            let changed = tx
+                .execute(
+                    "UPDATE videos
+                     SET status = 'failed_retryable',
+                         last_retryable_kind = ?2,
+                         last_retryable_message = ?3,
+                         claimed_by = NULL,
+                         claimed_at = NULL,
+                         updated_at = ?4
+                     WHERE video_id = ?1
+                       AND status = 'in_progress'
+                       AND claimed_by = ?5",
+                    params![video_id, label, message, now, worker_id],
+                )
+                .with_context(|| format!("record_fetch_failure park for {video_id}"))?;
+            if changed > 0 {
+                let detail = serde_json::json!({ "kind": label, "message": message }).to_string();
+                tx.execute(
+                    "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![video_id, now, event, worker_id, detail],
+                )
+                .with_context(|| format!("record_fetch_failure {event} event for {video_id}"))?;
+            }
+            Ok(changed)
+        };
+
+        let outcome = if requires_cookie && !cookies_configured {
+            if park(&tx, "cookie_parked")? > 0 {
+                FailureRecordOutcome::ParkedForCookies
+            } else {
+                FailureRecordOutcome::StaleClaim
+            }
+        } else {
+            let requeued = tx
+                .execute(
+                    "UPDATE videos
+                     SET status = 'pending',
+                         last_retryable_kind = ?2,
+                         last_retryable_message = ?3,
+                         claimed_by = NULL,
+                         claimed_at = NULL,
+                         updated_at = ?4
+                     WHERE video_id = ?1
+                       AND status = 'in_progress'
+                       AND claimed_by = ?5
+                       AND attempt_count < ?6",
+                    params![video_id, label, message, now, worker_id, max_attempts],
+                )
+                .with_context(|| format!("record_fetch_failure requeue for {video_id}"))?;
+            if requeued > 0 {
+                let detail = serde_json::json!({ "kind": label, "message": message }).to_string();
+                tx.execute(
+                    "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
+                     VALUES (?1, ?2, 'retry_requeued', ?3, ?4)",
+                    params![video_id, now, worker_id, detail],
+                )
+                .with_context(|| {
+                    format!("record_fetch_failure retry_requeued event for {video_id}")
+                })?;
+                FailureRecordOutcome::Requeued
+            } else if park(&tx, "failed_retryable")? > 0 {
+                FailureRecordOutcome::Exhausted
+            } else {
+                FailureRecordOutcome::StaleClaim
+            }
+        };
+
+        tx.commit().context("commit record_fetch_failure")?;
+        Ok(outcome)
     }
 
     /// Flip a video row from `in_progress` to `failed_terminal`, recording
@@ -607,8 +769,9 @@ impl Store {
         Ok(changed)
     }
 
-    /// Snapshot of all failed_retryable rows, FIFO by first_seen_at. Read-only.
-    pub fn list_failed_retryable(&self) -> Result<Vec<TriageRow>> {
+    /// Snapshot of rows awaiting sweep adjudication, FIFO by first_seen_at.
+    /// Read-only.
+    pub fn list_failed_retryable(&self) -> Result<Vec<ParkedRow>> {
         let mut stmt = self
             .conn
             .prepare(
@@ -619,7 +782,7 @@ impl Store {
             .context("prepare list_failed_retryable")?;
         let rows = stmt
             .query_map([], |r| {
-                Ok(TriageRow {
+                Ok(ParkedRow {
                     video_id: r.get(0)?,
                     last_retryable_kind: r.get(1)?,
                     last_retryable_message: r.get(2)?,
@@ -632,12 +795,12 @@ impl Store {
         Ok(rows)
     }
 
-    /// Triage verdict: dead. failed_retryable → failed_terminal. Unlike
+    /// Sweep verdict: dead. failed_retryable → failed_terminal. Unlike
     /// mark_terminal_failure (in_progress + claimed_by predicate, pipeline
-    /// caller), this operates on unclaimed failed rows; the operator-action
-    /// audit trail is the 'triaged_terminal' event. last_retryable_* columns
+    /// caller), this operates on unclaimed failed rows; the operator-visible
+    /// audit trail is the 'swept_terminal' event. last_retryable_* columns
     /// are preserved (0023 family convention: diagnostics accumulate).
-    pub fn triage_mark_terminal(
+    pub fn sweep_mark_terminal(
         &mut self,
         video_id: &str,
         reason: &str,
@@ -647,7 +810,7 @@ impl Store {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .context("begin immediate for triage_mark_terminal")?;
+            .context("begin immediate for sweep_mark_terminal")?;
         let changed = tx
             .execute(
                 "UPDATE videos
@@ -658,26 +821,26 @@ impl Store {
                  WHERE video_id = ?1 AND status = 'failed_retryable'",
                 params![video_id, reason, message, now],
             )
-            .with_context(|| format!("triage_mark_terminal update for {video_id}"))?;
+            .with_context(|| format!("sweep_mark_terminal update for {video_id}"))?;
         if changed > 0 {
             let detail = serde_json::json!({ "reason": reason, "message": message }).to_string();
             tx.execute(
                 "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
-                 VALUES (?1, ?2, 'triaged_terminal', 'triage', ?3)",
+                 VALUES (?1, ?2, 'swept_terminal', 'sweep', ?3)",
                 params![video_id, now, detail],
             )
-            .with_context(|| format!("triage_mark_terminal event for {video_id}"))?;
+            .with_context(|| format!("sweep_mark_terminal event for {video_id}"))?;
         }
-        tx.commit().context("commit triage_mark_terminal")?;
+        tx.commit().context("commit sweep_mark_terminal")?;
         Ok(changed)
     }
 
-    /// Triage verdict: alive. failed_retryable → pending, gated by the
+    /// Sweep verdict: alive. failed_retryable → pending, gated by the
     /// attempt cap IN THE PREDICATE (race-free: the cap check and the flip
     /// are one statement). Writes the re-classified kind back so historical
     /// placeholder kinds ("Fetch") become taxonomy kinds before the row is
     /// claimable — cookie routing (ADR 0035) reads the kind at claim time.
-    pub fn requeue_retryable(
+    pub fn sweep_requeue(
         &mut self,
         video_id: &str,
         new_kind: &str,
@@ -687,7 +850,7 @@ impl Store {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .context("begin immediate for requeue_retryable")?;
+            .context("begin immediate for sweep_requeue")?;
         let changed = tx
             .execute(
                 "UPDATE videos
@@ -699,18 +862,61 @@ impl Store {
                    AND attempt_count < ?4",
                 params![video_id, new_kind, now, max_attempts],
             )
-            .with_context(|| format!("requeue_retryable update for {video_id}"))?;
+            .with_context(|| format!("sweep_requeue update for {video_id}"))?;
         if changed > 0 {
             let detail = serde_json::json!({ "new_kind": new_kind }).to_string();
             tx.execute(
                 "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
-                 VALUES (?1, ?2, 'requeued', 'triage', ?3)",
+                 VALUES (?1, ?2, 'requeued', 'sweep', ?3)",
                 params![video_id, now, detail],
             )
-            .with_context(|| format!("requeue_retryable event for {video_id}"))?;
+            .with_context(|| format!("sweep_requeue event for {video_id}"))?;
         }
-        tx.commit().context("commit requeue_retryable")?;
+        tx.commit().context("commit sweep_requeue")?;
         Ok(changed)
+    }
+
+    /// Open a batch-run record (Epic 4a): one row per `process` invocation,
+    /// carrying the run parameters and the FULL active classification policy
+    /// TOML — the census without its generating policy is not reproducible
+    /// attrition documentation. Returns the new run_id.
+    ///
+    /// Signature note: this returns `Result<i64>` (the generated run_id),
+    /// not `Result<usize>` (ADR-0006's row-count contract). 0006 governs
+    /// guarded row-TRANSITION mutators, where the row count is the caller's
+    /// only way to know whether a predicate matched. This is an
+    /// identity-creating INSERT — there is no predicate to miss, and the
+    /// product the caller needs is the generated run_id itself, not a count
+    /// that would always be 1.
+    // 0002: `#[allow(dead_code)]` lifted in Epic 4a T07 — main()'s Process
+    // arm calls this before engine construction (fail fast on policy).
+    pub fn open_batch_run(&mut self, params_json: &str, policy_toml: &str) -> Result<i64> {
+        let now = unix_now();
+        self.conn
+            .execute(
+                "INSERT INTO batch_runs (started_at, params_json, policy_toml)
+                 VALUES (?1, ?2, ?3)",
+                params![now, params_json, policy_toml],
+            )
+            .context("insert batch_runs row")?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Close a batch-run record with its census. Returns the row-change
+    /// count per 0006 (0 = unknown run_id or already closed by predicate
+    /// miss — callers log, never panic).
+    // 0002: `#[allow(dead_code)]` lifted in Epic 4a T07 — main()'s Process
+    // arm calls this after run_pipelined resolves, via `shared.try_lock()`.
+    pub fn close_batch_run(&mut self, run_id: i64, census_json: &str) -> Result<usize> {
+        let now = unix_now();
+        self.conn
+            .execute(
+                "UPDATE batch_runs
+                 SET finished_at = ?2, census_json = ?3
+                 WHERE run_id = ?1 AND finished_at IS NULL",
+                params![run_id, now, census_json],
+            )
+            .context("close batch_runs row")
     }
 }
 

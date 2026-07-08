@@ -53,13 +53,14 @@ lines 120-148.
 section "Resolved by Plan B Epic 3") or split-and-re-filed: `YtDlpFetcher::acquire`
 finding 3 → Epic 5, finding 4 → Plan C (see those groups below).
 
-**Epic 4 (operator-facing commands / timestamps)**
-- T13: `parse_watched_at` UTC assumption → Epic 4 (0027 resolution path)
-- Epic 3 final review: `requeued` event `detail_json` lacks attempt-count context → Epic 4 (`status` subcommand work)
-- Epic 3 final review: architecture-doc `uu-tiktok` naming sweep (four deepdive H1s, index.md:44, state-machine.md:151) → Epic 4 (bundle with doc touch)
-- Epic 3 close-out ops: operator interface is the tool itself; wrapper scripts non-normative (binding premise, ADR-0032 comment 2026-07-07) → Epic 4 planning input
-- Epic 3 close-out ops: `triage` has no progress output; config echo logs model path for commands that never load it → Epic 4 (`status`/operator-UX pass)
-- Full Epic 4 entries: [followups/epic-4.md](followups/epic-4.md)
+**Epic 4b (operator-facing commands / timestamps)** — Epic 4a closed 2026-07-08
+(in-pipeline retry, config-driven classification, triage retirement); its
+resolved entries archived under "Resolved by Plan B Epic 4a".
+- T13: `parse_watched_at` UTC assumption → Epic 4b (time-window / timezone work)
+- Epic 4a T06 review: `--retries` / `max_attempts` accept unvalidated i64 ranges (negatives degenerate the budget; `i64::MAX` overflows at `retries+1`) → Epic 4b (CLI validation pass)
+- Epic 3 close-out ops: config echo logs model path for subcommands that never load it → Epic 4b (`status`/operator-UX pass)
+- Epic 3 close-out ops: operator interface is the tool itself; wrapper scripts non-normative (standing premise, honored by Epic 4a) → Epic 4b planning input
+- Full Epic 4b entries: [followups/epic-4.md](followups/epic-4.md)
 
 **Epic 5 (Plan A → Plan B cleanup sweep)**
 - T7: `Store::pragma_string` `pub` vs `pub(crate)` → Epic 5 (lower to `pub(crate)`)
@@ -73,8 +74,8 @@ finding 3 → Epic 5, finding 4 → Plan C (see those groups below).
 - SRC-bake + T11: `--whisper-model` (and 5 other GlobalArgs flags) rejected after subcommand → Epic 5 (one-line `global = true` per flag)
 - T11 (split at Epic 3 close): `YtDlpFetcher::acquire` coupling to `{video_id}.wav` output filename → Epic 5 (fetch hardening)
 - Epic 3 final review: test-hardening bundle (signal-capture spawn+kill test, `classify_message` precedence/case test, `transcribe_worker` kind-string end-to-end assertion) → Epic 5
-- Epic 3 final review: `state/mod.rs` hygiene bundle (bare `tx.commit()?`, attempt_count==2 assertion, defensive claimed_by/claimed_at clearing, capped-requeue no-event assertion) → Epic 5
-- Epic 3 final review: `run_serial` mutator-return-value bundle (discarded row-change counts; fetch/transcribe downcast asymmetry, see tripwire in `src/pipeline/serial.rs`) → Epic 5 (or moot if `run_serial` retires)
+- Epic 3 final review: `state/mod.rs` hygiene bundle — sweep mutators post-4a rename (bare `tx.commit()?`, attempt_count==2 assertion, defensive claimed_by/claimed_at clearing, sweep capped-requeue no-event assertion) → Epic 5
+- Epic 3 final review: `run_serial` fetch/transcribe downcast asymmetry (see tripwire in `src/pipeline/serial.rs`; the bundle's discarded-count half resolved by Epic 4a T06, archived) → Epic 5 (or moot if `run_serial` retires)
 - Epic 3 final review: `FetchOpts` derived `Debug` doesn't redact `cookies_file` → Epic 5
 - Epic 3 final review: `scrub_cookie_path` empty-path guard → Epic 5
 - Full Epic 5 entries: [followups/epic-5.md](followups/epic-5.md)
@@ -87,7 +88,6 @@ finding 3 → Epic 5, finding 4 → Plan C (see those groups below).
 - T10-Epic1: Per-token text field doubles raw_signals payload → Plan C (compact JSON landed in perf-tweaks decdf6f; drop-text still deferred pending 0010 amendment)
 - T11 (split at Epic 3 close): yt-dlp argv `--` separator before `source_url` → Plan C (when resolved URLs reach the fetcher)
 - Epic 3 final review: `scrub_cookie_path` canonicalized/relative path-variant hardening → Plan C (multi-engine work)
-- Epic 3 final review: `CurlProber` missing `--location`; bundle with ADR-0034 oEmbed-drift re-validation → Plan C
 - Full Plan C entries: [followups/plan-c.md](followups/plan-c.md)
 
 **Cross-epic / ADR maintenance / verify-then-archive**
