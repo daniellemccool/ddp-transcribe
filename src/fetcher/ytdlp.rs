@@ -48,7 +48,12 @@ impl YtDlpFetcher {
 ///   probe fixtures: `-f "b[acodec!=none]/b"` + the `-S` sort below picked
 ///   h264_540p_298119-1 (228 KB) on a poisoned-class video,
 ///   h264_540p_235617-1 (261 KB) on a small video, and `audio` on a
-///   slideshow post.
+///   slideshow post. The bare `/b` fallback is load-bearing for the retry
+///   net: a video advertising only audio-less formats still downloads via
+///   `/b`, fails at wav extraction, and classifies as `FfprobePostprocess`
+///   — which routes it onto the deterministic retry below. A selector that
+///   failed at selection time instead would strand such videos on a
+///   generic label with no format-blamed retry path.
 /// - [`FetchPolicy::DeterministicAudio`] (`-f "download/b[vcodec=h264]/b"`,
 ///   the previous unconditional default): pre-muxed audio with
 ///   selection-time fallbacks (best h264, then any best). Applied only to a

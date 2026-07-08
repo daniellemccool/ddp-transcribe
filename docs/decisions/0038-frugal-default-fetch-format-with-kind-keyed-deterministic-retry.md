@@ -71,8 +71,17 @@ Chosen option: "Frugal-first (smallest audio-tagged combined format) as the unco
   extra attempt.
 * Good, because the parked `NoDataBlocks` pilot backlog becomes recoverable
   post-deploy via an operator-issued retry budget (e.g. `--retries 2`)
-  without a code change — it was never a `download`-selection problem, so
-  the frugal default resolves it directly.
+  without a code change — the backlog IS a `download`-selection casualty
+  (`download` was picked and the transfer died mid-stream), which is
+  exactly why its retries must NOT be overridden back onto the `download`
+  path: the frugal default, which never picks `download` first, is what
+  resolves it.
+* Neutral, because the override keys on the pinned literal label
+  `FfprobePostprocess` (unlike the cookie gate, it has no dedicated
+  disposition to resolve through the active table) — an operator's custom
+  classification table that renames that label silently disables the
+  deterministic retry, so the label is reserved and must be kept verbatim
+  in custom tables.
 
 ## Comments
 

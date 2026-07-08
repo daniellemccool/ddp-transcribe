@@ -226,6 +226,13 @@ pub fn classify_fetch_phase(
 fn format_policy_for(claim: &Claim) -> crate::fetcher::FetchPolicy {
     use crate::fetcher::FetchPolicy;
     match claim.last_retryable_kind.as_deref() {
+        // "FfprobePostprocess" is a PINNED (reserved) label: the override
+        // contract depends on this exact string, and — unlike the cookie
+        // gate, which resolves through `table.disposition_of()` — it does
+        // NOT consult the active classification table. A custom
+        // `--classification` table that renames the label silently
+        // disables the deterministic retry, so custom tables must keep it
+        // verbatim (ADR 0038 Consequences records this dependency).
         Some("FfprobePostprocess") => FetchPolicy::DeterministicAudio,
         _ => FetchPolicy::Frugal,
     }
