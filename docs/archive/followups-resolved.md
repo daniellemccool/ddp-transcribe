@@ -669,3 +669,57 @@ Two stale claims in the original entry, corrected at archive time:
   87.5% overall; 10/10 share-form re-fetches of probe-alive failures
   succeeded from the same egress. Share-form URLs do not inflate the
   failure rate; no canonicalization fix is needed.
+
+---
+
+## Resolved by Plan B Epic 4a — in-pipeline retry, config-driven classification, triage retirement (2026-07-08)
+
+Triage code (`src/triage.rs`, `src/probe.rs`, `tests/triage.rs`) and the
+`curl` runtime dependency were removed in the code-retirement commit
+(`551580a`); the ADR slate + architecture-doc updates landed in the Epic 4a
+close-out docs commit (same epic). The entries below were resolved by that
+work.
+
+### `requeued` event's `detail_json` lacks attempt-count context
+
+**Found in:** Epic 3 final whole-branch review.
+**Resolution:** Superseded by Epic 4a. The Epic 3 `requeued` event whose
+`detail_json` carried only `{ "new_kind": ... }` is gone from the pipeline
+path; the in-pipeline retry decision writes a `retry_requeued` event whose
+detail carries the label and the lifetime `max_attempts` (`retries + 1`) at
+requeue time (`src/state/mod.rs::record_fetch_failure`). The start-of-batch
+sweep's `sweep_requeue` still writes a `requeued` event, but an operator
+reading the durable `batch_runs` census now sees per-attempt requeue/exhaust
+counts directly, so the original "can't tell how many attempts a requeue used
+up" gap is closed. (A richer per-event detail surface remains a 4b `status`
+concern, tracked there.)
+
+### Architecture-doc `uu-tiktok` naming sweep
+
+**Found in:** Epic 3 final whole-branch review (close-out doc pass missed these).
+**Resolution:** Epic 4a close-out docs commit. The four architecture-deepdive
+H1 titles (`state-machine.md`, `orchestration.md`, `data-input.md`,
+`transcription.md`) plus `index.md`'s H1/intro and `index.md:44`'s ingest
+wording and `state-machine.md`'s `migrate` wording now read `ddp-transcribe`.
+Historical docs/ADRs keep the old name by policy.
+
+### `triage` runs mute — no progress output (papercut 1 of the triage-UX entry)
+
+**Found in:** First production `triage --dry-run` (2026-07-07, 7,087-row DB).
+**Resolution:** Moot — the `triage` subcommand retired in Epic 4a (`551580a`).
+Retry is now pipeline behavior; the start-of-batch sweep and the drain emit
+structured progress/`tracing` output and a durable census. (The sibling
+config-echo papercut is NOT resolved — it re-targets to Epic 4b; see
+`docs/followups/epic-4.md`.)
+
+### Census prints bare taxonomy tags — annotate write-off classes (papercut 3 of the triage-UX entry)
+
+**Found in:** First production `triage --dry-run` (2026-07-07, 7,087-row DB).
+**Resolution:** Redesigned in Epic 4a. The triage census is gone; the batch
+census (`src/batch.rs::BatchCensus`) breaks attrition down by label and, per
+ADR 0037, the active classification policy — including each label's
+disposition and its evidence comment — is snapshotted into
+`batch_runs.policy_toml` alongside the census. The label meanings are now
+documented in the policy file itself (the compiled default's inline evidence
+comments, e.g. `IpBlockedMessage` → "video removed, NOT an IP issue"), which
+is a durable and reproducible home for them.

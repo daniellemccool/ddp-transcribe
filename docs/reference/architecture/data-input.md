@@ -1,4 +1,4 @@
-# uu-tiktok — data input
+# ddp-transcribe — data input
 
 The data-input subsystem covers two stages of the donor's journey: ingest (parsing the TikTok DDP export into rows the state machine can claim) and fetch (downloading the watched-video MP4 and extracting audio for transcription).
 

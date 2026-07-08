@@ -1,4 +1,4 @@
-# uu-tiktok — transcription
+# ddp-transcribe — transcription
 
 The transcription subsystem covers three stages: preparing audio in the format whisper.cpp requires, running the transcription via the embedded `whisper-rs` library, and writing the resulting artifact to disk before the state machine acknowledges success.
 

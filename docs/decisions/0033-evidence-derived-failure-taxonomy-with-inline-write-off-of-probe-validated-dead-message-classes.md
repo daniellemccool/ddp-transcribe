@@ -1,6 +1,6 @@
 ---
 status: accepted
-date: "2026-07-07"
+date: "2026-07-08"
 comments:
     - author: Danielle McCool
       date: "2026-07-07 04:37:05"
@@ -11,6 +11,9 @@ comments:
     - author: Danielle McCool
       date: "2026-07-07 11:16:07"
       text: 'Recurring-misreading guard: the write-off class IpBlockedMessage describes yt-dlp''s stderr TEXT, not the cause. ''Your IP address is blocked'' is a yt-dlp misfire that TikTok returns for deleted/removed content — probe-validated 10/10 dead (2026-07-06), while ''no data blocks'' rows re-fetched 10/10 OK from the same workspace egress, affirmatively clearing the IP. This has been relitigated across multiple sessions (May–July 2026); it resurfaced again on 2026-07-07 during Epic 3 close-out ops. Anyone reading census output or this taxonomy: the class means VIDEO REMOVED. See src/failure.rs doc comment on the variant.'
+    - author: Danielle McCool
+      date: "2026-07-08 12:05:27"
+      text: 'Epic 4a moved the write-off patterns into the classification table''s compiled default (see ADR 0037, the classification-config ADR). Evidence semantics unchanged; the misreading guard above still applies — IpBlockedMessage means VIDEO REMOVED. New at 4a: VideoNotAvailable10240 (606/606 probe-dead, census 2026-07-07) joined the terminal set; NoPermission stays retryable (25/452 alive).'
 ---
 
 # Evidence-derived failure taxonomy with inline write-off of probe-validated dead message classes
@@ -59,3 +62,4 @@ Chosen option: "Evidence-derived enums (Retryable/Unavailable/Bug arms; variants
 * **2026-07-07 04:37:05 — @Danielle McCool:** marked decision as decided
 * **2026-07-07 04:40:25 — @Danielle McCool:** marked decision as decided
 * **2026-07-07 11:16:07 — @Danielle McCool:** Recurring-misreading guard: the write-off class IpBlockedMessage describes yt-dlp's stderr TEXT, not the cause. 'Your IP address is blocked' is a yt-dlp misfire that TikTok returns for deleted/removed content — probe-validated 10/10 dead (2026-07-06), while 'no data blocks' rows re-fetched 10/10 OK from the same workspace egress, affirmatively clearing the IP. This has been relitigated across multiple sessions (May–July 2026); it resurfaced again on 2026-07-07 during Epic 3 close-out ops. Anyone reading census output or this taxonomy: the class means VIDEO REMOVED. See src/failure.rs doc comment on the variant.
+* **2026-07-08 12:05:27 — @Danielle McCool:** Epic 4a moved the write-off patterns into the classification table's compiled default (see ADR 0037, the classification-config ADR). Evidence semantics unchanged; the misreading guard above still applies — IpBlockedMessage means VIDEO REMOVED. New at 4a: VideoNotAvailable10240 (606/606 probe-dead, census 2026-07-07) joined the terminal set; NoPermission stays retryable (25/452 alive).

@@ -4,8 +4,9 @@
 live against the running workspace that day. Supersedes the untracked
 `docs/local/SRC-RUNBOOK.md` / `SRC-BAKE-*` set and `docs/local/src-bootstrap.sh`,
 which describe a storage-hop git topology that does not exist on the VM — treat
-those as historical. Epic 4 will amend the *operate* section (triage retires,
-retry moves in-pipeline); the topology and update procedure are stable.
+those as historical. Epic 4a amended the *operate* section (triage retired,
+retry moved in-pipeline, classification became an operator TOML); the topology
+and update procedure are stable.
 
 ## Topology (what actually exists)
 
@@ -48,7 +49,7 @@ deployed. Verify after every update:
 ddp-transcribe -V && ddp-transcribe -h | head -12   # subcommand list matches expectations
 ```
 
-## Operating (current, Epic 3 era — Epic 4 will simplify this)
+## Operating (current, Epic 4a)
 
 Canonical invocation is the bare binary with explicit paths (CWD-independent):
 
@@ -57,24 +58,36 @@ CUDA_VISIBLE_DEVICES=0 ddp-transcribe \
     --state-db ~/ddp-state/state.sqlite \
     --transcripts ~/ddp-work/transcripts \
     --whisper-model ~/ddp-work/models/ggml-large-v3-turbo-q5_0.bin \
-    process [--max-videos N] [--cookies-file ~/tiktok-cookies.txt]
+    [--classification ~/ddp-classification.toml] \
+    process [--max-videos N] [--cookies-file ~/tiktok-cookies.txt] [--retries N]
 ```
 
 - Second GPU instance: same command with `CUDA_VISIBLE_DEVICES=1`. Concurrent
   claiming against one state DB is designed-for.
+- `--retries` (default 1) is the automatic in-batch retry budget per video:
+  it caps **lifetime** attempts at `retries + 1` (compared against the row's
+  `attempt_count`, which is bumped at claim time). Retries drain at the end of
+  the queue, behind fresh work.
+- `--classification <file>` overrides the compiled-in evidence-derived policy
+  with an operator TOML (validated at startup — a malformed table hard-fails
+  before the model loads). Omit it to use the compiled default.
 - Startup must show the ADR-0013 banner (`whisper_backend_init_gpu: using CUDA0
   backend`); its absence means CPU fallback — abort and investigate.
 - `process` exit code 3 = zero videos claimed (queue drained) — not an error.
 - After a `process` batch: run `~/sync-to-storage.sh` (do NOT run it while an
   export/transfer is reading the volume's transcript tree).
 - Long runs belong in `tmux`.
-- The pilot's 7,087 `failed_retryable` rows are parked pending Epic 4's in-pipeline
-  retry (operator ruling 2026-07-07); do not run `triage` against production.
+- The pilot's parked `failed_retryable` rows are adjudicated automatically by
+  the start-of-batch sweep on the first 4a run; expect the census to report
+  ~3,915 swept_terminal + ~2,871 requeued + 301 parked_for_cookies (no cookies)
+  on that first run.
 
 ## Known VM facts (hard-won; do not re-derive)
 
 - **`IpBlockedMessage` means the video was removed.** The yt-dlp stderr text is a
   misfire; the IP is fine (ADR-0033 comment, 2026-07-07).
+- The census persists in the state DB's `batch_runs` table with the active
+  policy TOML — attrition documentation survives tmux.
 - `/etc/rsc/cron_webdav.sh` and `cron_user.sh` curl processes are SURF platform
   tooling (WebDAV mount health, SRAM user sync) — benign, not ours.
 - `~/ddp-transcribe-infra` is a disposable non-git snapshot of

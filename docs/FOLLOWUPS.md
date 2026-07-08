@@ -53,13 +53,14 @@ lines 120-148.
 section "Resolved by Plan B Epic 3") or split-and-re-filed: `YtDlpFetcher::acquire`
 finding 3 → Epic 5, finding 4 → Plan C (see those groups below).
 
-**Epic 4 (operator-facing commands / timestamps)**
-- T13: `parse_watched_at` UTC assumption → Epic 4 (0027 resolution path)
-- Epic 3 final review: `requeued` event `detail_json` lacks attempt-count context → Epic 4 (`status` subcommand work)
-- Epic 3 final review: architecture-doc `uu-tiktok` naming sweep (four deepdive H1s, index.md:44, state-machine.md:151) → Epic 4 (bundle with doc touch)
-- Epic 3 close-out ops: operator interface is the tool itself; wrapper scripts non-normative (binding premise, ADR-0032 comment 2026-07-07) → Epic 4 planning input
-- Epic 3 close-out ops: `triage` has no progress output; config echo logs model path for commands that never load it → Epic 4 (`status`/operator-UX pass)
-- Full Epic 4 entries: [followups/epic-4.md](followups/epic-4.md)
+**Epic 4b (operator-facing commands / timestamps)** — Epic 4a closed 2026-07-08
+(in-pipeline retry, config-driven classification, triage retirement); its
+resolved entries archived under "Resolved by Plan B Epic 4a".
+- T13: `parse_watched_at` UTC assumption → Epic 4b (time-window / timezone work)
+- Epic 4a T06 review: `--retries` / `max_attempts` accept unvalidated i64 ranges (negatives degenerate the budget; `i64::MAX` overflows at `retries+1`) → Epic 4b (CLI validation pass)
+- Epic 3 close-out ops: config echo logs model path for subcommands that never load it → Epic 4b (`status`/operator-UX pass)
+- Epic 3 close-out ops: operator interface is the tool itself; wrapper scripts non-normative (standing premise, honored by Epic 4a) → Epic 4b planning input
+- Full Epic 4b entries: [followups/epic-4.md](followups/epic-4.md)
 
 **Epic 5 (Plan A → Plan B cleanup sweep)**
 - T7: `Store::pragma_string` `pub` vs `pub(crate)` → Epic 5 (lower to `pub(crate)`)
