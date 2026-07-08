@@ -12,11 +12,14 @@ use crate::classification::{ClassificationTable, Disposition};
 use crate::pipeline::ProcessStats;
 use crate::state::Store;
 
-/// Input-side sweep counters (0007). Every examined row lands in exactly
-/// one action bucket by construction of the match below, so
-/// `examined == swept_terminal + requeued_for_retry + parked_for_cookies + kept_capped`
-/// holds for the sweep (unlike the run census, where stale-claim races open
-/// a gap between `claimed`/`failed` and the sum of its action buckets).
+/// Input-side sweep counters (0007).
+/// `examined >= swept_terminal + requeued_for_retry + parked_for_cookies + kept_capped`:
+/// a Terminal-arm predicate miss (a concurrent writer moved the row off
+/// `failed_retryable` between `list_failed_retryable`'s snapshot and the
+/// UPDATE) is examined but lands in no action bucket — each such miss is
+/// logged with `tracing::warn!` in `run_sweep` instead of incrementing a
+/// counter. The requeue arm has no such gap: its predicate misses (cap hit
+/// or concurrent move) land in `kept_capped`.
 #[derive(Debug, Default, Serialize)]
 pub struct SweepStats {
     pub examined: usize,
@@ -131,6 +134,21 @@ impl std::fmt::Display for BatchCensus {
     }
 }
 
+/// Truncate `s` to at most `max_bytes` BYTES without splitting a character:
+/// floor to the nearest char boundary at or below the cap.
+/// (`str::floor_char_boundary` is nightly-only on our toolchain; a boundary
+/// is at most 3 bytes below any index, so the loop is bounded.)
+fn truncate_to_char_boundary(s: &mut String, max_bytes: usize) {
+    if s.len() <= max_bytes {
+        return;
+    }
+    let mut cut = max_bytes;
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    s.truncate(cut);
+}
+
 /// Start-of-batch sweep (Epic 4a, spec §3): adjudicate every parked
 /// failed_retryable row through the active table. Terminal dispositions
 /// terminalize (this is where historical write-off classes die on the
@@ -155,7 +173,11 @@ pub fn run_sweep(
         match m.disposition {
             Disposition::Terminal => {
                 let mut msg = format!("[sweep] {message}");
-                msg.truncate(500);
+                // Char-boundary-safe: stored yt-dlp/TikTok text can be
+                // localized; a plain truncate(500) panics mid-character
+                // (T07 review fix). The full text stays in
+                // last_retryable_message, which the mutator preserves.
+                truncate_to_char_boundary(&mut msg, 500);
                 let changed = store
                     .sweep_mark_terminal(&row.video_id, m.label, &msg)
                     .with_context(|| format!("sweep terminal for {}", row.video_id))?;
@@ -165,14 +187,41 @@ pub fn run_sweep(
                         .swept_terminal_by_label
                         .entry(m.label.to_string())
                         .or_insert(0) += 1;
+                } else {
+                    // Predicate miss: a concurrent writer moved the row off
+                    // failed_retryable after our snapshot. Examined but in
+                    // no action bucket — warned, not counted (see the
+                    // SweepStats doc; same convention as the run census's
+                    // mutator-miss handling).
+                    tracing::warn!(
+                        video_id = row.video_id.as_str(),
+                        action = "sweep_mark_terminal",
+                        "sweep: predicate miss; row no longer failed_retryable — not counted"
+                    );
                 }
             }
             Disposition::RequiresCookie if !cookies_configured => {
                 stats.parked_for_cookies += 1;
             }
             Disposition::Retryable | Disposition::RequiresCookie => {
+                // T07 review fix (adjudicated, preserve-kind-on-fallback): a
+                // fallback hit carries no positive evidence about the message
+                // class, so it must not overwrite a real stored kind (e.g.
+                // ToolTimeout/TranscribeOther — non-fetch failures this
+                // fetch-stderr table never matches). Empty/NULL kinds and the
+                // legacy placeholder "Fetch" still take the fallback label so
+                // they normalize before becoming claimable (the cookie gate
+                // reads the kind at claim time).
+                let kind = if m.matched_rule {
+                    m.label
+                } else {
+                    match row.last_retryable_kind.as_deref() {
+                        Some(k) if !k.is_empty() && k != "Fetch" => k,
+                        _ => m.label,
+                    }
+                };
                 let changed = store
-                    .sweep_requeue(&row.video_id, m.label, retries + 1)
+                    .sweep_requeue(&row.video_id, kind, retries + 1)
                     .with_context(|| format!("sweep requeue for {}", row.video_id))?;
                 if changed > 0 {
                     stats.requeued_for_retry += 1;
@@ -345,6 +394,106 @@ mod tests {
             second.examined, 0,
             "requeued rows left failed_retryable — nothing to sweep"
         );
+    }
+
+    /// Review fix (T07): `String::truncate` panics off a char boundary. A
+    /// localized (multi-byte) stored message whose 500th byte falls inside
+    /// a character must truncate safely, not panic the sweep.
+    #[test]
+    fn sweep_truncates_terminal_message_on_char_boundary() {
+        let tmp = TempDir::new().unwrap();
+        let mut store = Store::open(&tmp.path().join("state.sqlite")).unwrap();
+        let table = ClassificationTable::compiled_default().unwrap();
+
+        // "[sweep] " (8 bytes) + the 35-byte ASCII head = 43 bytes, then
+        // 2-byte 'é's: char boundaries sit at odd offsets, so byte 500
+        // lands MID-CHARACTER. Precondition asserted below.
+        let msg = format!("ERROR: Your IP address is blocked, {}", "é".repeat(300));
+        let full = format!("[sweep] {msg}");
+        assert!(
+            !full.is_char_boundary(500),
+            "fixture must straddle the truncation boundary"
+        );
+        seed_parked(&mut store, &tmp, "v_wide", "Fetch", &msg, 1);
+
+        let stats = run_sweep(&mut store, &table, 1, false).unwrap();
+        assert_eq!(stats.swept_terminal, 1);
+
+        let conn = rusqlite::Connection::open(tmp.path().join("state.sqlite")).unwrap();
+        let terminal_message: String = conn
+            .query_row(
+                "SELECT terminal_message FROM videos WHERE video_id='v_wide'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(terminal_message.len() <= 500);
+        assert!(terminal_message.starts_with("[sweep] ERROR: Your IP address is blocked"));
+    }
+
+    /// Review fix (T07): a fallback classification must not overwrite a
+    /// real stored kind (e.g. ToolTimeout — a non-fetch failure whose
+    /// message the fetch-stderr table never matches).
+    #[test]
+    fn sweep_preserves_real_kind_on_fallback_classification() {
+        let tmp = TempDir::new().unwrap();
+        let mut store = Store::open(&tmp.path().join("state.sqlite")).unwrap();
+        let table = ClassificationTable::compiled_default().unwrap();
+        seed_parked(
+            &mut store,
+            &tmp,
+            "v_timeout",
+            "ToolTimeout",
+            "some tool explosion the table has never seen",
+            1,
+        );
+        let stats = run_sweep(&mut store, &table, 1, false).unwrap();
+        assert_eq!(stats.requeued_for_retry, 1);
+        let row = store.get_video_for_test("v_timeout").unwrap().unwrap();
+        assert_eq!(row.status, "pending");
+        assert_eq!(
+            row.last_retryable_kind.as_deref(),
+            Some("ToolTimeout"),
+            "fallback hit must preserve the real stored kind"
+        );
+    }
+
+    /// Review fix (T07): the legacy placeholder kind "Fetch" (and empty
+    /// kinds) still normalize to the fallback label on a fallback hit —
+    /// the cookie gate reads the kind at claim time and must never see
+    /// the placeholder survive a sweep requeue.
+    #[test]
+    fn sweep_normalizes_placeholder_kind_on_fallback() {
+        let tmp = TempDir::new().unwrap();
+        let mut store = Store::open(&tmp.path().join("state.sqlite")).unwrap();
+        let table = ClassificationTable::compiled_default().unwrap();
+        seed_parked(
+            &mut store,
+            &tmp,
+            "v_legacy",
+            "Fetch",
+            "some tool explosion the table has never seen",
+            1,
+        );
+        seed_parked(
+            &mut store,
+            &tmp,
+            "v_emptykind",
+            "",
+            "another never-seen message",
+            1,
+        );
+        let stats = run_sweep(&mut store, &table, 1, false).unwrap();
+        assert_eq!(stats.requeued_for_retry, 2);
+        for id in ["v_legacy", "v_emptykind"] {
+            let row = store.get_video_for_test(id).unwrap().unwrap();
+            assert_eq!(row.status, "pending");
+            assert_eq!(
+                row.last_retryable_kind.as_deref(),
+                Some("YtDlpOther"),
+                "placeholder/empty kind must normalize to the fallback label ({id})"
+            );
+        }
     }
 
     #[test]

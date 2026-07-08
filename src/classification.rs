@@ -78,6 +78,12 @@ pub struct ClassificationTable {
 pub struct MessageMatch<'a> {
     pub label: &'a str,
     pub disposition: Disposition,
+    /// True when an actual rule matched; false when this outcome is the
+    /// table's fallback. Epic 4a T07 review fix: the sweep must not
+    /// overwrite a real stored kind (e.g. `ToolTimeout`) with the fallback
+    /// label — a fallback hit carries no positive evidence about the
+    /// message class, only "nothing matched".
+    pub matched_rule: bool,
 }
 
 impl ClassificationTable {
@@ -153,12 +159,14 @@ impl ClassificationTable {
                 return MessageMatch {
                     label: &r.label,
                     disposition: r.disposition,
+                    matched_rule: true,
                 };
             }
         }
         MessageMatch {
             label: &self.fallback.label,
             disposition: self.fallback.disposition,
+            matched_rule: false,
         }
     }
 
@@ -370,6 +378,7 @@ mod tests {
             let m = t.classify(msg);
             assert_eq!(m.label, *label, "label for: {msg}");
             assert_eq!(m.disposition, *disposition, "disposition for: {msg}");
+            assert!(m.matched_rule, "corpus hit must report a rule match");
         }
     }
 
@@ -379,6 +388,7 @@ mod tests {
         let m = t.classify("ERROR: some yt-dlp message we have never seen");
         assert_eq!(m.label, "YtDlpOther");
         assert_eq!(m.disposition, Disposition::Retryable);
+        assert!(!m.matched_rule, "fallback must not report a rule match");
     }
 
     #[test]
