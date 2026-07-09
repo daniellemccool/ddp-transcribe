@@ -5,6 +5,14 @@ Load the ADR(s) whose filename matches the area you are touching.
 
 ## Index
 
+### Process
+
+- [0001 — Implementation plans are split into per-task files](./0001-implementation-plans-are-split-into-per-task-files.md)
+- [0003 — Test discipline is tiered: batch test-first for plan-prescribed code, real TDD for deviations](./0003-test-discipline-is-tiered-batch-test-first-for-plan-prescribed-code-real-tdd-for-deviations.md)
+- [0018 — Task reviews are three-tier; codex-advisor is called by the reviewer, never the orchestrator](./0018-task-reviews-are-three-tier-codex-advisor-is-called-by-the-reviewer-never-the-orchestrator.md)
+- [0019 — Subagent reports are capped and structured; controllers restart at phase boundaries](./0019-subagent-reports-are-capped-and-structured-controllers-restart-at-phase-boundaries.md)
+- [0020 — FOLLOWUPS is a scope index over per-epic files; hypotheses are marked unverified](./0020-followups-is-a-scope-index-over-per-epic-files-hypotheses-are-marked-unverified.md)
+
 ### Code conventions
 
 - [0002 — Dead code is suppressed with #[allow(dead_code)] plus a justification comment](./0002-dead-code-is-suppressed-with-allow-dead-code-plus-a-justification-comment.md)
