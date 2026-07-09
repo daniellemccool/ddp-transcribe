@@ -6,7 +6,7 @@ Video-transcription pipeline for data-donation studies (formerly `uu-tiktok`; hi
 
 ## Working disciplines (project-wide ADRs)
 
-Project conventions live in `docs/decisions/` as Architectural Decision Records. The meta-process slate that applies to every epic:
+Project conventions live in `docs/decisions/` as lean ADRs (Decision/Guidance/Why with routing frontmatter), managed by `adg lean` and the write-adr plugin skills. The pre-migration MADR corpus is frozen in `docs/madr-archive/` — full Context/Considered Options prose for any record whose lean `## Why` needs its backstory. The meta-process slate that applies to every epic:
 
 - **0001** — per-task file split for plans (subagent context economy)
 - **0002** — dead-code suppression strategy + deferred bin/lib reassessment
@@ -19,7 +19,7 @@ Project conventions live in `docs/decisions/` as Architectural Decision Records.
 - **0019** — subagent report format and phase-boundary controller restart
 - **0020** — FOLLOWUPS document structure and lifecycle
 
-Feature-derived ADRs (0004, 0009–0017, plus Epic 2+ feature ADRs) live on feat branches and merge in. Read ADRs as needed via `adg view --id NNNN --model docs/decisions` (or browse `adg list`).
+Feature-derived ADRs (0004, 0009–0017, plus Epic 2+ feature ADRs) live on feat branches and merge in. Pull the rules governing files you'll touch via `adg lean brief --model docs/decisions <paths>`; browse the generated `docs/decisions/README.md` index or open records directly.
 
 ## Default working patterns
 
@@ -32,7 +32,7 @@ Feature-derived ADRs (0004, 0009–0017, plus Epic 2+ feature ADRs) live on feat
 
 ## Project-local tools
 
-- **ADRs:** see the `using-adg` skill. Use `scripts/adr` (a thin wrapper around `adg` that hardcodes `--model docs/decisions` and takes bodies via stdin).
+- **ADRs:** author/migrate/review records with the write-adr plugin's `write-lean-adr` skill (`adg lean new --from-stdin`, never by hand); obey injected briefs per `follow-adr-governance`.
 - **codex-advisor:** see the `using-codex-advisor` skill. Per 0018, the orchestrator never calls codex directly during task reviews — the Sonnet spec-compliance reviewer delegates and distills.
 
 ## Active state — query, don't write down
@@ -48,4 +48,4 @@ Per 0020, `docs/FOLLOWUPS.md` carries active-scope review items grouped by targe
 
 ## Verification before any commit
 
-`adg validate` runs as a pre-commit hook (`.githooks/pre-commit`). If a fresh clone doesn't fire it, run `git config core.hooksPath .githooks` once. If validate fails, fix the underlying `docs/decisions/` inconsistency (don't bypass).
+`adg lean index --root .` plus `adg lean check` on staged files run as a pre-commit hook (`.githooks/pre-commit`). If a fresh clone doesn't fire it, run `git config core.hooksPath .githooks` once. If the gate fails, fix the underlying `docs/decisions/` inconsistency (don't bypass).

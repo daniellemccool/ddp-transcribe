@@ -1,0 +1,5 @@
+# Per-model authoring config for `adg lean` (see write-lean-adr skill).
+# narrative: relax only the one-screen whole-body warning so the record-only
+# Why/Context/Alternatives sections can carry traditional-ADR-length prose.
+# Agent-facing budgets (Decision words, compiled-brief lines) are unchanged.
+body_budget: narrative
