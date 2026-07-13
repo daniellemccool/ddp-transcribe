@@ -60,6 +60,7 @@ resolved entries archived under "Resolved by Plan B Epic 4a".
 - Epic 4a T06 review: `--retries` / `max_attempts` accept unvalidated i64 ranges (negatives degenerate the budget; `i64::MAX` overflows at `retries+1`) → Epic 4b (CLI validation pass)
 - Epic 3 close-out ops: config echo logs model path for subcommands that never load it → Epic 4b (`status`/operator-UX pass)
 - Epic 3 close-out ops: operator interface is the tool itself; wrapper scripts non-normative (standing premise, honored by Epic 4a) → Epic 4b planning input
+- Epic 4a first batch (2026-07-08): interrupted `process` leaves an open `batch_runs` row (NULL `finished_at`, no census); `status` must render open runs honestly → Epic 4b (`status` design)
 - Full Epic 4b entries: [followups/epic-4.md](followups/epic-4.md)
 
 **Epic 5 (Plan A → Plan B cleanup sweep)**

@@ -70,6 +70,35 @@ data-quality bug.
 
 ---
 
+### Interrupted `process` leaves an open `batch_runs` row (NULL `finished_at`, no census)
+
+**Found in:** First production 4a batch (2026-07-08). Run 1 of 2 was
+interrupted mid-drain (workspace pause at 12:11 UTC); its `batch_runs` row
+has `finished_at = NULL` and `census_json = NULL`, so that run's census is
+permanently unrecorded. Run 2 closed cleanly. Actual results reconstructed
+from the `videos` table and recorded in
+`../superpowers/plans/2026-07-07-plan-b-epic-4a/EPIC-4A-CLOSE.md`.
+**Disposition:** Working as built — `close_batch_run` only fires on a clean
+finish — but the open row is the on-disk fingerprint of "this batch didn't
+finish" and the operator surface should say so. Fold into Epic 4b's `status`
+work.
+**Trigger to revisit:** Epic 4b `status` subcommand design (it renders
+`batch_runs` history).
+
+Two concrete asks for `status`:
+
+1. Render open rows honestly (e.g., `run 1 — started 2026-07-08 11:41,
+   INTERRUPTED, no census`) rather than skipping them or crashing on NULLs.
+2. Consider noting in the rendering (or docs) that an interrupted run's
+   outcomes are not lost — they are reconstructable from `videos`
+   (`last_retryable_kind` × `status`), since kind survives recovery.
+
+Bonus papercut from the same session: `SELECT * FROM batch_runs` is
+unreadable in a terminal because `policy_toml` / `census_json` are large
+embedded blobs — `status` existing is the fix; no schema change wanted.
+
+---
+
 ### `--retries` / `max_attempts` accept unvalidated i64 ranges
 
 **Found in:** Epic 4a T06 review (adjudicated deferral; no ledger entry until now).
