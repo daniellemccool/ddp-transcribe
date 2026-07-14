@@ -18,6 +18,7 @@ mod output;
 mod pipeline;
 mod process;
 mod state;
+mod status;
 mod transcribe;
 
 #[tokio::main]
@@ -281,6 +282,25 @@ async fn main() -> Result<()> {
             state::migrate::run_migrate(path).context("running migrate")?;
             tracing::info!(path = %path.display(), "migrate complete");
         }
+        cli::Command::Status { json } => {
+            let path = &cfg.state_db;
+            if !path.exists() {
+                anyhow::bail!(
+                    "status: state.sqlite not found at {}. Run `ddp-transcribe init` first.",
+                    path.display()
+                );
+            }
+            let store = state::Store::open(path).context("opening state DB")?;
+            let report = status::build_report(&store, state::unix_now())?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).context("serializing status report")?
+                );
+            } else {
+                print!("{}", status::render_report(&report));
+            }
+        }
     }
 
     Ok(())
@@ -293,14 +313,22 @@ fn hostname_or_default() -> String {
 fn init_tracing(format: cli::LogFormat) {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // Logs go to stderr, never stdout: `status --json` (and any future
+    // machine-readable command output) must be pure, parseable JSON on
+    // stdout with no log lines interleaved. `fmt()`'s default writer is
+    // stdout, so both branches route explicitly to stderr.
     match format {
         cli::LogFormat::Human => {
-            tracing_subscriber::fmt().with_env_filter(filter).init();
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_writer(std::io::stderr)
+                .init();
         }
         cli::LogFormat::Json => {
             tracing_subscriber::fmt()
                 .json()
                 .with_env_filter(filter)
+                .with_writer(std::io::stderr)
                 .init();
         }
     }

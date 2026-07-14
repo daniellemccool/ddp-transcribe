@@ -1,4 +1,5 @@
 pub mod migrate;
+pub mod queries;
 mod schema;
 
 use std::path::Path;
@@ -8,7 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 pub use schema::SCHEMA_VERSION;
 
-fn unix_now() -> i64 {
+pub(crate) fn unix_now() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
