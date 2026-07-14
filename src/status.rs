@@ -5,7 +5,10 @@
 //! `state::queries`.
 
 use std::collections::BTreeMap;
+use std::collections::HashSet;
+use std::ffi::OsString;
 use std::fmt::Write as _;
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
@@ -34,6 +37,9 @@ pub struct StatusReport {
     pub retryable_by_kind: BTreeMap<String, i64>,
     pub in_progress: Vec<InProgressAge>,
     pub batch_runs: Vec<BatchRunSummary>,
+    /// Present only under --verify (Task 04): the 0017 done-contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verify: Option<VerifyReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -126,6 +132,7 @@ pub fn build_report(store: &Store, now: i64) -> Result<StatusReport> {
         retryable_by_kind,
         in_progress,
         batch_runs,
+        verify: None,
     })
 }
 
@@ -153,6 +160,123 @@ fn summarize_run(row: BatchRunRow, compiled_default_toml: Option<&str>) -> Batch
             compiled_default: compiled_default_toml == Some(row.policy_toml.as_str()),
         },
         census_headline,
+    }
+}
+
+/// The archived ADR-0017 done-contract, mechanised. Sample vectors cap at
+/// [`VERIFY_SAMPLE_CAP`] ids so a catastrophically wrong tree doesn't blow
+/// up the report; counts are always complete.
+pub const VERIFY_SAMPLE_CAP: usize = 20;
+
+#[derive(Debug, Serialize)]
+pub struct VerifyReport {
+    pub succeeded_rows: usize,
+    /// Rows missing `.txt` or `.json` at the sharded path.
+    pub artifacts_missing: usize,
+    /// Rows whose `.json` parsed but `raw_signals.schema_version` differs
+    /// from EXPECTED_RAW_SIGNALS_SCHEMA_VERSION (or raw_signals is absent).
+    pub schema_version_mismatches: usize,
+    /// Rows whose `.json` exists but could not be read/parsed at all.
+    pub unreadable_artifacts: usize,
+    pub pending: i64,
+    pub in_progress: i64,
+    /// 0017 + 0011: everything terminal, all artifacts present and
+    /// schema-valid, nothing awaiting recovery → safe to spin down.
+    pub pause_safe: bool,
+    pub sample_missing: Vec<String>,
+    pub sample_mismatched: Vec<String>,
+    pub sample_unreadable: Vec<String>,
+}
+
+pub fn run_verify(
+    store: &Store,
+    transcripts_root: &Path,
+    counts: &BTreeMap<String, i64>,
+) -> Result<VerifyReport> {
+    let ids = store
+        .list_succeeded_ids()
+        .context("listing succeeded ids")?;
+
+    // Brainstorm-note batching: group ids per shard, ONE read_dir per
+    // shard into a filename set, then set lookups. Never per-row stat.
+    let mut by_shard: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for id in &ids {
+        by_shard
+            .entry(crate::output::shard(id))
+            .or_default()
+            .push(id);
+    }
+
+    let mut report = VerifyReport {
+        succeeded_rows: ids.len(),
+        artifacts_missing: 0,
+        schema_version_mismatches: 0,
+        unreadable_artifacts: 0,
+        pending: counts.get("pending").copied().unwrap_or(0),
+        in_progress: counts.get("in_progress").copied().unwrap_or(0),
+        pause_safe: false,
+        sample_missing: Vec::new(),
+        sample_mismatched: Vec::new(),
+        sample_unreadable: Vec::new(),
+    };
+
+    for (shard, shard_ids) in by_shard {
+        let dir = transcripts_root.join(shard);
+        // Absent shard dir → empty set → every row in it counts missing.
+        // Honest when status runs away from the artifacts volume.
+        let names: HashSet<OsString> = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries
+                .filter_map(|e| e.ok().map(|e| e.file_name()))
+                .collect(),
+            Err(_) => HashSet::new(),
+        };
+        for id in shard_ids {
+            let txt = OsString::from(format!("{id}.txt"));
+            let json = OsString::from(format!("{id}.json"));
+            if !(names.contains(&txt) && names.contains(&json)) {
+                report.artifacts_missing += 1;
+                push_capped(&mut report.sample_missing, id);
+                continue;
+            }
+            match std::fs::read(dir.join(format!("{id}.json"))) {
+                Ok(bytes) => match serde_json::from_slice::<
+                    crate::output::artifacts::TranscriptMetadata,
+                >(&bytes)
+                {
+                    Ok(meta) => {
+                        let ok = meta.raw_signals.as_ref().is_some_and(|rs| {
+                            rs.schema_version
+                                == crate::output::artifacts::EXPECTED_RAW_SIGNALS_SCHEMA_VERSION
+                        });
+                        if !ok {
+                            report.schema_version_mismatches += 1;
+                            push_capped(&mut report.sample_mismatched, id);
+                        }
+                    }
+                    Err(_) => {
+                        report.unreadable_artifacts += 1;
+                        push_capped(&mut report.sample_unreadable, id);
+                    }
+                },
+                Err(_) => {
+                    report.unreadable_artifacts += 1;
+                    push_capped(&mut report.sample_unreadable, id);
+                }
+            }
+        }
+    }
+
+    report.pause_safe = report.pending == 0
+        && report.in_progress == 0
+        && report.artifacts_missing == 0
+        && report.schema_version_mismatches == 0
+        && report.unreadable_artifacts == 0;
+    Ok(report)
+}
+
+fn push_capped(v: &mut Vec<String>, id: &str) {
+    if v.len() < VERIFY_SAMPLE_CAP {
+        v.push(id.to_string());
     }
 }
 
@@ -278,6 +402,55 @@ pub fn render_report(report: &StatusReport) -> String {
             }
         }
     }
+
+    if let Some(v) = &report.verify {
+        let _ = writeln!(out, "done-contract (0017) --verify:");
+        let _ = writeln!(out, "  succeeded rows            {:>7}", v.succeeded_rows);
+        let _ = writeln!(
+            out,
+            "  artifacts missing         {:>7}",
+            v.artifacts_missing
+        );
+        let _ = writeln!(
+            out,
+            "  schema_version mismatches {:>7}",
+            v.schema_version_mismatches
+        );
+        let _ = writeln!(
+            out,
+            "  unreadable artifacts      {:>7}",
+            v.unreadable_artifacts
+        );
+        let _ = writeln!(
+            out,
+            "  pending {}  in_progress {}  (pending may be deliberate under --max-videos)",
+            v.pending, v.in_progress
+        );
+        for (label, sample) in [
+            ("missing", &v.sample_missing),
+            ("mismatched", &v.sample_mismatched),
+            ("unreadable", &v.sample_unreadable),
+        ] {
+            if !sample.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "  first {} {label}: {}",
+                    sample.len(),
+                    sample.join(", ")
+                );
+            }
+        }
+        let _ = writeln!(
+            out,
+            "  pause-safe: {}",
+            if v.pause_safe {
+                "YES — safe to spin down (0011)"
+            } else {
+                "NO"
+            }
+        );
+    }
+
     out
 }
 

@@ -123,6 +123,21 @@ impl Store {
             .context("collect list_batch_runs")?;
         Ok(rows)
     }
+
+    /// All succeeded video_ids — the population the 0017 done-contract
+    /// checks walk. Plain Vec: the caller groups by shard.
+    pub fn list_succeeded_ids(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT video_id FROM videos WHERE status = 'succeeded' ORDER BY video_id")
+            .context("prepare list_succeeded_ids")?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .context("query list_succeeded_ids")?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("collect list_succeeded_ids")?;
+        Ok(rows)
+    }
 }
 
 /// Full videos-row projection for `status --video-id`. Every nullable

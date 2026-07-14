@@ -127,6 +127,11 @@ pub enum Command {
         /// List failed_retryable videos with last_retryable_kind / _message.
         #[arg(long)]
         retryable: bool,
+        /// Run the done-contract checks (artifact existence at the sharded
+        /// paths + raw_signals.schema_version parse + pause-safe verdict).
+        /// Reads the --transcripts tree; exits 1 when not pause-safe.
+        #[arg(long, conflicts_with_all = ["video_id", "respondent_id", "errors", "retryable"])]
+        verify: bool,
         /// Emit machine-readable JSON instead of human-readable text.
         #[arg(long)]
         json: bool,

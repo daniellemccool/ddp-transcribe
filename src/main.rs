@@ -287,6 +287,7 @@ async fn main() -> Result<()> {
             respondent_id,
             errors,
             retryable,
+            verify,
             json,
         } => {
             let path = &cfg.state_db;
@@ -342,11 +343,22 @@ async fn main() -> Result<()> {
                     print!("{}", status::render_failure_lists(&lists));
                 }
             } else {
-                let report = status::build_report(&store, state::unix_now())?;
+                let mut report = status::build_report(&store, state::unix_now())?;
+                if verify {
+                    report.verify = Some(
+                        status::run_verify(&store, &cfg.transcripts, &report.counts)
+                            .context("running --verify checks")?,
+                    );
+                }
                 if json {
                     println!("{}", serde_json::to_string_pretty(&report)?);
                 } else {
                     print!("{}", status::render_report(&report));
+                }
+                if let Some(v) = &report.verify {
+                    if !v.pause_safe {
+                        std::process::exit(1);
+                    }
                 }
             }
         }

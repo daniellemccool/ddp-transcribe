@@ -311,3 +311,143 @@ fn status_detail_modes_conflict_at_parse_time() {
         .assert()
         .code(2);
 }
+
+/// Minimal VALID transcript JSON for the schema-version check —
+/// TranscriptMetadata's mandatory fields + raw_signals.schema_version.
+fn artifact_json(video_id: &str, schema_version: &str) -> String {
+    format!(
+        r#"{{"video_id":"{video_id}","source_url":"https://example/{video_id}",
+"duration_s":1.0,"language_detected":"en","transcribed_at":"2026-07-13T00:00:00Z",
+"fetcher":"ytdlp","transcript_source":"whisper-rs","model":"test",
+"raw_signals":{{"schema_version":"{schema_version}","language":"en","lang_probs":null,"segments":[]}}}}"#
+    )
+}
+
+fn write_artifacts(root: &std::path::Path, video_id: &str, txt: bool, json: Option<&str>) {
+    // Shard = last two chars of the id (output::shard contract).
+    let shard = &video_id[video_id.len() - 2..];
+    let dir = root.join(shard);
+    std::fs::create_dir_all(&dir).unwrap();
+    if txt {
+        std::fs::write(dir.join(format!("{video_id}.txt")), "text").unwrap();
+    }
+    if let Some(ver) = json {
+        std::fs::write(
+            dir.join(format!("{video_id}.json")),
+            artifact_json(video_id, ver),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn verify_reports_missing_and_mismatched_artifacts_and_exits_1() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = seeded_db(&tmp); // has v_ok1 + v_ok2 succeeded, v_pend pending, v_prog in_progress
+    let transcripts = tmp.path().join("transcripts");
+    write_artifacts(&transcripts, "v_ok1", true, Some("1")); // complete + valid
+    write_artifacts(&transcripts, "v_ok2", true, None); // .json missing
+
+    let out = Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args([
+            "--state-db",
+            db.to_str().unwrap(),
+            "--transcripts",
+            transcripts.to_str().unwrap(),
+            "status",
+            "--verify",
+            "--json",
+        ])
+        .assert()
+        .code(1) // pending + in_progress + missing artifact → NOT pause-safe
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let ver = &v["verify"];
+    assert_eq!(ver["succeeded_rows"], 2);
+    assert_eq!(ver["artifacts_missing"], 1);
+    assert_eq!(ver["schema_version_mismatches"], 0);
+    assert_eq!(ver["pause_safe"], false);
+    assert_eq!(ver["sample_missing"][0], "v_ok2");
+}
+
+#[test]
+fn verify_flags_schema_version_mismatch() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = tmp.path().join("state.sqlite");
+    {
+        let _s = ddp_transcribe::state::Store::open(&db).unwrap();
+    }
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute(
+        "INSERT INTO videos (video_id, source_url, canonical, status, first_seen_at, updated_at)
+         VALUES ('v_badver', 'https://example/v_badver', 1, 'succeeded', 100, 100)",
+        [],
+    )
+    .unwrap();
+    let transcripts = tmp.path().join("transcripts");
+    write_artifacts(&transcripts, "v_badver", true, Some("999"));
+
+    let out = Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args([
+            "--state-db",
+            db.to_str().unwrap(),
+            "--transcripts",
+            transcripts.to_str().unwrap(),
+            "status",
+            "--verify",
+            "--json",
+        ])
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["verify"]["schema_version_mismatches"], 1);
+    assert_eq!(v["verify"]["sample_mismatched"][0], "v_badver");
+}
+
+#[test]
+fn verify_all_green_is_pause_safe_and_exits_0() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = tmp.path().join("state.sqlite");
+    {
+        let _s = ddp_transcribe::state::Store::open(&db).unwrap();
+    }
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute(
+        "INSERT INTO videos (video_id, source_url, canonical, status, first_seen_at, updated_at)
+         VALUES ('v_ok9', 'https://example/v_ok9', 1, 'succeeded', 100, 100)",
+        [],
+    )
+    .unwrap();
+    let transcripts = tmp.path().join("transcripts");
+    write_artifacts(&transcripts, "v_ok9", true, Some("1"));
+
+    Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args([
+            "--state-db",
+            db.to_str().unwrap(),
+            "--transcripts",
+            transcripts.to_str().unwrap(),
+            "status",
+            "--verify",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("pause-safe: YES"));
+}
+
+#[test]
+fn verify_conflicts_with_detail_modes() {
+    Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args(["status", "--verify", "--video-id", "x"])
+        .assert()
+        .code(2); // clap usage error
+}
