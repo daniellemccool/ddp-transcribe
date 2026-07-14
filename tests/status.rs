@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 
 /// Build a seeded v-current DB via the public Store::open (schema apply),
@@ -42,6 +43,47 @@ fn seeded_db(tmp: &tempfile::TempDir) -> std::path::PathBuf {
         "INSERT INTO batch_runs (started_at, finished_at, params_json, policy_toml, census_json)
          VALUES (300, 400, '{\"retries\":2,\"download_workers\":3,\"cookies_present\":true}', 'schema = 1',
                  '{\"sweep\":{\"examined\":5},\"run\":{\"claimed\":3,\"succeeded\":2,\"failed\":1}}')",
+        [],
+    )
+    .unwrap();
+    // Event history for v_retry1: claim → retry_requeued → sweep requeue.
+    for (at, ev, worker, detail) in [
+        (110, "claimed", Some("w1"), None),
+        (
+            120,
+            "retry_requeued",
+            Some("w1"),
+            Some(
+                r#"{"kind":"NoPermission","message":"ERROR: You do not have permission to view this post","policy":"deterministic-audio"}"#,
+            ),
+        ),
+        (
+            130,
+            "requeued",
+            Some("sweep"),
+            Some(r#"{"new_kind":"NoPermission"}"#),
+        ),
+    ] {
+        conn.execute(
+            "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
+             VALUES ('v_retry1', ?1, ?2, ?3, ?4)",
+            rusqlite::params![at, ev, worker, detail],
+        )
+        .unwrap();
+    }
+    // watch_history for the respondent summary (in_window NOT NULL in v3).
+    for (vid, watched_at) in [("v_ok1", 500), ("v_ok2", 600), ("v_retry1", 700)] {
+        conn.execute(
+            "INSERT INTO watch_history (respondent_id, video_id, watched_at, in_window)
+             VALUES ('resp-a', ?1, ?2, 1)",
+            rusqlite::params![vid, watched_at],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "UPDATE videos SET terminal_reason='IpBlockedMessage',
+                           terminal_message='ERROR: Your IP address is blocked'
+         WHERE video_id='v_term'",
         [],
     )
     .unwrap();
@@ -158,4 +200,100 @@ fn status_json_flags_compiled_default_policy() {
         run3["policy"]["bytes"],
         u64::try_from(default_toml.len()).unwrap()
     );
+}
+
+#[test]
+fn status_video_id_renders_legible_event_history() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = seeded_db(&tmp);
+    Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args([
+            "--state-db",
+            db.to_str().unwrap(),
+            "status",
+            "--video-id",
+            "v_retry1",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("v_retry1"))
+        .stdout(contains("failed_retryable"))
+        .stdout(contains("claimed"))
+        .stdout(contains("retry_requeued"))
+        .stdout(contains("kind=NoPermission"))
+        .stdout(contains("policy=deterministic-audio"))
+        .stdout(contains("new_kind=NoPermission"))
+        .stdout(contains("You do not have permission"))
+        // Legibility contract: no raw JSON blobs for known shapes.
+        .stdout(contains(r#"{"kind""#).not());
+}
+
+#[test]
+fn status_video_id_unknown_is_a_failure() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = seeded_db(&tmp);
+    Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args([
+            "--state-db",
+            db.to_str().unwrap(),
+            "status",
+            "--video-id",
+            "nope",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("not found"));
+}
+
+#[test]
+fn status_respondent_summary_counts() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = seeded_db(&tmp);
+    let out = Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args([
+            "--state-db",
+            db.to_str().unwrap(),
+            "status",
+            "--respondent-id",
+            "resp-a",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let s = &v["respondent"];
+    assert_eq!(s["videos_seen"], 3);
+    assert_eq!(s["videos_in_window"], 3);
+    assert_eq!(s["videos_succeeded"], 2);
+    assert_eq!(s["videos_failed_retryable"], 1);
+    assert_eq!(s["videos_failed_terminal"], 0);
+    assert_eq!(s["watch_events"], 3);
+}
+
+#[test]
+fn status_errors_and_retryable_lists() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = seeded_db(&tmp);
+    Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args([
+            "--state-db",
+            db.to_str().unwrap(),
+            "status",
+            "--errors",
+            "--retryable",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("v_term"))
+        .stdout(contains("IpBlockedMessage"))
+        .stdout(contains("v_retry1"))
+        .stdout(contains("v_retry2"))
+        .stdout(contains("(legacy placeholder kind)"));
 }

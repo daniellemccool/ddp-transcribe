@@ -115,6 +115,18 @@ pub enum Command {
     /// Report pipeline state: counts by status, failure breakdowns,
     /// current claims, and batch-run history. Read-only.
     Status {
+        /// Full event history for one video.
+        #[arg(long)]
+        video_id: Option<String>,
+        /// Per-respondent summary counts.
+        #[arg(long)]
+        respondent_id: Option<String>,
+        /// List failed_terminal videos with terminal_reason / terminal_message.
+        #[arg(long)]
+        errors: bool,
+        /// List failed_retryable videos with last_retryable_kind / _message.
+        #[arg(long)]
+        retryable: bool,
         /// Emit machine-readable JSON instead of human-readable text.
         #[arg(long)]
         json: bool,

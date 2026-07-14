@@ -6,6 +6,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
 
 pub use schema::SCHEMA_VERSION;
 
@@ -49,7 +50,7 @@ pub struct VideoRow {
 /// awaiting sweep adjudication. Message included because the sweep
 /// classifies stored messages directly through the active
 /// `ClassificationTable` (no probe step post-Epic-4a).
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct ParkedRow {
     pub video_id: String,
     /// The previously-stored retryable kind. `batch::run_sweep` reads it on a
@@ -62,13 +63,10 @@ pub struct ParkedRow {
     /// preserve-kind-on-fallback fix made this field a live read.)
     pub last_retryable_kind: Option<String>,
     pub last_retryable_message: Option<String>,
-    // 0002: read only by `Debug` and the integration tests since Epic 4a T08
-    // deleted the triage subcommand (its `run_triage` compared this against
-    // `--max-attempts`). `batch::run_sweep` caps via `retries + 1` passed to
-    // `sweep_requeue`, not from the snapshot, so the bin no longer reads this
-    // field. Suppressed rather than removed — the row-shape and the tests want
-    // it. Lift when a raw-connection consumer reads it again.
-    #[allow(dead_code)]
+    // 0002: `#[allow(dead_code)]` lifted (Epic 4b Task 03) — the
+    // `status --retryable` renderer is the first bin consumer since Epic 4a
+    // T08 deleted the triage subcommand (its `run_triage` compared this
+    // against `--max-attempts`).
     pub attempt_count: i64,
 }
 

@@ -282,7 +282,13 @@ async fn main() -> Result<()> {
             state::migrate::run_migrate(path).context("running migrate")?;
             tracing::info!(path = %path.display(), "migrate complete");
         }
-        cli::Command::Status { json } => {
+        cli::Command::Status {
+            video_id,
+            respondent_id,
+            errors,
+            retryable,
+            json,
+        } => {
             let path = &cfg.state_db;
             if !path.exists() {
                 anyhow::bail!(
@@ -291,14 +297,57 @@ async fn main() -> Result<()> {
                 );
             }
             let store = state::Store::open(path).context("opening state DB")?;
-            let report = status::build_report(&store, state::unix_now())?;
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&report).context("serializing status report")?
-                );
+            if let Some(id) = video_id {
+                let report = status::build_video_detail(&store, &id)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    print!("{}", status::render_video_detail(&report));
+                }
+            } else if let Some(id) = respondent_id {
+                let report = status::RespondentReport {
+                    respondent: store
+                        .respondent_summary(&id)
+                        .context("respondent summary")?,
+                };
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    print!("{}", status::render_respondent(&report));
+                }
+            } else if errors || retryable {
+                let lists = status::FailureLists {
+                    errors: if errors {
+                        Some(
+                            store
+                                .list_terminal_failures()
+                                .context("listing terminal failures")?,
+                        )
+                    } else {
+                        None
+                    },
+                    retryable: if retryable {
+                        Some(
+                            store
+                                .list_failed_retryable()
+                                .context("listing retryable failures")?,
+                        )
+                    } else {
+                        None
+                    },
+                };
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&lists)?);
+                } else {
+                    print!("{}", status::render_failure_lists(&lists));
+                }
             } else {
-                print!("{}", status::render_report(&report));
+                let report = status::build_report(&store, state::unix_now())?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    print!("{}", status::render_report(&report));
+                }
             }
         }
     }

@@ -311,3 +311,220 @@ fn render_params(params: &serde_json::Value) -> String {
         format!("params: {params}")
     }
 }
+
+use crate::state::queries::{RespondentSummary, TerminalRow, VideoDetailRow, VideoEventRow};
+use crate::state::ParkedRow;
+
+#[derive(Debug, Serialize)]
+pub struct VideoDetailReport {
+    pub video: VideoDetailRow,
+    pub events: Vec<VideoEventRow>,
+}
+
+pub fn build_video_detail(store: &Store, video_id: &str) -> Result<VideoDetailReport> {
+    let video = store
+        .get_video_detail(video_id)
+        .context("loading video row")?
+        .with_context(|| format!("video {video_id} not found in the state DB"))?;
+    let events = store
+        .list_video_events(video_id)
+        .context("loading video events")?;
+    Ok(VideoDetailReport { video, events })
+}
+
+pub fn render_video_detail(r: &VideoDetailReport) -> String {
+    let mut out = String::new();
+    let v = &r.video;
+    let _ = writeln!(out, "video {}", v.video_id);
+    let _ = writeln!(out, "  url        {}", v.source_url);
+    let _ = writeln!(
+        out,
+        "  status     {}  attempts {}",
+        v.status, v.attempt_count
+    );
+    let _ = writeln!(
+        out,
+        "  first_seen {}  updated {}",
+        fmt_utc(v.first_seen_at),
+        fmt_utc(v.updated_at)
+    );
+    if let Some(at) = v.succeeded_at {
+        let _ = writeln!(
+            out,
+            "  succeeded  {}  duration_s {}  language {}  fetcher {}  source {}",
+            fmt_utc(at),
+            v.duration_s
+                .map_or_else(|| "?".into(), |d| format!("{d:.1}")),
+            v.language_detected.as_deref().unwrap_or("?"),
+            v.fetcher.as_deref().unwrap_or("?"),
+            v.transcript_source.as_deref().unwrap_or("?"),
+        );
+    }
+    if let (Some(by), Some(at)) = (&v.claimed_by, v.claimed_at) {
+        let _ = writeln!(out, "  claimed_by {by}  claimed_at {}", fmt_utc(at));
+    }
+    if let Some(kind) = &v.last_retryable_kind {
+        let note = if kind == "Fetch" {
+            "  (legacy placeholder kind)"
+        } else {
+            ""
+        };
+        let _ = writeln!(out, "  last_retryable_kind {kind}{note}");
+        if let Some(msg) = &v.last_retryable_message {
+            let _ = writeln!(out, "    message: {}", excerpt(msg));
+        }
+    }
+    if let Some(reason) = &v.terminal_reason {
+        let _ = writeln!(out, "  terminal_reason {reason}");
+        if let Some(msg) = &v.terminal_message {
+            let _ = writeln!(out, "    message: {}", excerpt(msg));
+        }
+    }
+    let _ = writeln!(out, "  events ({}):", r.events.len());
+    for e in &r.events {
+        let _ = write!(
+            out,
+            "    {}  {:<16} worker {}",
+            fmt_utc(e.at),
+            e.event_type,
+            e.worker_id.as_deref().unwrap_or("-")
+        );
+        let _ = writeln!(
+            out,
+            "{}",
+            render_event_detail_inline(e.detail_json.as_deref())
+        );
+        if let Some(msg) = detail_message(e.detail_json.as_deref()) {
+            let _ = writeln!(out, "        message: {}", excerpt(&msg));
+        }
+    }
+    out
+}
+
+/// Inline key=value rendering of the known detail_json shapes
+/// ({"kind","message"[,"policy"]}, {"reason","message"}, {"new_kind"}).
+/// `message` is excluded here (rendered on its own line). Unknown shapes
+/// fall back to the raw JSON so nothing is hidden.
+fn render_event_detail_inline(detail: Option<&str>) -> String {
+    let Some(raw) = detail else {
+        return String::new();
+    };
+    let Ok(serde_json::Value::Object(obj)) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return format!("  detail: {raw}");
+    };
+    let known = ["kind", "policy", "new_kind", "reason"];
+    let mut parts: Vec<String> = known
+        .iter()
+        .filter_map(|k| {
+            obj.get(*k)
+                .and_then(serde_json::Value::as_str)
+                .map(|v| format!("{k}={v}"))
+        })
+        .collect();
+    let unknown: Vec<&String> = obj
+        .keys()
+        .filter(|k| !known.contains(&k.as_str()) && *k != "message")
+        .collect();
+    if !unknown.is_empty() {
+        parts.push(format!("(+{} more field(s): see --json)", unknown.len()));
+    }
+    if parts.is_empty() && !obj.contains_key("message") {
+        return format!("  detail: {raw}");
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("  {}", parts.join(" "))
+    }
+}
+
+fn detail_message(detail: Option<&str>) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(detail?).ok()?;
+    v["message"].as_str().map(std::string::ToString::to_string)
+}
+
+/// 200-byte char-boundary-safe excerpt for stored yt-dlp/TikTok text
+/// (localized text panics a naive truncate — same hazard as the sweep's).
+fn excerpt(s: &str) -> String {
+    let mut owned = s.to_string();
+    crate::batch::truncate_to_char_boundary(&mut owned, 200);
+    if owned.len() < s.len() {
+        owned.push('…');
+    }
+    owned
+}
+
+#[derive(Debug, Serialize)]
+pub struct RespondentReport {
+    pub respondent: RespondentSummary,
+}
+
+pub fn render_respondent(r: &RespondentReport) -> String {
+    let s = &r.respondent;
+    let mut out = String::new();
+    let _ = writeln!(out, "respondent {}", s.respondent_id);
+    let _ = writeln!(out, "  watch_events            {:>7}", s.watch_events);
+    let _ = writeln!(out, "  videos_seen             {:>7}", s.videos_seen);
+    let _ = writeln!(out, "  videos_in_window        {:>7}", s.videos_in_window);
+    let _ = writeln!(out, "  videos_succeeded        {:>7}", s.videos_succeeded);
+    let _ = writeln!(
+        out,
+        "  videos_failed_terminal  {:>7}",
+        s.videos_failed_terminal
+    );
+    let _ = writeln!(
+        out,
+        "  videos_failed_retryable {:>7}",
+        s.videos_failed_retryable
+    );
+    let _ = writeln!(out, "  videos_pending          {:>7}", s.videos_pending);
+    let _ = writeln!(out, "  videos_in_progress      {:>7}", s.videos_in_progress);
+    out
+}
+
+#[derive(Debug, Serialize)]
+pub struct FailureLists {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub errors: Option<Vec<TerminalRow>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<Vec<ParkedRow>>,
+}
+
+pub fn render_failure_lists(l: &FailureLists) -> String {
+    let mut out = String::new();
+    if let Some(errors) = &l.errors {
+        let _ = writeln!(out, "failed_terminal ({}):", errors.len());
+        for e in errors {
+            let _ = writeln!(
+                out,
+                "  {}  {}  (updated {})",
+                e.video_id,
+                e.terminal_reason.as_deref().unwrap_or("(none)"),
+                fmt_utc(e.updated_at),
+            );
+            if let Some(msg) = &e.terminal_message {
+                let _ = writeln!(out, "      message: {}", excerpt(msg));
+            }
+        }
+    }
+    if let Some(retryable) = &l.retryable {
+        let _ = writeln!(out, "failed_retryable ({}):", retryable.len());
+        for r in retryable {
+            let kind = r.last_retryable_kind.as_deref().unwrap_or("(none)");
+            let note = if kind == "Fetch" {
+                "  (legacy placeholder kind)"
+            } else {
+                ""
+            };
+            let _ = writeln!(
+                out,
+                "  {}  {kind}  attempts {}{note}",
+                r.video_id, r.attempt_count
+            );
+            if let Some(msg) = &r.last_retryable_message {
+                let _ = writeln!(out, "      message: {}", excerpt(msg));
+            }
+        }
+    }
+    out
+}
