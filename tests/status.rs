@@ -96,6 +96,9 @@ fn status_json_is_parseable_and_correct() {
     assert_eq!(runs[1]["interrupted"], false);
     assert_eq!(runs[1]["census_headline"]["claimed"], 3);
     assert_eq!(runs[1]["params"]["retries"], 2);
+    // Policy provenance: 'schema = 1' is 10 bytes and is not the compiled default.
+    assert_eq!(runs[0]["policy"]["bytes"], 10);
+    assert_eq!(runs[0]["policy"]["compiled_default"], false);
 }
 
 #[test]
@@ -122,4 +125,37 @@ fn status_empty_db_renders_zero_counts() {
         .assert()
         .success()
         .stdout(contains("0 total"));
+}
+
+#[test]
+fn status_json_flags_compiled_default_policy() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = seeded_db(&tmp);
+    let default_toml = ddp_transcribe::classification::ClassificationTable::compiled_default()
+        .unwrap()
+        .source_toml()
+        .to_string();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute(
+        "INSERT INTO batch_runs (started_at, finished_at, params_json, policy_toml, census_json)
+         VALUES (500, 600, '{}', ?1, '{}')",
+        rusqlite::params![default_toml],
+    )
+    .unwrap();
+    let out = Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args(["--state-db", db.to_str().unwrap(), "status", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let runs = v["batch_runs"].as_array().unwrap();
+    let run3 = &runs[2];
+    assert_eq!(run3["policy"]["compiled_default"], true);
+    assert_eq!(
+        run3["policy"]["bytes"],
+        u64::try_from(default_toml.len()).unwrap()
+    );
 }
