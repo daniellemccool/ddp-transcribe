@@ -297,3 +297,17 @@ fn status_errors_and_retryable_lists() {
         .stdout(contains("v_retry2"))
         .stdout(contains("(legacy placeholder kind)"));
 }
+
+#[test]
+fn status_detail_modes_conflict_at_parse_time() {
+    Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args(["status", "--video-id", "x", "--errors"])
+        .assert()
+        .code(2); // clap usage error, not silent precedence
+    Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args(["status", "--video-id", "x", "--respondent-id", "y"])
+        .assert()
+        .code(2);
+}
