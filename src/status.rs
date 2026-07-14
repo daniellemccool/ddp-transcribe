@@ -223,12 +223,23 @@ pub fn run_verify(
     for (shard, shard_ids) in by_shard {
         let dir = transcripts_root.join(shard);
         // Absent shard dir → empty set → every row in it counts missing.
-        // Honest when status runs away from the artifacts volume.
+        // Honest when status runs away from the artifacts volume. Any OTHER
+        // read_dir failure (permissions, broken mount, not-a-directory) is
+        // an infra fault on a present tree: counting those rows "missing"
+        // would steer the operator toward re-transcription instead of the
+        // mount, so they count unreadable instead.
         let names: HashSet<OsString> = match std::fs::read_dir(&dir) {
             Ok(entries) => entries
                 .filter_map(|e| e.ok().map(|e| e.file_name()))
                 .collect(),
-            Err(_) => HashSet::new(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashSet::new(),
+            Err(_) => {
+                for id in shard_ids {
+                    report.unreadable_artifacts += 1;
+                    push_capped(&mut report.sample_unreadable, id);
+                }
+                continue;
+            }
         };
         for id in shard_ids {
             let txt = OsString::from(format!("{id}.txt"));

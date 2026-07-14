@@ -451,3 +451,48 @@ fn verify_conflicts_with_detail_modes() {
         .assert()
         .code(2); // clap usage error
 }
+
+#[test]
+fn verify_counts_infra_fault_shards_unreadable_not_missing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = tmp.path().join("state.sqlite");
+    {
+        let _s = ddp_transcribe::state::Store::open(&db).unwrap();
+    }
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute(
+        "INSERT INTO videos (video_id, source_url, canonical, status, first_seen_at, updated_at)
+         VALUES ('v_ok1', 'https://example/v_ok1', 1, 'succeeded', 100, 100)",
+        [],
+    )
+    .unwrap();
+    let transcripts = tmp.path().join("transcripts");
+    std::fs::create_dir_all(&transcripts).unwrap();
+    // shard('v_ok1') == "k1": plant a regular FILE at the shard path so
+    // read_dir fails with a non-NotFound error (not-a-directory).
+    std::fs::write(transcripts.join("k1"), b"not a directory").unwrap();
+
+    let out = Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args([
+            "--state-db",
+            db.to_str().unwrap(),
+            "--transcripts",
+            transcripts.to_str().unwrap(),
+            "status",
+            "--verify",
+            "--json",
+        ])
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(
+        v["verify"]["artifacts_missing"], 0,
+        "infra fault must not read as data loss"
+    );
+    assert_eq!(v["verify"]["unreadable_artifacts"], 1);
+    assert_eq!(v["verify"]["sample_unreadable"][0], "v_ok1");
+}
