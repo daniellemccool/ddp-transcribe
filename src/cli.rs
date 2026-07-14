@@ -116,10 +116,10 @@ pub enum Command {
     /// current claims, and batch-run history. Read-only.
     Status {
         /// Full event history for one video.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["respondent_id", "errors", "retryable"])]
         video_id: Option<String>,
         /// Per-respondent summary counts.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["errors", "retryable"])]
         respondent_id: Option<String>,
         /// List failed_terminal videos with terminal_reason / terminal_message.
         #[arg(long)]
