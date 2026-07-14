@@ -177,10 +177,20 @@ struct WatchEntry {
     link: String,
 }
 
+/// Parse a DDP `Date` string into a unix timestamp, interpreting the naive
+/// value as UTC per ADR-0039 — a documentary-evidence verdict, not an
+/// empirically confirmed one. TikTok's May-2026 export pipeline labels these
+/// strings with a literal " UTC" suffix; an operator spot-check against known
+/// watch moments could not discriminate UTC from local time at ±1h precision,
+/// so the convention is recorded as UTC-assumed, empirically unresolved.
+/// July-2026 exports dropped the suffix but — by pipeline continuity, not
+/// independent evidence — are assumed to keep the same convention. The raw
+/// string is preserved in watch_history.watched_at_raw (schema v4) so a
+/// future reinterpretation never requires re-ingest.
 fn parse_watched_at(s: &str) -> Option<i64> {
     const FORMATS: &[&str] = &[
-        "%Y-%m-%d %H:%M:%S",     // synthetic fixtures
-        "%Y-%m-%d %H:%M:%S UTC", // production TikTok DDP
+        "%Y-%m-%d %H:%M:%S", // production TikTok DDP (July 2026 real-donor exports, unlabeled) + synthetic fixtures
+        "%Y-%m-%d %H:%M:%S UTC", // production TikTok DDP (May 2026 PI bake, UTC-labeled)
     ];
     for fmt in FORMATS {
         if let Ok(naive) = NaiveDateTime::parse_from_str(s, fmt) {
