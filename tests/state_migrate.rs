@@ -2,10 +2,10 @@
 
 //! Migration test: synthesize a v1 DB (no new Epic 2 columns; meta.schema_version='1'),
 //! run the migrate function, confirm v2 columns are present and meta.schema_version
-//! lands on the current SCHEMA_VERSION (v3 as of Epic 4a — the ladder walks v1→v2→v3
-//! in one call). Then run Store::open and confirm it succeeds (round-trip with T2's
-//! check). Also covers the v2→v3 leg directly: a hand-built v2-shaped DB migrating
-//! to v3's `batch_runs` table + attempt-aware pending index.
+//! lands on the current SCHEMA_VERSION (v4 as of Epic 4b — the ladder walks
+//! v1→v2→v3→v4 in one call). Then run Store::open and confirm it succeeds (round-trip
+//! with T2's check). Also covers the v2→v3 leg directly: a hand-built v2-shaped DB
+//! migrating to v3's `batch_runs` table + attempt-aware pending index.
 
 use anyhow::Result;
 use ddp_transcribe::state::{migrate::run_migrate, Store, SCHEMA_VERSION};

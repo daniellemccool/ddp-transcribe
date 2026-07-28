@@ -14,7 +14,7 @@
 | 05 | `bdc4723`, `2484a23` | Schema v4: `watch_history.watched_at_raw` + `in_window`; `ingest --window-start`/`--window-end`; reversed-range rejection |
 | 06 | `a13fe41`, `ab86b89` | `recompute-window` subcommand — explicit one-shot recompute, refuses bare invocation, `--clear`/`--dry-run`; shared `cli::validate_window_order` guard extended to it |
 | 07 | `0d1b7a2` | `--retries` bounded `0..=1_000_000` at parse time; `log_resolved_config` scoped per subcommand (exhaustive match) |
-| 08 | `50c9d46` + this commit | ADR slate (0040 window semantics, 0041 status/0017 fulfillment) via `adg lean new`; architecture + operations docs; FOLLOWUPS archived with SHAs; acceptance rerun; this close doc |
+| 08 | `50c9d46`, `27d669b`, `1525b37` | ADR slate (0040 window semantics, 0041 status/0017 fulfillment) via `adg lean new`; architecture + operations docs; FOLLOWUPS archived with SHAs; acceptance rerun; this close doc (`27d669b`); final whole-branch review doc-accuracy fixes + followup filings (`1525b37`) |
 
 Verification at close: `cargo fmt` clean; `cargo clippy --all-targets -- -D warnings` clean (0 warnings); `cargo test --features test-helpers -- --test-threads=1` green — **283 passed, 0 failed, 8 ignored** (model-gated, require `./models/ggml-tiny.en.bin`); `adg lean index --root .` — 0 failures, 2 advisory warnings (0040/0041 Decision sections run long — content, not correctness).
 

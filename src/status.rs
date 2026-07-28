@@ -176,7 +176,11 @@ pub struct VerifyReport {
     /// Rows whose `.json` parsed but `raw_signals.schema_version` differs
     /// from EXPECTED_RAW_SIGNALS_SCHEMA_VERSION (or raw_signals is absent).
     pub schema_version_mismatches: usize,
-    /// Rows whose `.json` exists but could not be read/parsed at all.
+    /// Rows whose `.json` could not be read/parsed, or whose shard's
+    /// `read_dir` hit an infra fault (permissions, broken mount, ...) so
+    /// artifact existence is unknowable — could not be verified due to an
+    /// I/O or parse fault, distinct from `artifacts_missing` (definitively
+    /// absent).
     pub unreadable_artifacts: usize,
     pub pending: i64,
     pub in_progress: i64,

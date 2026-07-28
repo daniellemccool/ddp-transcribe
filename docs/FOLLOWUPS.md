@@ -70,6 +70,8 @@ finding 3 → Epic 5, finding 4 → Plan C (see those groups below).
 - Epic 3 final review: `FetchOpts` derived `Debug` doesn't redact `cookies_file` → Epic 5
 - Epic 3 final review: `scrub_cookie_path` empty-path guard → Epic 5
 - Transcript-storage assessment: pipelined transcribe worker holds Store mutex across artifact writes+fsyncs though only `mark_succeeded` needs it (0008-ordering-sensitive; own reviewed change) → Epic 5 (perf sweep)
+- Epic 4b final review: status polish + test-debt bundle (`render_event_detail_inline` non-string fallback, missing test fixtures, `run_verify` `e.ok()` miscount, `--respondent-id` typo silently zero-fills, mid-file `use` in status.rs) → Epic 5 hygiene bundle
+- Epic 4b final review: `ingest --dry-run` is not dry — pre-existing wart, raised stakes now that `ingest` takes window flags → Epic 5
 - Full Epic 5 entries: [followups/epic-5.md](followups/epic-5.md)
 
 **Plan C (short-link resolution, multi-engine, storage scale)**
