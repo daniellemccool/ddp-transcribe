@@ -233,6 +233,13 @@ fn build_caption_fetch_args(
         "--skip-download".into(),
         "--write-subs".into(),
         "--write-auto-subs".into(),
+        // Without an explicit language selection yt-dlp downloads a single
+        // preferred language (English-biased), so a multi-track video would
+        // silently lose every other track despite the envelope's captions
+        // map being keyed per file. Take them all — the envelope embeds one
+        // entry per sidecar, and the per-track cap bounds the cost.
+        "--sub-langs".into(),
+        "all".into(),
         "-o".into(),
         output_template,
     ];
@@ -283,8 +290,16 @@ fn scrub_cookie_path(excerpt: String, cookies: Option<&Path>) -> String {
 }
 
 /// Subtitle-sidecar extensions yt-dlp can write for TikTok tracks.
+///
+/// Bare `json` matters specifically for TikTok: the extractor's `EXT_MAP`
+/// maps `creator_caption` tracks to extension `json`, so creator-authored
+/// captions — the very tracks this feature exists to capture — land as
+/// `{id}.{lang}.json` and would otherwise be neither embedded nor cleaned
+/// up. Broadening the match is safe here because nothing else writes
+/// `{id}*.json` into the per-video dir: the primary invocation extracts
+/// only the WAV and we never pass `--write-info-json`.
 const CAPTION_EXTS: &[&str] = &[
-    "vtt", "srt", "ass", "lrc", "json3", "srv1", "srv2", "srv3", "ttml",
+    "vtt", "srt", "ass", "lrc", "json", "json3", "srv1", "srv2", "srv3", "ttml",
 ];
 
 /// Max bytes embedded per caption track; larger tracks are skipped (a
@@ -792,13 +807,18 @@ mod tests {
     fn collect_caption_sidecars_filters_by_extension_and_prefix() {
         let dir = tempfile::tempdir().unwrap();
         let keep = dir.path().join("abc123.en.vtt");
+        // TikTok's `creator_caption` tracks land as bare `.json` (the
+        // extractor's EXT_MAP) — the creator-authored captions this feature
+        // exists for, so they must be collected, not just `json3`.
+        let keep_creator_json = dir.path().join("abc123.en.json");
         let wrong_prefix = dir.path().join("other.en.vtt");
         let wrong_ext = dir.path().join("abc123.wav");
-        for p in [&keep, &wrong_prefix, &wrong_ext] {
+        for p in [&keep, &keep_creator_json, &wrong_prefix, &wrong_ext] {
             std::fs::write(p, "x").unwrap();
         }
         let found = collect_caption_sidecars(dir.path(), "abc123");
-        assert_eq!(found, vec![keep]);
+        // Sorted for determinism: ".en.json" < ".en.vtt".
+        assert_eq!(found, vec![keep_creator_json, keep]);
     }
 
     /// The secondary invocation downloads no media and writes sidecars
@@ -811,6 +831,13 @@ mod tests {
         assert!(args.iter().any(|a| a == "--skip-download"));
         assert!(args.iter().any(|a| a == "--write-subs"));
         assert!(args.iter().any(|a| a == "--write-auto-subs"));
+        // Without an explicit selection yt-dlp takes one preferred language
+        // (English-biased) and a multi-track video loses the rest.
+        let langs_idx = args
+            .iter()
+            .position(|a| a == "--sub-langs")
+            .expect("--sub-langs must be present or only one language is fetched");
+        assert_eq!(args.get(langs_idx + 1).map(String::as_str), Some("all"));
         let o_idx = args
             .iter()
             .position(|a| a == "-o")
