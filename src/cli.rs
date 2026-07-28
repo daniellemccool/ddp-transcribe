@@ -191,6 +191,14 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Parse captured raw metadata (video_metadata_raw) into the typed
+    /// videos columns. Post-run; idempotent and replayable — re-running
+    /// overwrites from the current blobs, so a parser fix needs no re-fetch.
+    LoadMetadata {
+        /// Examine and parse everything, write nothing, report counts.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]

@@ -140,6 +140,51 @@ impl Store {
     }
 }
 
+/// One raw metadata envelope row (Epic 4c loader input).
+#[derive(Debug)]
+pub struct RawMetadataRow {
+    pub video_id: String,
+    pub fetched_at: i64,
+    pub raw_json: String,
+}
+
+impl Store {
+    /// Keyset page over `video_metadata_raw` ordered by video_id. Streaming
+    /// input for `load_metadata` — never materializes the whole table
+    /// (6–12 GB at production scale). `after_video_id` is the last id of
+    /// the previous page; `None` starts at the beginning.
+    pub fn metadata_raw_page(
+        &self,
+        after_video_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<RawMetadataRow>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT video_id, fetched_at, raw_json FROM video_metadata_raw
+                 WHERE (?1 IS NULL OR video_id > ?1)
+                 ORDER BY video_id
+                 LIMIT ?2",
+            )
+            .context("prepare metadata_raw_page")?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![after_video_id, i64::try_from(limit).unwrap_or(i64::MAX)],
+                |r| {
+                    Ok(RawMetadataRow {
+                        video_id: r.get(0)?,
+                        fetched_at: r.get(1)?,
+                        raw_json: r.get(2)?,
+                    })
+                },
+            )
+            .context("query metadata_raw_page")?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("collect metadata_raw_page")?;
+        Ok(rows)
+    }
+}
+
 /// Full videos-row projection for `status --video-id`. Every nullable
 /// column stays Option — the renderer decides what to show.
 #[derive(Debug, Serialize)]

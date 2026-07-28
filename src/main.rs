@@ -14,6 +14,7 @@ mod errors;
 mod failure;
 mod fetcher;
 mod ingest;
+mod metadata_loader;
 mod output;
 mod pipeline;
 mod process;
@@ -395,6 +396,22 @@ async fn main() -> Result<()> {
                 println!("recompute-window: changed {n} row(s)");
             }
         }
+        cli::Command::LoadMetadata { dry_run } => {
+            let path = &cfg.state_db;
+            if !path.exists() {
+                anyhow::bail!(
+                    "load-metadata: state.sqlite not found at {}. Run `ddp-transcribe init` first.",
+                    path.display()
+                );
+            }
+            let mut store = state::Store::open(path).context("opening state DB")?;
+            let stats = metadata_loader::load_metadata(&mut store, dry_run)?;
+            tracing::info!(%stats, dry_run, "load-metadata complete");
+            println!(
+                "load-metadata: {stats}{}",
+                if dry_run { " (dry-run)" } else { "" }
+            );
+        }
     }
 
     Ok(())
@@ -430,7 +447,8 @@ fn log_resolved_config(cfg: &config::Config, command: &cli::Command) {
         cli::Command::Init
         | cli::Command::Migrate
         | cli::Command::Status { .. }
-        | cli::Command::RecomputeWindow { .. } => tracing::info!(
+        | cli::Command::RecomputeWindow { .. }
+        | cli::Command::LoadMetadata { .. } => tracing::info!(
             profile = ?cfg.profile,
             state_db = ?cfg.state_db,
             "config resolved"
