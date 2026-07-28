@@ -103,8 +103,8 @@ CUDA_VISIBLE_DEVICES=0 ddp-transcribe \
 ```bash
 ddp-transcribe --state-db ~/ddp-state/state.sqlite status                 # counts + batch-run history
 ddp-transcribe --state-db ~/ddp-state/state.sqlite status --retryable     # failed_retryable, by kind
-ddp-transcribe --state-db ~/ddp-state/state.sqlite status --verify \
-    --transcripts ~/ddp-work/transcripts                                 # done-contract, before any pause
+ddp-transcribe --state-db ~/ddp-state/state.sqlite --transcripts ~/ddp-work/transcripts \
+    status --verify                                                     # done-contract, before any pause
 ```
 
 - `status` (no flags) is DB-only and read-only: counts by status, claim ages
@@ -116,7 +116,7 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite status --verify \
   kind `Fetch` (pre-Epic-3 rows never re-classified) — annotated
   `(legacy placeholder kind)` in the human-readable render; `--json` carries
   the raw stored value.
-- **Run `status --verify --transcripts ~/ddp-work/transcripts` before pausing
+- **Run `--transcripts ~/ddp-work/transcripts status --verify` before pausing
   the workspace** (ADR-0011 spin-down practice): it checks per-shard artifact
   existence and `raw_signals.schema_version`, and exits 0 only when
   `pending == 0 ∧ in_progress == 0` and every artifact/schema check passed —

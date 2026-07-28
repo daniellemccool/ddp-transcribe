@@ -750,7 +750,7 @@ retryable arms dispatch through `record_fetch_failure_serial`, whose typed
 path. The bundle's surviving half (the fetch/transcribe downcast asymmetry)
 remains active in `docs/followups/epic-5.md`.
 
-## Resolved by Plan B Epic 4b — status surface, done-contract, window/timezone, CLI hardening (2026-07-14)
+## Resolved by Plan B Epic 4b — status surface, done-contract, window/timezone, CLI hardening (2026-07-28)
 
 All five Epic 4b active-scope entries resolved by epic-4b task commits;
 `docs/followups/epic-4.md` is now a closed-epic pointer stub (precedent:
@@ -771,8 +771,10 @@ The hedge against the unresolved status — `watch_history.watched_at_raw`
 (schema v4) preserving the verbatim string — landed in `bdc4723`
 ([ADR-0040](../decisions/0040-analysis-window-is-computed-at-ingest-recompute-window-is-the-only-flag-mutator.md)
 requires it never be dropped). Window filters built on top use day-granularity
-bounds so the residual sub-day ambiguity can never flip a row across a
-boundary.
+bounds, which absorb the residual sub-day ambiguity for all but
+boundary-adjacent rows — only rows within the ambiguity offset (~1h) of a
+window edge can be misclassified, and the count of such rows is bounded by
+the offset.
 
 ### Interrupted `process` leaves an open `batch_runs` row (NULL `finished_at`, no census)
 

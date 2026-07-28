@@ -32,7 +32,7 @@ existing rows but never touches `in_window`.
 ## Guidance
 
 - Consumers filter `WHERE in_window = 1`; never re-derive window membership from `watched_at` at query time — `in_window` is the single flag of record.
-- Day-granularity windows are deliberate: they absorb the sub-day timezone ambiguity ADR-0039 leaves unresolved ("UTC-assumed (documentary evidence), empirically unresolved") — a boundary can't flip on an hour of uncertainty when the boundary itself is a whole day.
+- Day-granularity windows are deliberate: they absorb the sub-day timezone ambiguity ADR-0039 leaves unresolved ("UTC-assumed (documentary evidence), empirically unresolved") for all but boundary-adjacent rows — only rows within the ambiguity offset (~1h) of a window edge can be misclassified, and the count of such rows is bounded by the offset.
 - No ingest-time or fetch-time code path may set `in_window` implicitly (e.g. "helpfully" recomputing it on a coincidental re-ingest); review rejects that. `Store::recompute_window` is the only mutator, invoked only from the `recompute-window` subcommand.
 - `watched_at_raw` is never dropped, normalized, or overwritten once non-NULL — it is the hedge that makes the timezone verdict non-fatal either way.
 - `recompute-window --clear` and a `--window-start`/`--window-end` pair are mutually exclusive at parse time (clap `ArgGroup`); `cli::validate_window_order` rejects `--window-start` after `--window-end` before the store opens (equal dates are a valid single-day window).
@@ -45,5 +45,6 @@ anyone noticed, re-deriving the correct filter from `watched_at_raw` is the
 only way back, so the flag never moves without an explicit, validated
 instruction. Computing `in_window` once at ingest, rather than deriving it
 live at query time, keeps `status`/export queries a single indexed predicate
-instead of a per-row date comparison, and keeps the flag's history auditable
-via `recompute-window --dry-run`'s row count.
+instead of a per-row date comparison, and keeps a prospective
+`recompute-window` change previewable — via `--dry-run`'s row count — before
+it writes.
