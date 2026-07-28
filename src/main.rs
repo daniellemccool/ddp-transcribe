@@ -58,11 +58,7 @@ async fn main() -> Result<()> {
             window_start,
             window_end,
         } => {
-            if let (Some(start), Some(end)) = (window_start, window_end) {
-                if start > end {
-                    anyhow::bail!("ingest: --window-start {start} is after --window-end {end}");
-                }
-            }
+            cli::validate_window_order("ingest", window_start, window_end)?;
             let mut store = state::Store::open(&cfg.state_db).context("opening state DB")?;
             if dry_run {
                 tracing::info!("dry-run: not yet implemented; running real ingest");
@@ -392,6 +388,7 @@ async fn main() -> Result<()> {
             let window = if clear {
                 ingest::WindowBounds::default()
             } else {
+                cli::validate_window_order("recompute-window", window_start, window_end)?;
                 ingest::WindowBounds::from_dates(window_start, window_end)
             };
             let mut store = state::Store::open(path).context("opening state DB")?;

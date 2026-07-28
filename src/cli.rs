@@ -92,6 +92,24 @@ pub(crate) fn parse_window_date(s: &str) -> Result<chrono::NaiveDate, String> {
         .map_err(|e| format!("invalid date {s:?} (expected YYYY-MM-DD): {e}"))
 }
 
+/// Reject a reversed window range (operator typo) before it reaches the
+/// store: a `start > end` window makes the in_window CASE predicate
+/// unsatisfiable, silently zeroing every row instead of failing loudly.
+/// Equal dates are a valid single-day window. `command` names the
+/// subcommand for the error message (e.g. "ingest", "recompute-window").
+pub(crate) fn validate_window_order(
+    command: &str,
+    window_start: Option<chrono::NaiveDate>,
+    window_end: Option<chrono::NaiveDate>,
+) -> anyhow::Result<()> {
+    if let (Some(start), Some(end)) = (window_start, window_end) {
+        if start > end {
+            anyhow::bail!("{command}: --window-start {start} is after --window-end {end}");
+        }
+    }
+    Ok(())
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Create state.sqlite and apply schema. Idempotent.

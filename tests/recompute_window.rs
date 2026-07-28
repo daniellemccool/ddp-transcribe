@@ -153,6 +153,30 @@ fn clear_sets_everything_in_window() {
 }
 
 #[test]
+fn rejects_reversed_window_range() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = seeded_db(&tmp);
+    Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args([
+            "--state-db",
+            db.to_str().unwrap(),
+            "recompute-window",
+            "--window-start",
+            "2026-03-01",
+            "--window-end",
+            "2026-02-01",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("--window-start"))
+        .stderr(contains("--window-end"))
+        .stderr(contains("2026-03-01"))
+        .stderr(contains("2026-02-01"));
+    assert_eq!(flags(&db), vec![1, 1, 1], "reversed range must not write");
+}
+
+#[test]
 fn refuses_missing_db() {
     let tmp = tempfile::TempDir::new().unwrap();
     let db = tmp.path().join("absent.sqlite");
