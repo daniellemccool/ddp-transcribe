@@ -49,6 +49,19 @@ deployed. Verify after every update:
 ddp-transcribe -V && ddp-transcribe -h | head -12   # subcommand list matches expectations
 ```
 
+After deploying an Epic 4b (v4-schema) binary, migrate the state DB before
+running anything else against it:
+
+```bash
+ddp-transcribe --state-db ~/ddp-state/state.sqlite migrate   # v3 -> v4, idempotent
+```
+
+`migrate` adds `watch_history.watched_at_raw` (the timezone-verdict hedge,
+ADR-0039) and is a no-op if the DB is already at v4. The binary refuses to
+open an un-migrated DB for any other subcommand — `Store::open` hard-fails
+with a typed `SchemaVersionMismatch` error naming the expected/found
+versions and instructing `migrate` (ADR-0022).
+
 ## Operating (current, Epic 4a)
 
 Canonical invocation is the bare binary with explicit paths (CWD-independent):
@@ -85,6 +98,30 @@ CUDA_VISIBLE_DEVICES=0 ddp-transcribe \
   ~3,915 swept_terminal + ~2,871 requeued + 301 parked_for_cookies (no cookies)
   on that first run.
 
+### Status quickstart (Epic 4b)
+
+```bash
+ddp-transcribe --state-db ~/ddp-state/state.sqlite status                 # counts + batch-run history
+ddp-transcribe --state-db ~/ddp-state/state.sqlite status --retryable     # failed_retryable, by kind
+ddp-transcribe --state-db ~/ddp-state/state.sqlite status --verify \
+    --transcripts ~/ddp-work/transcripts                                 # done-contract, before any pause
+```
+
+- `status` (no flags) is DB-only and read-only: counts by status, claim ages
+  for in-progress rows, and the full `batch_runs` history — an interrupted
+  run's open row renders honestly (`finished_at` NULL, no census) rather than
+  being skipped.
+- `status --retryable` lists the `failed_retryable` pool by kind. The
+  301 cookie-parked rows from the pilot batch carry the legacy placeholder
+  kind `Fetch` (pre-Epic-3 rows never re-classified) — annotated
+  `(legacy placeholder kind)` in the human-readable render; `--json` carries
+  the raw stored value.
+- **Run `status --verify --transcripts ~/ddp-work/transcripts` before pausing
+  the workspace** (ADR-0011 spin-down practice): it checks per-shard artifact
+  existence and `raw_signals.schema_version`, and exits 0 only when
+  `pending == 0 ∧ in_progress == 0` and every artifact/schema check passed —
+  exit 1 means it is not safe to pause yet.
+
 ## Known VM facts (hard-won; do not re-derive)
 
 - **`IpBlockedMessage` means the video was removed.** The yt-dlp stderr text is a
@@ -97,8 +134,9 @@ CUDA_VISIBLE_DEVICES=0 ddp-transcribe \
   `d3i-infra/researchcloud-ddp-transcribe`; never edit it in place — changes are
   invisible to review. The repo lives on the workstation.
 - Terminal garbling over SSH: `export TERM=xterm-256color`.
-- The config log line prints `whisper_model_path` even for subcommands that never
-  load a model — cosmetic (FOLLOWUPS, Epic 4b).
+- The config-echo line is scoped per subcommand since Epic 4b — `init`/`ingest`/
+  `migrate`/`status`/`recompute-window` no longer log `whisper_model_path`
+  (resolved; was a cosmetic false-alarm risk in Epic 3/4a logs).
 - Bulk file transfer off the volume: iRODS/Yoda per-file overhead dominates below
   ~1 MB/file; parallelize disjoint shard ranges or use a bundle transfer. 120k
   files single-stream ≈ 24 h (measured 2026-07-07).

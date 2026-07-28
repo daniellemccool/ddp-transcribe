@@ -35,7 +35,7 @@ Each JSON file is an array of section objects. The parser deserialises eagerly (
 
 - *Short link* (`vm.tiktok.com/…` or `tiktok.com/t/…`) — cannot extract a video ID without following a redirect; logged and counted as `short_links_skipped` (`src/ingest.rs:73–80`).
 - *Invalid URL* — not a recognisable TikTok URL; logged and counted as `invalid_urls_skipped` (`src/ingest.rs:81–91`).
-- *Unparseable date* — two date formats are tried (`%Y-%m-%d %H:%M:%S` and `%Y-%m-%d %H:%M:%S UTC`); failure logs and increments `date_parse_failures` (`src/ingest.rs:93–104, 175–186`).
+- *Unparseable date* — two date formats are tried (`%Y-%m-%d %H:%M:%S` and `%Y-%m-%d %H:%M:%S UTC`); failure logs and increments `date_parse_failures` (`src/ingest.rs:93–104, 175–186`). Both formats are interpreted as UTC — per [ADR 0039](../../decisions/0039-ddp-watch-history-timestamps-are-treated-as-utc-documentary-only-and-empirically-unresolved.md), a documentary-evidence verdict that remains **empirically unresolved** (an operator spot-check couldn't discriminate UTC from local time at ±1h). The verbatim `Date` string is preserved alongside the parsed value in `watch_history.watched_at_raw` (schema v4, Epic 4b) as the hedge against that unresolved verdict; re-ingest backfills a NULL `watched_at_raw` on an existing row but never re-parses or overwrites a non-NULL one.
 
 **URL canonicalization** is applied to every entry before the URL is stored (`src/ingest.rs:70`). `src/canonical.rs:35` classifies each URL into one of three `Canonical` variants — `VideoId(String)`, `NeedsResolution(String)`, or `Invalid(String)` — extracting the 19-digit numeric video ID from canonical-form URLs.
 
@@ -47,9 +47,15 @@ A successfully processed entry produces one row in each of two tables:
 
 **`videos`** — one row per distinct `video_id`, written by `store.upsert_video(video_id, source_url, canonical=true)` (`src/ingest.rs:107`). The row is inserted with `status = 'pending'` (literal in the SQL, `src/state/mod.rs:172`). `attempt_count` is not set by the ingest INSERT; it uses the schema default. `first_seen_at` and `updated_at` are set to `unix_now()`.
 
-**`watch_history`** — one row per `(respondent_id, video_id, watched_at)`, written by `store.upsert_watch_history(...)` (`src/ingest.rs:109`). Stores the respondent identity alongside the watch timestamp (as a Unix epoch i64) and the `in_window` flag.
+**`watch_history`** — one row per `(respondent_id, video_id, watched_at)`, written by `store.upsert_watch_history(...)` (`src/ingest.rs:109`). Stores the respondent identity alongside the watch timestamp (as a Unix epoch i64), the verbatim raw date string (`watched_at_raw`), and the `in_window` flag.
 
 Both tables use `INSERT OR IGNORE` (`src/state/mod.rs:169, 189`), so re-running ingest against the same export is safe. For the full lifecycle of a `videos` row after ingest, see [state-machine.md](state-machine.md).
+
+### Analysis window (`--window-start` / `--window-end`)
+
+`ingest` optionally accepts `--window-start`/`--window-end` (`YYYY-MM-DD`, UTC calendar dates; Epic 4b, [ADR 0040](../../decisions/0040-analysis-window-is-computed-at-ingest-recompute-window-is-the-only-flag-mutator.md)). Bounds are inclusive: `--window-start` maps to that date's `00:00:00Z`; `--window-end` covers its whole day (the CLI derives an exclusive upper bound at the *following* day's `00:00:00Z` — `WindowBounds::from_dates`, `src/ingest.rs`). Either side may be absent (unbounded on that side); both absent means every row ingests `in_window = 1` — the pre-4b behavior. `cli::validate_window_order` rejects `--window-start` after `--window-end` before the store even opens (equal dates are a valid single-day window).
+
+`in_window` is computed **once**, at ingest time, from these bounds and stored on the `watch_history` row (`WindowBounds::contains`, `src/ingest.rs`). It is never re-derived at query time and never changed by a later `ingest` run (duplicate-PK rows are computed but not rewritten — `IngestStats.computed_out_of_window` counts the input-side computation per ADR-0007, not the write). The **only** way to change `in_window` after ingest is the explicit `recompute-window` subcommand (`Store::recompute_window`, `src/state/mod.rs`), which refuses to run with no window flags at all, supports `--clear` (explicit no-filter opt-in — sets `in_window = 1` for every row) and `--dry-run` (reports the row count that would change via `Store::count_window_mismatches`, without writing). Day-granularity windows are deliberate: they absorb the sub-day ambiguity that [ADR 0039](../../decisions/0039-ddp-watch-history-timestamps-are-treated-as-utc-documentary-only-and-empirically-unresolved.md) leaves unresolved, so an hour of timezone uncertainty can never flip a row across a window boundary.
 
 ---
 
@@ -135,3 +141,5 @@ The `Acquisition::AudioFile(PathBuf)` returned by `acquire` (`src/fetcher/mod.rs
 | 0021 | Bounded subprocess output capture via streaming VecDeque\<u8\> | Fetcher's yt-dlp invocation — both streams drained; stderr retains trailing 8 KiB. |
 | 0023 | Minimum mutator signatures (kind: &str, message: &str) returning Result\<usize\> per 0006 | Retry classification surface — the `label` parameter `record_fetch_failure` receives from the fetch worker stays `&str`. |
 | 0037 | Operator-editable TOML classification table with compiled evidence-derived default | Drives the message-class labels/dispositions the fetch-side classifiers produce. |
+| 0039 | DDP timestamps are UTC-assumed, empirically unresolved | `parse_watched_at`; `watched_at_raw` is the hedge. |
+| 0040 | Analysis window computed at ingest; `recompute-window` is the only flag mutator | `--window-start`/`--window-end`; `watch_history.in_window`. |

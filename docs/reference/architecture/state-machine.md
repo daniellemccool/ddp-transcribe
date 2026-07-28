@@ -35,7 +35,7 @@ The schema is declared in `src/state/schema.rs`. Three application tables and on
 
 (`src/state/schema.rs:4–30`)
 
-**`watch_history`** — one row per `(respondent_id, video_id, watched_at)` tuple; links a donor participant to their watch events. References `videos` via foreign key. (`src/state/schema.rs:36–44`)
+**`watch_history`** — one row per `(respondent_id, video_id, watched_at)` tuple; links a donor participant to their watch events. `watched_at` is the parsed Unix-epoch timestamp (per [ADR 0039](../../decisions/0039-ddp-watch-history-timestamps-are-treated-as-utc-documentary-only-and-empirically-unresolved.md), UTC-assumed, documentary evidence, empirically unresolved); `watched_at_raw` (schema v4, Epic 4b) preserves the verbatim DDP `Date` string as the hedge against that unresolved verdict. `in_window` (boolean) records whether the row falls inside the analysis window supplied at ingest — computed once at ingest and changed only by the `recompute-window` subcommand (per [ADR 0040](../../decisions/0040-analysis-window-is-computed-at-ingest-recompute-window-is-the-only-flag-mutator.md)); absent bounds at ingest time mean every row lands `in_window = 1`. References `videos` via foreign key. (`src/state/schema.rs:36–44`)
 
 **`video_events`** — append-only audit log; one row per lifecycle transition. Event types: `claimed`, `succeeded`, `failed_retryable`, `failed_terminal`, plus the Epic 4a in-pipeline retry types `retry_requeued` and `cookie_parked` (written by `record_fetch_failure` at failure time) and the start-of-batch sweep types `swept_terminal` and `requeued` (written with `worker_id = 'sweep'` per [ADR 0036](../../decisions/0036-retry-is-in-pipeline-capped-failure-time-requeue-the-re-fetch-is-the-liveness-oracle.md)). The stale-sweep recovery (`in_progress`→`pending`) writes no event. References `videos`. (`src/state/schema.rs`)
 
@@ -43,7 +43,7 @@ The schema is declared in `src/state/schema.rs`. Three application tables and on
 
 **`batch_runs`** — one row per `process` invocation (Epic 4a): the durable census and its generating policy. Opened at batch start with the params JSON and the active classification TOML (`policy_toml`), closed at batch end with the census JSON. A census without its policy is not reproducible attrition documentation, so both ride in the same row. (`src/state/schema.rs`)
 
-The schema currently ships at version `"3"` (`src/state/schema.rs`; `SCHEMA_VERSION` constant). A partial index on `(status, attempt_count, first_seen_at, video_id) WHERE status = 'pending'` accelerates `claim_next`'s attempt-aware scan — Epic 4a reordered it to `attempt_count ASC` first so retries drain behind fresh work (`src/state/schema.rs`).
+The schema currently ships at version `"4"` (`src/state/schema.rs`; `SCHEMA_VERSION` constant — Epic 4b bumped v3 → v4 to add `watch_history.watched_at_raw` and `in_window`). A partial index on `(status, attempt_count, first_seen_at, video_id) WHERE status = 'pending'` accelerates `claim_next`'s attempt-aware scan — Epic 4a reordered it to `attempt_count ASC` first so retries drain behind fresh work (`src/state/schema.rs`).
 
 ### Lifecycle states
 
@@ -157,9 +157,15 @@ Redirect signature rationale to ADRs 0006 and 0023.
 
 ## Schema-version policy
 
-`Store::open` reads `meta.schema_version` and compares it against the binary's `SCHEMA_VERSION` constant (currently `"3"`, `src/state/schema.rs`). On mismatch it returns `StateError::SchemaVersionMismatch { expected, found }` whose `Display` impl instructs the operator to run `ddp-transcribe migrate` (`src/state/mod.rs`). There is no in-process auto-migrate.
+`Store::open` reads `meta.schema_version` and compares it against the binary's `SCHEMA_VERSION` constant (currently `"4"`, `src/state/schema.rs`). On mismatch it returns `StateError::SchemaVersionMismatch { expected, found }` whose `Display` impl instructs the operator to run `ddp-transcribe migrate` (`src/state/mod.rs`). There is no in-process auto-migrate.
 
-Migration runs in the dedicated `migrate` subcommand (`src/state/migrate.rs`), which bypasses the version check, applies the migration SQL in a single transaction, and bumps `meta.schema_version`. The migration ladder handles v1 → v2 (adding the four failure-classification columns via `ALTER TABLE`) and v2 → v3 (Epic 4a: the `batch_runs` table plus the attempt-aware pending index). Per [ADR 0022](../../decisions/0022-schema-version-hard-fails-at-store-open-migration-is-an-explicit-cli-subcommand.md), failing closed and asking for human action is the correct default.
+Migration runs in the dedicated `migrate` subcommand (`src/state/migrate.rs`), which bypasses the version check, applies the migration SQL in a single transaction, and bumps `meta.schema_version`. The migration ladder handles v1 → v2 (adding the four failure-classification columns via `ALTER TABLE`), v2 → v3 (Epic 4a: the `batch_runs` table plus the attempt-aware pending index), and v3 → v4 (Epic 4b: `watch_history.watched_at_raw`, per [ADR 0039](../../decisions/0039-ddp-watch-history-timestamps-are-treated-as-utc-documentary-only-and-empirically-unresolved.md)). `migrate` is idempotent — a no-op if the DB is already current. Per [ADR 0022](../../decisions/0022-schema-version-hard-fails-at-store-open-migration-is-an-explicit-cli-subcommand.md), failing closed and asking for human action is the correct default.
+
+## Operator visibility
+
+`ddp-transcribe status` (`src/status.rs`, [ADR 0041](../../decisions/0041-status-is-the-read-only-operator-surface-the-0017-done-contract-lives-behind-verify.md)) renders the state machine described above: counts by `status`, `failed_retryable` broken down by `last_retryable_kind`, in-progress claim ages, and `batch_runs` history (an interrupted row with `finished_at IS NULL` renders honestly rather than being skipped or crashing on its NULL `census_json`). `--video-id` renders one video's `video_events` history using the Epic 4a `detail_json` vocabulary (`retry_requeued`, `cookie_parked`, `swept_terminal`, `requeued`, plus `claimed`/`succeeded`/`failed_terminal`); `--respondent-id`, `--errors`, `--retryable`, and `--json` cover the remaining operator questions. `status` never mutates the DB.
+
+`status --verify` is the pause-safe predicate consumed by [ADR 0011](../../madr-archive/0011-spin-down-operational-practice-for-dev-workspace.md)'s spin-down practice, now in-tool rather than a manual checklist: per-shard artifact-existence checks against `--transcripts`, a full `raw_signals.schema_version` parse, and the verdict `pending == 0 ∧ in_progress == 0 ∧ zero artifact/schema/read failures`, exiting 1 when violated. It is the lean successor to the archived MADR-0017 done-contract.
 
 ## Crash-recovery durability
 
@@ -199,3 +205,6 @@ The two diagnostic column pairs are preserved across subsequent flips: the retry
 | 0035 | Cookies scoped to SensitiveLoginGated retries | `Claim.last_retryable_kind` snapshot consumed at claim time. |
 | 0036 | In-batch capped retry + end-of-queue claim ordering | `record_fetch_failure`; `claim_next` `attempt_count ASC` ordering; `sweep_mark_terminal` / `sweep_requeue`; the `failed_retryable` exits. |
 | 0037 | Operator-editable TOML classification table | Labels written by the failure mutators; `batch_runs.policy_toml` provenance. |
+| 0039 | DDP timestamps are UTC-assumed, empirically unresolved | `watch_history.watched_at` / `watched_at_raw`. |
+| 0040 | Analysis window computed at ingest; `recompute-window` is the only flag mutator | `watch_history.in_window`; schema v4. |
+| 0041 | `status` is read-only; the 0017 done-contract lives behind `--verify` | Operator visibility above. |
