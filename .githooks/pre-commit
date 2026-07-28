@@ -1,10 +1,38 @@
 #!/usr/bin/env bash
-# pre-commit — fail-fast on `adg validate`. Per AD0020, ADR consistency
-# is enforced at commit time; this is the backstop in case post-mutation
-# validate (run by scripts/adr or the AD0018 review protocol) was
-# bypassed. `adg validate` exits non-zero on any issue, which aborts
-# the commit.
-set -e
-if [[ -d docs/decisions ]]; then
-    adg validate --model docs/decisions
+# pre-commit — lean ADR commit-time gate. Enforcement belongs here (once per
+# commit), not on every edit: the PreToolUse hook only routes and advises;
+# this validates the model (`adg lean index`) and runs the executable grep
+# assertions (`adg lean check`) against the staged files. A failure aborts
+# the commit — fix the underlying docs/decisions/ inconsistency, don't bypass.
+#
+# Graceful: if adg is not on PATH it warns and lets the commit through, so
+# contributors without adg are never blocked.
+set -euo pipefail
+MODEL="${ADR_MODEL:-docs/decisions}"
+
+[ -d "$MODEL" ] || exit 0
+if ! command -v adg >/dev/null 2>&1; then
+    echo "pre-commit: adg not installed, skipping ADR checks" >&2
+    exit 0
+fi
+
+# gate runs a step quietly: on success its output (e.g. the generated index) is
+# discarded; on failure the captured output is surfaced and the commit aborts.
+gate() {
+    local out
+    if ! out=$("$@" 2>&1); then
+        printf '%s\n' "$out" >&2
+        exit 1
+    fi
+}
+
+# Validate the model: duplicate IDs / unsupported globs / missing required
+# sections hard-fail and abort; --root also scope-lints globs against the tree.
+gate adg lean index --model "$MODEL" --root .
+
+# Run the executable grep-assertion checks against the staged source files only.
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+if [ -n "$staged" ]; then
+    # shellcheck disable=SC2086
+    gate adg lean check --model "$MODEL" $staged
 fi

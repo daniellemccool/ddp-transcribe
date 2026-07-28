@@ -749,3 +749,69 @@ retryable arms dispatch through `record_fetch_failure_serial`, whose typed
 `Ok(0)` predicate miss is no longer uncounted or unlogged on the serial
 path. The bundle's surviving half (the fetch/transcribe downcast asymmetry)
 remains active in `docs/followups/epic-5.md`.
+
+## Resolved by Plan B Epic 4b — status surface, done-contract, window/timezone, CLI hardening (2026-07-28)
+
+All five Epic 4b active-scope entries resolved by epic-4b task commits;
+`docs/followups/epic-4.md` is now a closed-epic pointer stub (precedent:
+`docs/followups/epic-3.md`).
+
+### `parse_watched_at` assumes DDP `Date` strings are UTC; TikTok docs are silent
+
+**Found in:** T13 code quality review (opus), Plan B Epic 3.
+**Resolution:** `1a8bc49` (`docs(adr): DDP timestamp timezone verdict —
+UTC-assumed, empirically unresolved (ADR-0039); fix parse_watched_at format
+provenance comments`). Verdict recorded, not just closed: **"UTC-assumed
+(documentary evidence), empirically unresolved"** — TikTok's May-2026 export
+pipeline stamps its own output with a literal `" UTC"` suffix (documentary
+anchor); an operator empirical spot-check against two known watch sessions
+could not discriminate UTC from local time at ±1h memory precision. Recorded
+in [ADR-0039](../decisions/0039-ddp-watch-history-timestamps-are-treated-as-utc-documentary-only-and-empirically-unresolved.md).
+The hedge against the unresolved status — `watch_history.watched_at_raw`
+(schema v4) preserving the verbatim string — landed in `bdc4723`
+([ADR-0040](../decisions/0040-analysis-window-is-computed-at-ingest-recompute-window-is-the-only-flag-mutator.md)
+requires it never be dropped). Window filters built on top use day-granularity
+bounds, which absorb the residual sub-day ambiguity for all but
+boundary-adjacent rows — only rows within the ambiguity offset (~1h) of a
+window edge can be misclassified, and the count of such rows is bounded by
+the offset.
+
+### Interrupted `process` leaves an open `batch_runs` row (NULL `finished_at`, no census)
+
+**Found in:** First production 4a batch (2026-07-08).
+**Resolution:** `d9d8125` (`feat(status): status subcommand core — counts,
+retryable-by-kind, claim ages, honest batch-run history, --json`). An
+interrupted `batch_runs` row (`finished_at IS NULL`) renders as `INTERRUPTED
+(never closed; no census — outcomes remain reconstructable from the videos
+table)` rather than being skipped or crashing on the NULL `census_json` —
+both concrete asks from the original entry. Verified against
+`ddp-run-export.sqlite` ground truth (run 1 INTERRUPTED, run 2 closed with
+census).
+
+### `--retries` / `max_attempts` accept unvalidated i64 ranges
+
+**Found in:** Epic 4a T06 review (adjudicated deferral).
+**Resolution:** `0d1b7a2` (`fix(cli): bound --retries to 0..=1_000_000 at
+parse time; scope config echo to consumed config`). `process --retries` now
+uses `clap::builder::RangedI64ValueParser::<i64>::new().range(0..=1_000_000)`,
+closing both the negative-value budget-zeroing edge and the `i64::MAX`
+overflow-at-`retries+1` edge at parse time, before either can reach
+`record_fetch_failure`.
+
+### Config echo logs `whisper_model_path` for subcommands that never load the model
+
+**Found in:** First production `triage --dry-run` (2026-07-07).
+**Resolution:** `0d1b7a2` (same commit as above). `log_resolved_config`
+is now an exhaustive match scoped per subcommand — `init`/`ingest`/`migrate`/
+`status`/`recompute-window` no longer log `whisper_model_path`; only
+`process` (which loads the model) does.
+
+### Operator interface is the tool itself — wrapper scripts are non-normative (standing premise)
+
+**Found in:** Epic 3 close-out operations session (2026-07-07); ADR-0032 comment.
+**Resolution:** Honored and now embodied: Epic 4b baked the operator surface
+(`status`, `recompute-window`) into the tool itself, per
+[ADR-0041](../decisions/0041-status-is-the-read-only-operator-surface-the-0017-done-contract-lives-behind-verify.md)
+and [ADR-0040](../decisions/0040-analysis-window-is-computed-at-ingest-recompute-window-is-the-only-flag-mutator.md).
+The durable record of the standing premise remains the 0032 ADR comment —
+this entry closes only the Epic 4b instance of honoring it.

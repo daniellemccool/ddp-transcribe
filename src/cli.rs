@@ -87,6 +87,29 @@ pub struct GlobalArgs {
     pub channel_capacity: Option<usize>,
 }
 
+pub(crate) fn parse_window_date(s: &str) -> Result<chrono::NaiveDate, String> {
+    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .map_err(|e| format!("invalid date {s:?} (expected YYYY-MM-DD): {e}"))
+}
+
+/// Reject a reversed window range (operator typo) before it reaches the
+/// store: a `start > end` window makes the in_window CASE predicate
+/// unsatisfiable, silently zeroing every row instead of failing loudly.
+/// Equal dates are a valid single-day window. `command` names the
+/// subcommand for the error message (e.g. "ingest", "recompute-window").
+pub(crate) fn validate_window_order(
+    command: &str,
+    window_start: Option<chrono::NaiveDate>,
+    window_end: Option<chrono::NaiveDate>,
+) -> anyhow::Result<()> {
+    if let (Some(start), Some(end)) = (window_start, window_end) {
+        if start > end {
+            anyhow::bail!("{command}: --window-start {start} is after --window-end {end}");
+        }
+    }
+    Ok(())
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Create state.sqlite and apply schema. Idempotent.
@@ -95,6 +118,14 @@ pub enum Command {
     Ingest {
         #[arg(long)]
         dry_run: bool,
+        /// Inclusive analysis-window start (YYYY-MM-DD, UTC). Rows outside
+        /// the window ingest with in_window = 0. Absent = unbounded.
+        #[arg(long, value_parser = parse_window_date)]
+        window_start: Option<chrono::NaiveDate>,
+        /// Inclusive analysis-window end (YYYY-MM-DD, UTC; covers that
+        /// whole day). Absent = unbounded.
+        #[arg(long, value_parser = parse_window_date)]
+        window_end: Option<chrono::NaiveDate>,
     },
     /// Run a batch: claim pending videos, fetch + transcribe, write artifacts.
     Process {
@@ -105,13 +136,61 @@ pub enum Command {
         #[arg(long, env = "DDP_TRANSCRIBE_COOKIES_FILE")]
         cookies_file: Option<PathBuf>,
         /// Automatic in-batch retry budget per video (lifetime attempts =
-        /// retries + 1). Default 1.
-        #[arg(long, default_value_t = 1)]
+        /// retries + 1). Default 1. Range-bounded at parse time: negative
+        /// values would silently zero the budget and i64::MAX would
+        /// overflow at `retries + 1` (epic-4 followup).
+        #[arg(
+            long,
+            default_value_t = 1,
+            value_parser = clap::builder::RangedI64ValueParser::<i64>::new().range(0..=1_000_000)
+        )]
         retries: i64,
     },
     /// Upgrade a pre-Epic-2 (v1) state.sqlite to the current schema version.
     /// Idempotent: no-op if already at the current version.
     Migrate,
+    /// Report pipeline state: counts by status, failure breakdowns,
+    /// current claims, and batch-run history. Read-only.
+    Status {
+        /// Full event history for one video.
+        #[arg(long, conflicts_with_all = ["respondent_id", "errors", "retryable"])]
+        video_id: Option<String>,
+        /// Per-respondent summary counts.
+        #[arg(long, conflicts_with_all = ["errors", "retryable"])]
+        respondent_id: Option<String>,
+        /// List failed_terminal videos with terminal_reason / terminal_message.
+        #[arg(long)]
+        errors: bool,
+        /// List failed_retryable videos with last_retryable_kind / _message.
+        #[arg(long)]
+        retryable: bool,
+        /// Run the done-contract checks (artifact existence at the sharded
+        /// paths + raw_signals.schema_version parse + pause-safe verdict).
+        /// Reads the --transcripts tree; exits 1 when not pause-safe.
+        #[arg(long, conflicts_with_all = ["video_id", "respondent_id", "errors", "retryable"])]
+        verify: bool,
+        /// Emit machine-readable JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Recompute watch_history.in_window from explicit window flags.
+    /// One-shot; does not re-read DDP files. Refuses to run bare —
+    /// silently wiping the study's window filter must be impossible.
+    #[command(group(clap::ArgGroup::new("window").required(true).multiple(true)))]
+    RecomputeWindow {
+        /// Inclusive analysis-window start (YYYY-MM-DD, UTC).
+        #[arg(long, value_parser = parse_window_date, group = "window")]
+        window_start: Option<chrono::NaiveDate>,
+        /// Inclusive analysis-window end (YYYY-MM-DD, UTC; covers that whole day).
+        #[arg(long, value_parser = parse_window_date, group = "window")]
+        window_end: Option<chrono::NaiveDate>,
+        /// Explicitly opt into "no filter": set in_window = 1 for ALL rows.
+        #[arg(long, group = "window", conflicts_with_all = ["window_start", "window_end"])]
+        clear: bool,
+        /// Report how many rows would change, without writing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]

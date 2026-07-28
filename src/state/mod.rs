@@ -1,14 +1,16 @@
 pub mod migrate;
+pub mod queries;
 mod schema;
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
 
 pub use schema::SCHEMA_VERSION;
 
-fn unix_now() -> i64 {
+pub(crate) fn unix_now() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -48,7 +50,7 @@ pub struct VideoRow {
 /// awaiting sweep adjudication. Message included because the sweep
 /// classifies stored messages directly through the active
 /// `ClassificationTable` (no probe step post-Epic-4a).
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct ParkedRow {
     pub video_id: String,
     /// The previously-stored retryable kind. `batch::run_sweep` reads it on a
@@ -61,13 +63,10 @@ pub struct ParkedRow {
     /// preserve-kind-on-fallback fix made this field a live read.)
     pub last_retryable_kind: Option<String>,
     pub last_retryable_message: Option<String>,
-    // 0002: read only by `Debug` and the integration tests since Epic 4a T08
-    // deleted the triage subcommand (its `run_triage` compared this against
-    // `--max-attempts`). `batch::run_sweep` caps via `retries + 1` passed to
-    // `sweep_requeue`, not from the snapshot, so the bin no longer reads this
-    // field. Suppressed rather than removed — the row-shape and the tests want
-    // it. Lift when a raw-connection consumer reads it again.
-    #[allow(dead_code)]
+    // 0002: `#[allow(dead_code)]` lifted (Epic 4b Task 03) — the
+    // `status --retryable` renderer is the first bin consumer since Epic 4a
+    // T08 deleted the triage subcommand (its `run_triage` compared this
+    // against `--max-attempts`).
     pub attempt_count: i64,
 }
 
@@ -228,13 +227,20 @@ impl Store {
         respondent_id: &str,
         video_id: &str,
         watched_at: i64,
+        watched_at_raw: &str,
         in_window: bool,
     ) -> Result<usize> {
         let changed = self
             .conn
             .execute(
                 UPSERT_WATCH_HISTORY_SQL,
-                params![respondent_id, video_id, watched_at, i64::from(in_window)],
+                params![
+                    respondent_id,
+                    video_id,
+                    watched_at,
+                    i64::from(in_window),
+                    watched_at_raw
+                ],
             )
             .with_context(|| {
                 format!(
@@ -261,8 +267,15 @@ const UPSERT_VIDEO_SQL: &str = "INSERT OR IGNORE INTO videos
                   first_seen_at, updated_at)
                  VALUES (?1, ?2, ?3, 'pending', ?4, ?4)";
 const UPSERT_WATCH_HISTORY_SQL: &str = "INSERT OR IGNORE INTO watch_history
-                 (respondent_id, video_id, watched_at, in_window)
-                 VALUES (?1, ?2, ?3, ?4)";
+                 (respondent_id, video_id, watched_at, in_window, watched_at_raw)
+                 VALUES (?1, ?2, ?3, ?4, ?5)";
+/// Backfill the raw DDP Date string onto a pre-v4 row. Deliberately does
+/// NOT touch in_window: recompute-window is the only path that changes
+/// flags after ingest (Epic 4b window ADR).
+const BACKFILL_WATCH_RAW_SQL: &str = "UPDATE watch_history
+                 SET watched_at_raw = ?4
+                 WHERE respondent_id = ?1 AND video_id = ?2 AND watched_at = ?3
+                   AND watched_at_raw IS NULL";
 
 /// Transaction-scoped upsert for the batch ingest path. `prepare_cached` prepares
 /// the statement once and reuses it for every row in the walk. Shares
@@ -289,16 +302,43 @@ pub(crate) fn upsert_watch_history_tx(
     respondent_id: &str,
     video_id: &str,
     watched_at: i64,
+    watched_at_raw: &str,
     in_window: bool,
 ) -> Result<usize> {
     let changed = tx
         .prepare_cached(UPSERT_WATCH_HISTORY_SQL)
         .context("preparing upsert_watch_history")?
-        .execute(params![respondent_id, video_id, watched_at, i64::from(in_window)])
+        .execute(params![
+            respondent_id,
+            video_id,
+            watched_at,
+            i64::from(in_window),
+            watched_at_raw
+        ])
         .with_context(|| {
             format!(
                 "upserting watch_history (respondent={respondent_id}, video={video_id}, watched_at={watched_at})"
             )
+        })?;
+    Ok(changed)
+}
+
+/// Transaction-scoped backfill of watched_at_raw for an existing row
+/// (INSERT OR IGNORE hit). Returns the row-change count per 0006:
+/// 1 = backfilled a NULL, 0 = row already carried its raw string.
+pub(crate) fn backfill_watch_raw_tx(
+    tx: &rusqlite::Transaction<'_>,
+    respondent_id: &str,
+    video_id: &str,
+    watched_at: i64,
+    watched_at_raw: &str,
+) -> Result<usize> {
+    let changed = tx
+        .prepare_cached(BACKFILL_WATCH_RAW_SQL)
+        .context("preparing backfill_watch_raw")?
+        .execute(params![respondent_id, video_id, watched_at, watched_at_raw])
+        .with_context(|| {
+            format!("backfilling watched_at_raw (respondent={respondent_id}, video={video_id})")
         })?;
     Ok(changed)
 }
@@ -929,6 +969,53 @@ impl Store {
                 params![run_id, now, census_json],
             )
             .context("close batch_runs row")
+    }
+
+    /// One-shot in_window recomputation over ALL watch_history rows
+    /// (Epic 4b window ADR). Bounds are unix seconds: start inclusive,
+    /// end exclusive (the CLI derives them from inclusive calendar dates);
+    /// both None = clear (everything in-window). Returns the number of
+    /// rows whose flag actually changed, per 0006.
+    pub fn recompute_window(
+        &mut self,
+        start: Option<i64>,
+        end_exclusive: Option<i64>,
+    ) -> Result<usize> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE watch_history
+                 SET in_window = CASE WHEN (?1 IS NULL OR watched_at >= ?1)
+                                       AND (?2 IS NULL OR watched_at < ?2)
+                                  THEN 1 ELSE 0 END
+                 WHERE in_window != CASE WHEN (?1 IS NULL OR watched_at >= ?1)
+                                          AND (?2 IS NULL OR watched_at < ?2)
+                                     THEN 1 ELSE 0 END",
+                params![start, end_exclusive],
+            )
+            .context("recompute watch_history.in_window")?;
+        Ok(changed)
+    }
+
+    /// Dry-run companion to [`Store::recompute_window`]: how many rows
+    /// WOULD change under these bounds. Read-only.
+    pub fn count_window_mismatches(
+        &self,
+        start: Option<i64>,
+        end_exclusive: Option<i64>,
+    ) -> Result<usize> {
+        let n: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM watch_history
+                 WHERE in_window != CASE WHEN (?1 IS NULL OR watched_at >= ?1)
+                                          AND (?2 IS NULL OR watched_at < ?2)
+                                     THEN 1 ELSE 0 END",
+                params![start, end_exclusive],
+                |r| r.get(0),
+            )
+            .context("count in_window mismatches")?;
+        Ok(usize::try_from(n).unwrap_or(0))
     }
 }
 

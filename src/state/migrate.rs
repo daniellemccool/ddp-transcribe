@@ -1,7 +1,7 @@
 //! Pre-Epic-2 → current schema migration ladder (0022; extended by Epic 4a
-//! for v2→v3). Opens the DB raw, bypassing Store::open's version check;
-//! runs the ladder + UPDATE meta inside one transaction. Idempotent on
-//! already-migrated DBs.
+//! for v2→v3, Epic 4b for v3→v4). Opens the DB raw, bypassing Store::open's
+//! version check; runs the ladder + UPDATE meta inside one transaction.
+//! Idempotent on already-migrated DBs.
 
 use std::path::Path;
 
@@ -57,9 +57,9 @@ pub fn run_migrate(path: &Path) -> Result<()> {
     }
 
     // Sequential ladder: each stage advances a local `version` string.
-    // Today two stages exist (v1→v2, v2→v3); Epic 4a+ will append more
-    // blocks as the schema bumps further. Unknown starting versions
-    // still bail below.
+    // Today three stages exist (v1→v2, v2→v3, v3→v4); future epics will
+    // append more blocks as the schema bumps further. Unknown starting
+    // versions still bail below.
     let tx = conn
         .transaction()
         .context("begin transaction for schema migrate")?;
@@ -94,6 +94,12 @@ pub fn run_migrate(path: &Path) -> Result<()> {
         )
         .context("v2→v3: batch_runs + attempt-aware pending index")?;
         version = "3".to_string();
+    }
+
+    if version == "3" {
+        tx.execute_batch("ALTER TABLE watch_history ADD COLUMN watched_at_raw TEXT;")
+            .context("v3→v4: watch_history.watched_at_raw")?;
+        version = "4".to_string();
     }
 
     if version != SCHEMA_VERSION {

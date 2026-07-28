@@ -2,10 +2,10 @@
 
 //! Migration test: synthesize a v1 DB (no new Epic 2 columns; meta.schema_version='1'),
 //! run the migrate function, confirm v2 columns are present and meta.schema_version
-//! lands on the current SCHEMA_VERSION (v3 as of Epic 4a — the ladder walks v1→v2→v3
-//! in one call). Then run Store::open and confirm it succeeds (round-trip with T2's
-//! check). Also covers the v2→v3 leg directly: a hand-built v2-shaped DB migrating
-//! to v3's `batch_runs` table + attempt-aware pending index.
+//! lands on the current SCHEMA_VERSION (v4 as of Epic 4b — the ladder walks
+//! v1→v2→v3→v4 in one call). Then run Store::open and confirm it succeeds (round-trip
+//! with T2's check). Also covers the v2→v3 leg directly: a hand-built v2-shaped DB
+//! migrating to v3's `batch_runs` table + attempt-aware pending index.
 
 use anyhow::Result;
 use ddp_transcribe::state::{migrate::run_migrate, Store, SCHEMA_VERSION};
@@ -35,6 +35,15 @@ fn synthesize_v1_db(path: &std::path::Path) -> Result<()> {
              transcript_source   TEXT,
              first_seen_at       INTEGER NOT NULL,
              updated_at          INTEGER NOT NULL
+         );
+
+         CREATE TABLE IF NOT EXISTS watch_history (
+             respondent_id  TEXT NOT NULL,
+             video_id       TEXT NOT NULL,
+             watched_at     INTEGER NOT NULL,
+             in_window      INTEGER NOT NULL,
+             PRIMARY KEY (respondent_id, video_id, watched_at),
+             FOREIGN KEY (video_id) REFERENCES videos(video_id)
          );
 
          CREATE TABLE IF NOT EXISTS meta (
@@ -83,6 +92,15 @@ fn synthesize_v2_db(path: &std::path::Path) -> Result<()> {
          CREATE INDEX IF NOT EXISTS idx_videos_pending
              ON videos (status, first_seen_at, video_id)
              WHERE status = 'pending';
+
+         CREATE TABLE IF NOT EXISTS watch_history (
+             respondent_id  TEXT NOT NULL,
+             video_id       TEXT NOT NULL,
+             watched_at     INTEGER NOT NULL,
+             in_window      INTEGER NOT NULL,
+             PRIMARY KEY (respondent_id, video_id, watched_at),
+             FOREIGN KEY (video_id) REFERENCES videos(video_id)
+         );
 
          CREATE TABLE IF NOT EXISTS meta (
              key   TEXT PRIMARY KEY NOT NULL,
@@ -252,6 +270,15 @@ fn migrate_pre_plan_a_db_without_meta_row_records_current_version() -> Result<()
                  transcript_source   TEXT,
                  first_seen_at       INTEGER NOT NULL,
                  updated_at          INTEGER NOT NULL
+             );
+
+             CREATE TABLE IF NOT EXISTS watch_history (
+                 respondent_id  TEXT NOT NULL,
+                 video_id       TEXT NOT NULL,
+                 watched_at     INTEGER NOT NULL,
+                 in_window      INTEGER NOT NULL,
+                 PRIMARY KEY (respondent_id, video_id, watched_at),
+                 FOREIGN KEY (video_id) REFERENCES videos(video_id)
              );
 
              CREATE TABLE IF NOT EXISTS meta (
@@ -498,4 +525,111 @@ fn migrate_preserves_existing_video_rows_with_null_new_columns() -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Synthesize a v3-shaped schema (batch_runs + idx_videos_pending_v3
+/// present, watch_history WITHOUT watched_at_raw) at `path` — the
+/// pre-Epic-4b shape. Copies `synthesize_v2_db`'s hand-built-SQL style.
+fn synthesize_v3_db(path: &std::path::Path) -> Result<()> {
+    let conn = Connection::open(path)?;
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA foreign_keys = ON;
+
+         CREATE TABLE IF NOT EXISTS videos (
+             video_id            TEXT PRIMARY KEY NOT NULL,
+             source_url          TEXT NOT NULL,
+             canonical           INTEGER NOT NULL,
+             status              TEXT NOT NULL CHECK (status IN
+                                   ('pending','in_progress','succeeded','failed_terminal','failed_retryable')),
+             claimed_by          TEXT,
+             claimed_at          INTEGER,
+             attempt_count       INTEGER NOT NULL DEFAULT 0,
+             succeeded_at        INTEGER,
+             duration_s          REAL,
+             language_detected   TEXT,
+             fetcher             TEXT,
+             transcript_source   TEXT,
+             last_retryable_kind     TEXT,
+             last_retryable_message  TEXT,
+             terminal_reason         TEXT,
+             terminal_message        TEXT,
+             first_seen_at       INTEGER NOT NULL,
+             updated_at          INTEGER NOT NULL
+         );
+
+         CREATE INDEX IF NOT EXISTS idx_videos_pending_v3
+             ON videos (status, attempt_count, first_seen_at, video_id)
+             WHERE status = 'pending';
+
+         CREATE TABLE IF NOT EXISTS watch_history (
+             respondent_id  TEXT NOT NULL,
+             video_id       TEXT NOT NULL,
+             watched_at     INTEGER NOT NULL,
+             in_window      INTEGER NOT NULL,
+             PRIMARY KEY (respondent_id, video_id, watched_at),
+             FOREIGN KEY (video_id) REFERENCES videos(video_id)
+         );
+
+         CREATE TABLE IF NOT EXISTS batch_runs (
+             run_id       INTEGER PRIMARY KEY,
+             started_at   INTEGER NOT NULL,
+             finished_at  INTEGER,
+             params_json  TEXT NOT NULL,
+             policy_toml  TEXT NOT NULL,
+             census_json  TEXT
+         );
+
+         CREATE TABLE IF NOT EXISTS meta (
+             key   TEXT PRIMARY KEY NOT NULL,
+             value TEXT NOT NULL
+         );
+
+         INSERT INTO meta (key, value) VALUES ('schema_version', '3');
+        ",
+    )?;
+    conn.execute(
+        "INSERT INTO videos (video_id, source_url, canonical, status, first_seen_at, updated_at)
+         VALUES ('7000000000000000111', 'https://example/7000000000000000111', 1, 'pending', 1, 1)",
+        [],
+    )?;
+    conn.execute(
+        "INSERT INTO watch_history (respondent_id, video_id, watched_at, in_window)
+         VALUES ('w1', '7000000000000000111', 1000, 1)",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Epic 4b: the v3→v4 leg in isolation. A v3-shaped DB (no
+/// `watched_at_raw` column, one pre-existing watch_history row) migrates
+/// to v4: the column exists, pre-v4 rows carry NULL raw, and a second
+/// `run_migrate` call is idempotent.
+#[test]
+fn migrate_upgrades_v3_to_v4_idempotently() {
+    let tmp = TempDir::new().unwrap();
+    let db = tmp.path().join("state.sqlite");
+    synthesize_v3_db(&db).unwrap();
+
+    run_migrate(&db).expect("v3→v4");
+    run_migrate(&db).expect("idempotent second run");
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let version: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, ddp_transcribe::state::SCHEMA_VERSION);
+    // Column exists and pre-v4 rows carry NULL raw.
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT watched_at_raw FROM watch_history LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(raw.is_none(), "pre-v4 rows must carry NULL watched_at_raw");
 }

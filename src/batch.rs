@@ -138,7 +138,8 @@ impl std::fmt::Display for BatchCensus {
 /// floor to the nearest char boundary at or below the cap.
 /// (`str::floor_char_boundary` is nightly-only on our toolchain; a boundary
 /// is at most 3 bytes below any index, so the loop is bounded.)
-fn truncate_to_char_boundary(s: &mut String, max_bytes: usize) {
+/// Also used by `status`'s event renderer to cap message excerpts.
+pub(crate) fn truncate_to_char_boundary(s: &mut String, max_bytes: usize) {
     if s.len() <= max_bytes {
         return;
     }

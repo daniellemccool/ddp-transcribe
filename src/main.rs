@@ -18,6 +18,7 @@ mod output;
 mod pipeline;
 mod process;
 mod state;
+mod status;
 mod transcribe;
 
 #[tokio::main]
@@ -25,12 +26,7 @@ async fn main() -> Result<()> {
     let cli = cli::Cli::parse();
     init_tracing(cli.global.log_format);
     let cfg = config::Config::from_args(&cli.global);
-    tracing::info!(
-        profile = ?cfg.profile,
-        state_db = ?cfg.state_db,
-        whisper_model_path = ?cfg.whisper_model_path,
-        "config resolved"
-    );
+    log_resolved_config(&cfg, &cli.command);
 
     match cli.command {
         cli::Command::Init => {
@@ -52,12 +48,18 @@ async fn main() -> Result<()> {
             let _store = state::Store::open(path)?;
             tracing::info!(path = %path.display(), "state.sqlite initialized");
         }
-        cli::Command::Ingest { dry_run } => {
+        cli::Command::Ingest {
+            dry_run,
+            window_start,
+            window_end,
+        } => {
+            cli::validate_window_order("ingest", window_start, window_end)?;
             let mut store = state::Store::open(&cfg.state_db).context("opening state DB")?;
             if dry_run {
                 tracing::info!("dry-run: not yet implemented; running real ingest");
             }
-            let stats = ingest::ingest(&cfg.inbox, &mut store).context("ingest failed")?;
+            let window = ingest::WindowBounds::from_dates(window_start, window_end);
+            let stats = ingest::ingest(&cfg.inbox, &mut store, window).context("ingest failed")?;
             tracing::info!(
                 files = stats.files_processed,
                 videos = stats.unique_videos_seen,
@@ -66,6 +68,8 @@ async fn main() -> Result<()> {
                 short_links_skipped = stats.short_links_skipped,
                 invalid_urls_skipped = stats.invalid_urls_skipped,
                 date_parse_failures = stats.date_parse_failures,
+                computed_out_of_window = stats.computed_out_of_window,
+                backfilled_raw_dates = stats.backfilled_raw_dates,
                 "ingest complete"
             );
         }
@@ -281,9 +285,157 @@ async fn main() -> Result<()> {
             state::migrate::run_migrate(path).context("running migrate")?;
             tracing::info!(path = %path.display(), "migrate complete");
         }
+        cli::Command::Status {
+            video_id,
+            respondent_id,
+            errors,
+            retryable,
+            verify,
+            json,
+        } => {
+            let path = &cfg.state_db;
+            if !path.exists() {
+                anyhow::bail!(
+                    "status: state.sqlite not found at {}. Run `ddp-transcribe init` first.",
+                    path.display()
+                );
+            }
+            let store = state::Store::open(path).context("opening state DB")?;
+            if let Some(id) = video_id {
+                let report = status::build_video_detail(&store, &id)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    print!("{}", status::render_video_detail(&report));
+                }
+            } else if let Some(id) = respondent_id {
+                let report = status::RespondentReport {
+                    respondent: store
+                        .respondent_summary(&id)
+                        .context("respondent summary")?,
+                };
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    print!("{}", status::render_respondent(&report));
+                }
+            } else if errors || retryable {
+                let lists = status::FailureLists {
+                    errors: if errors {
+                        Some(
+                            store
+                                .list_terminal_failures()
+                                .context("listing terminal failures")?,
+                        )
+                    } else {
+                        None
+                    },
+                    retryable: if retryable {
+                        Some(
+                            store
+                                .list_failed_retryable()
+                                .context("listing retryable failures")?,
+                        )
+                    } else {
+                        None
+                    },
+                };
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&lists)?);
+                } else {
+                    print!("{}", status::render_failure_lists(&lists));
+                }
+            } else {
+                let mut report = status::build_report(&store, state::unix_now())?;
+                if verify {
+                    report.verify = Some(
+                        status::run_verify(&store, &cfg.transcripts, &report.counts)
+                            .context("running --verify checks")?,
+                    );
+                }
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    print!("{}", status::render_report(&report));
+                }
+                if let Some(v) = &report.verify {
+                    if !v.pause_safe {
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+        cli::Command::RecomputeWindow {
+            window_start,
+            window_end,
+            clear,
+            dry_run,
+        } => {
+            let path = &cfg.state_db;
+            if !path.exists() {
+                anyhow::bail!(
+                    "recompute-window: state.sqlite not found at {}. Run `ddp-transcribe init` first.",
+                    path.display()
+                );
+            }
+            // --clear == both bounds None (everything in-window); clap
+            // guarantees clear XOR window flags.
+            let window = if clear {
+                ingest::WindowBounds::default()
+            } else {
+                cli::validate_window_order("recompute-window", window_start, window_end)?;
+                ingest::WindowBounds::from_dates(window_start, window_end)
+            };
+            let mut store = state::Store::open(path).context("opening state DB")?;
+            if dry_run {
+                let n = store.count_window_mismatches(window.start, window.end_exclusive)?;
+                println!("recompute-window dry-run: would change {n} row(s)");
+            } else {
+                let n = store.recompute_window(window.start, window.end_exclusive)?;
+                println!("recompute-window: changed {n} row(s)");
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Config echo scoped to what the invoked subcommand actually consumes
+/// (epic-4 followup: echoing whisper_model_path for `ingest` sent the
+/// operator chasing a "why is it using tiny?" false alarm). Process is
+/// the only model-loading arm; ingest reads the inbox; status --verify
+/// reads the transcripts tree.
+fn log_resolved_config(cfg: &config::Config, command: &cli::Command) {
+    match command {
+        cli::Command::Process { .. } => tracing::info!(
+            profile = ?cfg.profile,
+            state_db = ?cfg.state_db,
+            transcripts = ?cfg.transcripts,
+            whisper_model_path = ?cfg.whisper_model_path,
+            classification = ?cfg.classification_path,
+            "config resolved"
+        ),
+        cli::Command::Ingest { .. } => tracing::info!(
+            profile = ?cfg.profile,
+            state_db = ?cfg.state_db,
+            inbox = ?cfg.inbox,
+            "config resolved"
+        ),
+        cli::Command::Status { verify: true, .. } => tracing::info!(
+            profile = ?cfg.profile,
+            state_db = ?cfg.state_db,
+            transcripts = ?cfg.transcripts,
+            "config resolved"
+        ),
+        cli::Command::Init
+        | cli::Command::Migrate
+        | cli::Command::Status { .. }
+        | cli::Command::RecomputeWindow { .. } => tracing::info!(
+            profile = ?cfg.profile,
+            state_db = ?cfg.state_db,
+            "config resolved"
+        ),
+    }
 }
 
 fn hostname_or_default() -> String {
@@ -293,14 +445,22 @@ fn hostname_or_default() -> String {
 fn init_tracing(format: cli::LogFormat) {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // Logs go to stderr, never stdout: `status --json` (and any future
+    // machine-readable command output) must be pure, parseable JSON on
+    // stdout with no log lines interleaved. `fmt()`'s default writer is
+    // stdout, so both branches route explicitly to stderr.
     match format {
         cli::LogFormat::Human => {
-            tracing_subscriber::fmt().with_env_filter(filter).init();
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_writer(std::io::stderr)
+                .init();
         }
         cli::LogFormat::Json => {
             tracing_subscriber::fmt()
                 .json()
                 .with_env_filter(filter)
+                .with_writer(std::io::stderr)
                 .init();
         }
     }

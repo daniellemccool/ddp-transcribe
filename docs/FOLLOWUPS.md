@@ -53,15 +53,6 @@ lines 120-148.
 section "Resolved by Plan B Epic 3") or split-and-re-filed: `YtDlpFetcher::acquire`
 finding 3 → Epic 5, finding 4 → Plan C (see those groups below).
 
-**Epic 4b (operator-facing commands / timestamps)** — Epic 4a closed 2026-07-08
-(in-pipeline retry, config-driven classification, triage retirement); its
-resolved entries archived under "Resolved by Plan B Epic 4a".
-- T13: `parse_watched_at` UTC assumption → Epic 4b (time-window / timezone work)
-- Epic 4a T06 review: `--retries` / `max_attempts` accept unvalidated i64 ranges (negatives degenerate the budget; `i64::MAX` overflows at `retries+1`) → Epic 4b (CLI validation pass)
-- Epic 3 close-out ops: config echo logs model path for subcommands that never load it → Epic 4b (`status`/operator-UX pass)
-- Epic 3 close-out ops: operator interface is the tool itself; wrapper scripts non-normative (standing premise, honored by Epic 4a) → Epic 4b planning input
-- Full Epic 4b entries: [followups/epic-4.md](followups/epic-4.md)
-
 **Epic 5 (Plan A → Plan B cleanup sweep)**
 - T7: `Store::pragma_string` `pub` vs `pub(crate)` → Epic 5 (lower to `pub(crate)`)
 - T7: `Store::read_meta` `OptionalExtension` → Epic 5 (refactor when touched)
@@ -79,6 +70,8 @@ resolved entries archived under "Resolved by Plan B Epic 4a".
 - Epic 3 final review: `FetchOpts` derived `Debug` doesn't redact `cookies_file` → Epic 5
 - Epic 3 final review: `scrub_cookie_path` empty-path guard → Epic 5
 - Transcript-storage assessment: pipelined transcribe worker holds Store mutex across artifact writes+fsyncs though only `mark_succeeded` needs it (0008-ordering-sensitive; own reviewed change) → Epic 5 (perf sweep)
+- Epic 4b final review: status polish + test-debt bundle (`render_event_detail_inline` non-string fallback, missing test fixtures, `run_verify` `e.ok()` miscount, `--respondent-id` typo silently zero-fills, mid-file `use` in status.rs) → Epic 5 hygiene bundle
+- Epic 4b final review: `ingest --dry-run` is not dry — pre-existing wart, raised stakes now that `ingest` takes window flags → Epic 5
 - Full Epic 5 entries: [followups/epic-5.md](followups/epic-5.md)
 
 **Plan C (short-link resolution, multi-engine, storage scale)**

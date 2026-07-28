@@ -428,3 +428,59 @@ followed by a narrowly-scoped `store.lock().await` around just
 other fetch workers are blocked from `claim_next`. Any such change is
 0008-ordering-sensitive and should land as its own reviewed change, not
 bundled into an unrelated task.
+
+---
+
+### Epic 4b final review: status polish + test-debt bundle
+
+**Found in:** Epic 4b final whole-branch review.
+**Disposition:** Grouped opportunistic hardening + test-debt; bundle into
+one Epic 5 pass rather than five separate commits.
+**Trigger to revisit:** Epic 5 hygiene sweep planning.
+
+Five gaps on the `status`/`--verify` surface, none blocking:
+
+1. `render_event_detail_inline` (`src/status.rs`) drops non-string values of
+   the known keys (`kind`, `policy`, `new_kind`, `reason`) with no raw-JSON
+   fallback — an unexpected non-string value under a known key renders as
+   nothing instead of falling back to the raw `detail_json`.
+2. Missing test fixtures: malformed `detail_json`; the `{"reason","message"}`
+   shape; a corrupt-JSON artifact exercising the `unreadable_artifacts`
+   path; valid metadata with `raw_signals` absent exercising the
+   schema-version-mismatch path; a single-status zero-fill assertion; and a
+   `WindowBounds` end-only-bound case.
+3. `run_verify`'s per-entry `e.ok()` drop on the `read_dir` iterator
+   (`src/status.rs`) miscounts exotic `DirEntry` errors as missing rather
+   than unreadable — an entry that exists but can't be named/stat'd
+   silently disappears from the shard's filename set instead of surfacing
+   as an infra fault.
+4. `status --respondent-id` with a typo'd/nonexistent id reports an
+   all-zeros `RespondentSummary` instead of an error — inconsistent with
+   `--video-id`, which errors (and exits 1) when the video row is missing.
+   `Store::respondent_summary`'s aggregate `COUNT(*)` query has nothing to
+   distinguish "zero matching rows" from "unknown respondent."
+5. `src/status.rs` has imports mid-file (`use crate::state::queries::{...}`,
+   `use crate::state::ParkedRow` around line 499) instead of grouped with
+   the top-of-file `use` block.
+
+---
+
+### `ingest --dry-run` is not dry
+
+**Found in:** Epic 4b final whole-branch review. Pre-existing wart (the
+`tracing::info!` warning predates 4b); raised stakes because Epic 4b gave
+`ingest` window flags to preview.
+**Disposition:** Not blocking 4b — `recompute-window --dry-run` (Task 06)
+mitigates for rows already ingested — but the gap widens with each flag
+`ingest` grows.
+**Trigger to revisit:** Epic 5, or sooner if an operator is burned by it.
+
+`cli::Command::Ingest`'s `dry_run` arm (`src/main.rs`, ~line 58) logs
+`"dry-run: not yet implemented; running real ingest"` and then runs the real
+ingest unconditionally — `--dry-run` has never actually been dry. Now that
+`ingest` takes `--window-start`/`--window-end` (Epic 4b Task 05), an operator
+who reaches for `--dry-run` to preview a window's effect before committing to
+it instead mutates state for real. `recompute-window --dry-run` covers
+re-deriving `in_window` for rows already in the DB, but not the first
+ingest of a new export, where the mutation is `watch_history` inserts plus
+`videos` upserts, not just the `in_window` recompute.

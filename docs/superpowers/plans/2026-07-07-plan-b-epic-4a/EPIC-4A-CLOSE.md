@@ -53,6 +53,63 @@ Each was disclosed per ADR-0003 in its task commit; the docs and ADRs describe t
 - **Cookie-efficacy verdict** — the first real cookie run is the experiment; prove whether cookies recover the `SensitiveLoginGated` pool.
 - **CLI hardening**: `--retries` / `max_attempts` i64 range validation; config-echo scoped to consumed config (both FOLLOWUPS, Epic 4b).
 
+## First production batch — actual results (2026-07-08; recorded 2026-07-13)
+
+The runbook above ran against the pilot DB (7,087 parked rows) on the SRC A10
+workspace as **two `process` invocations** (`batch_runs` rows 1–2):
+
+| run | started (UTC) | finished (UTC) | `--retries` | census |
+|---|---|---|---|---|
+| 1 | 2026-07-08 11:41 | — (interrupted; row never closed) | 1 | none persisted |
+| 2 | 2026-07-08 15:47 | 2026-07-08 16:32 | 2 | persisted ✓ |
+
+Run 1 performed the big sweep and most of the drain, then was interrupted
+(workspace pause at 12:11 UTC), leaving an open `batch_runs` row with no
+census — see the Epic 4b FOLLOWUPS entry on rendering open runs. Run 2 swept
+the leftovers (examined 1,388; requeued 1,087; parked 301 for cookies) and
+closed cleanly. Numbers below are reconstructed from the `videos` table
+(authoritative current state), cross-checked against run 2's census;
+snapshot synced to Research Drive 2026-07-13 and copied locally as
+`ddp-run-export.sqlite` (repo root, untracked).
+
+**Disposition of the 7,087 parked rows** (sums exactly):
+
+| Disposition | n | % |
+|---|---|---|
+| Terminal — 3,915 sweep write-offs + 13 adjudicated dead on retry | 3,928 | 55.4% |
+| Recovered on retry | 2,370 | 33.4% |
+| Parked awaiting cookies (`SensitiveLoginGated`, placeholder kind `Fetch`) | 301 | 4.2% |
+| Retried but exhausted (remain `failed_retryable`) | 488 | 6.9% |
+
+**Retry effectiveness:** 2,871 rows were actually retried (matches the
+runbook's ~2,871 projection). 2,370 recovered — **82.5%** overall;
+excluding the known-impure `NoPermission` class, **2,344 of 2,420 = 96.9%**.
+
+**Per-kind outcomes** (from `videos`: `last_retryable_kind` × `status`):
+
+| kind | recovered | exhausted | terminal-on-retry |
+|---|---|---|---|
+| NoDataBlocks | 2,315 | 1 | 6 |
+| NoPermission | 26 | 418 | 7 |
+| NetworkTransient | 17 | 0 | 0 |
+| HttpError | 12 | 1 | 0 |
+| FfprobePostprocess | 0 | 36 | 0 |
+| NoVideoFormats | 0 | 32 | 0 |
+
+**Calibration verdicts** (vs. the 2026-07-07 probe census in
+`PLAN-B-EPIC-4-KICKOFF-PROMPT.md` Step 4):
+
+- `NoPermission`: probe predicted 25 alive of 452 → **26 recovered**. The
+  impure-class ruling (keep `retryable`) is vindicated at population scale;
+  a blanket `terminal` would have silently discarded these videos.
+- `NoDataBlocks`: predicted 2,311/2,318 alive → 2,315 recovered, 7 dead.
+- Corpus: **51,903 / 56,620 succeeded = 91.7%** — inside the projected
+  91.5–92% band. Remaining `failed_retryable` pool: 789 = 301 cookie-gated
+  (Epic 4b live experiment) + 488 exhausted awaiting adjudication.
+- New signal: `FfprobePostprocess` (36) and `NoVideoFormats` (32) recovered
+  **zero** rows on retry — candidate evidence for a future disposition
+  review, though n is small and one retry is a weak oracle for these.
+
 ## Next
 
 Epic 4b (operator-facing `status` command, done-contract, timestamps) — sketch at `docs/superpowers/plans/2026-05-12-plan-b/EPIC-4-SKETCH.md`.
