@@ -50,3 +50,53 @@ fn init_is_idempotent() {
             .success();
     }
 }
+
+#[test]
+fn ingest_rejects_reversed_window_range() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = tmp.path().join("state.sqlite");
+    let inbox = tmp.path().join("inbox");
+
+    Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args([
+            "--state-db",
+            db.to_str().unwrap(),
+            "--inbox",
+            inbox.to_str().unwrap(),
+            "ingest",
+            "--window-start",
+            "2026-03-01",
+            "--window-end",
+            "2026-02-01",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("--window-start"))
+        .stderr(contains("--window-end"))
+        .stderr(contains("2026-03-01"))
+        .stderr(contains("2026-02-01"));
+}
+
+#[test]
+fn ingest_accepts_equal_window_start_and_end() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = tmp.path().join("state.sqlite");
+    let inbox = tmp.path().join("inbox");
+
+    Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args([
+            "--state-db",
+            db.to_str().unwrap(),
+            "--inbox",
+            inbox.to_str().unwrap(),
+            "ingest",
+            "--window-start",
+            "2026-02-15",
+            "--window-end",
+            "2026-02-15",
+        ])
+        .assert()
+        .success();
+}

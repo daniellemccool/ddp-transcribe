@@ -19,8 +19,15 @@ pub struct IngestStats {
     pub short_links_skipped: usize,
     pub invalid_urls_skipped: usize,
     pub date_parse_failures: usize,
-    /// Rows this pass marked in_window = 0 (outside the supplied window).
-    pub marked_out_of_window: usize,
+    /// Entries this pass computed as outside the supplied window, per the
+    /// input-side counting convention (ADR-0007): incremented whenever a
+    /// row's freshly computed `in_window` is false, regardless of whether
+    /// that value was actually written. Duplicate-PK rows are computed here
+    /// but their stored `in_window` is deliberately left untouched (only
+    /// `recompute-window` may change it after ingest) — so this counter can
+    /// legitimately exceed the number of rows whose `in_window` flag
+    /// actually changed.
+    pub computed_out_of_window: usize,
     /// Existing rows whose NULL watched_at_raw this pass backfilled.
     pub backfilled_raw_dates: usize,
 }
@@ -153,7 +160,7 @@ fn process_watch_entry(
 
     let in_window = window.contains(watched_at);
     if !in_window {
-        stats.marked_out_of_window += 1;
+        stats.computed_out_of_window += 1;
     }
     let inserted = upsert_watch_history_tx(
         tx,

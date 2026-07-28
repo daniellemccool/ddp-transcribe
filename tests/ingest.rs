@@ -206,7 +206,7 @@ fn ingest_window_flags_and_raw_preservation() {
     );
     let stats = ddp_transcribe::ingest::ingest(&inbox, &mut store, window).unwrap();
     assert_eq!(stats.watch_history_rows_processed, 2);
-    assert_eq!(stats.marked_out_of_window, 1);
+    assert_eq!(stats.computed_out_of_window, 1);
 
     let conn = rusqlite::Connection::open(tmp.path().join("state.sqlite")).unwrap();
     let (in_w, raw): (i64, String) = conn

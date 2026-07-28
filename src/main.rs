@@ -58,6 +58,11 @@ async fn main() -> Result<()> {
             window_start,
             window_end,
         } => {
+            if let (Some(start), Some(end)) = (window_start, window_end) {
+                if start > end {
+                    anyhow::bail!("ingest: --window-start {start} is after --window-end {end}");
+                }
+            }
             let mut store = state::Store::open(&cfg.state_db).context("opening state DB")?;
             if dry_run {
                 tracing::info!("dry-run: not yet implemented; running real ingest");
@@ -72,7 +77,7 @@ async fn main() -> Result<()> {
                 short_links_skipped = stats.short_links_skipped,
                 invalid_urls_skipped = stats.invalid_urls_skipped,
                 date_parse_failures = stats.date_parse_failures,
-                marked_out_of_window = stats.marked_out_of_window,
+                computed_out_of_window = stats.computed_out_of_window,
                 backfilled_raw_dates = stats.backfilled_raw_dates,
                 "ingest complete"
             );
