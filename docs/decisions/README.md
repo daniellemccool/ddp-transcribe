@@ -32,6 +32,7 @@ Load the ADR(s) whose filename matches the area you are touching.
 - [0023 — Failure mutators take string kinds and keep the claim guard](./0023-failure-mutators-take-string-kinds-and-keep-the-claim-guard.md)
 - [0024 — Stale-claim sweep recovers rows blind: no validation, no attempt bump](./0024-stale-claim-sweep-recovers-rows-blind-no-validation-no-attempt-bump.md)
 - [0036 — Retry is in-pipeline: capped failure-time requeue; the re-fetch is the liveness oracle](./0036-retry-is-in-pipeline-capped-failure-time-requeue-the-re-fetch-is-the-liveness-oracle.md)
+- [0040 — Analysis window is computed at ingest; recompute-window is the only flag mutator](./0040-analysis-window-is-computed-at-ingest-recompute-window-is-the-only-flag-mutator.md)
 
 ### Whisper engine
 
@@ -54,6 +55,7 @@ Load the ADR(s) whose filename matches the area you are touching.
 - [0025 — Worker supervision: JoinSet + CancellationToken; shutdown order is load-bearing](./0025-worker-supervision-joinset-cancellationtoken-shutdown-order-is-load-bearing.md)
 - [0026 — Workers drain and exit on claim_next None — no polling](./0026-workers-drain-and-exit-on-claim-next-none-no-polling.md)
 - [0027 — Orchestrator topology: 3 fetch workers feed 1 transcribe worker over a capacity-2 channel](./0027-orchestrator-topology-3-fetch-workers-feed-1-transcribe-worker-over-a-capacity-2-channel.md)
+- [0041 — status is the read-only operator surface; the 0017 done-contract lives behind --verify](./0041-status-is-the-read-only-operator-surface-the-0017-done-contract-lives-behind-verify.md)
 
 ### Failure classification
 
