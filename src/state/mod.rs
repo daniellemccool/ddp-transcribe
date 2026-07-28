@@ -521,10 +521,9 @@ impl Store {
     /// Callers treat failures as best-effort (log + continue): metadata
     /// must never change a video's pipeline outcome.
     ///
-    /// Not yet called from the bin (Task 03's fetch-time hook is the first
-    /// consumer); tests link the lib directly. `#[allow(dead_code)]` per
-    /// 0002 — Task 03 removes it.
-    #[allow(dead_code)]
+    /// Task 03 wired both pipeline paths (`fetch_worker` and
+    /// `process_one`) as the first real callers, lifting the placeholder
+    /// `#[allow(dead_code)]` per 0002.
     pub fn upsert_metadata_raw(&mut self, video_id: &str, envelope_json: &str) -> Result<usize> {
         let now = unix_now();
         let changed = self

@@ -311,7 +311,27 @@ pub async fn fetch_worker(
             }
             r = fetch_and_decode(fetcher.as_ref(), &claim, &fetch_opts) => r,
         };
-        let (_metadata_capture, fetch_result) = fetch_result; // Epic 4c Task 03 wires persistence
+        let (metadata_capture, fetch_result) = fetch_result;
+
+        // Epic 4c: persist the raw envelope BEFORE outcome dispatch so
+        // mid-download deaths still leave metadata. Best-effort by
+        // invariant — an insert failure must never change the video's
+        // pipeline outcome. Guard scope: insert only, released before the
+        // outcome match re-locks for failure dispatch.
+        if let Some(capture) = metadata_capture {
+            let insert = {
+                let mut guard = store.lock().await;
+                guard.upsert_metadata_raw(&claim.video_id, &capture.envelope_json)
+            };
+            if let Err(e) = insert {
+                tracing::warn!(
+                    worker = %worker_id,
+                    video_id = claim.video_id.as_str(),
+                    error = %e,
+                    "metadata raw insert failed; continuing"
+                );
+            }
+        }
 
         match fetch_result {
             Ok((samples, wav_path)) => {

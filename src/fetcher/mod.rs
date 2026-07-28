@@ -66,13 +66,11 @@ pub struct FetchOpts {
 /// stored verbatim in `video_metadata_raw`. Produced on success AND
 /// tool-failure paths; absent on structural failures (timeout/spawn/io).
 ///
-/// The field is produced here but not yet READ by the bin — Task 03's
-/// `upsert_metadata_raw` hook is the first consumer, so `#[allow(dead_code)]`
-/// per 0002 keeps `--all-targets -D warnings` green until then; Task 03
-/// removes it.
+/// Task 03 wired both pipeline paths to read the field into
+/// `Store::upsert_metadata_raw` before outcome dispatch, lifting the
+/// placeholder `#[allow(dead_code)]` per 0002.
 #[derive(Debug, Clone)]
 pub struct MetadataCapture {
-    #[allow(dead_code)]
     pub envelope_json: String,
 }
 

@@ -268,7 +268,17 @@ async fn process_one(
 
     // Epic 3 T08: kind-gated cookie routing (ADR 0035).
     let fetch_opts = cookie_opts_for(claim, &opts.classification, opts.cookies_file.as_deref());
-    let (_metadata_capture, fetch_result) = fetch_and_decode(fetcher, claim, &fetch_opts).await; // Epic 4c Task 03 wires persistence
+    let (metadata_capture, fetch_result) = fetch_and_decode(fetcher, claim, &fetch_opts).await;
+    // Epic 4c: raw envelope persists regardless of fetch outcome; best-effort.
+    if let Some(capture) = metadata_capture {
+        if let Err(e) = store.upsert_metadata_raw(&claim.video_id, &capture.envelope_json) {
+            tracing::warn!(
+                video_id = claim.video_id.as_str(),
+                error = %e,
+                "metadata raw insert failed; continuing"
+            );
+        }
+    }
     let (samples, wav_path) = fetch_result?;
     transcribe_and_write(
         store,
