@@ -359,10 +359,11 @@ pub(crate) async fn fetch_and_decode(
 /// `Config::from_args` and three test fixture constructions.
 ///
 /// Used by `run_serial`'s `process_one`. The pipelined path
-/// (`transcribe_worker`) delegates directly to the inner
-/// [`write_artifacts_and_mark`] helper (which is the 0008 single source
-/// of truth); after T18 the pipelined worker no longer routes through
-/// this outer wrapper. Kept for `run_serial` (integration tests).
+/// (`transcribe_worker`) calls the two phase-4 halves
+/// ([`write_artifacts_durable`] then [`mark_after_artifacts`] — the 0008
+/// ordering owner) directly, so it can keep the store lock off the
+/// durable writes; after T18 the pipelined worker no longer routes
+/// through this outer wrapper. Kept for `run_serial` (integration tests).
 ///
 /// 0002: paired with `run_serial`'s suppression; bin doesn't reach
 /// this after T18.
@@ -419,54 +420,26 @@ pub(crate) async fn transcribe_and_write(
     )
 }
 
-/// Phase 4 helper extracted from [`transcribe_and_write`] (T17, Path A):
-/// write artifacts → mark_succeeded → cleanup wav.
+/// Phase 4a — durable artifact writes (0008 first half), extracted from
+/// [`write_artifacts_and_mark`] (Epic 4c).
 ///
-/// **0008 invariant (load-bearing).** Artifacts (txt + json) must be
-/// durable on disk BEFORE `store.mark_succeeded`. A crash between
-/// artifact writes and `mark_succeeded` leaves the row in `in_progress`,
-/// which the next run's `sweep_stale_claims` reclaims (per 0024); the
-/// artifacts on disk are re-written on the next attempt (atomic_write
-/// is idempotent).
+/// **NO store access.** Callers run this OUTSIDE any store lock: the
+/// fsyncs in `atomic_write` (two file fsyncs + a directory fsync) are the
+/// slow part of phase 4 and must not serialize other workers' claim /
+/// failure dispatch behind the store mutex.
 ///
-/// This helper is the **single source of truth** for that ordering.
-/// Both `transcribe_and_write` (serial path) and
-/// `pipelined::transcribe_worker` (T17) delegate here; a regression in
-/// the order would silently pass tests on the happy path but corrupt
-/// invariants in a crash-mid-write scenario.
-///
-/// Returns [`ProcessOutcome::StaleAfterSuccess`] when `mark_succeeded`
-/// updates 0 rows (concurrent sweep cleared the claim during
-/// transcription). Artifacts are durable per 0008; the row sits in
-/// `pending` and will be re-claimed.
-///
-/// `transcript_source` is passed in (instead of calling
-/// `transcriber.name()` inside) because the pipelined worker holds a
-/// `Arc<dyn Transcriber>` and consumes `transcribe_output` here — the
-/// caller captures `transcriber.name()` before the transcribe move per
-/// the same pattern that captures `samples_len`.
-///
-/// Sync (not async): every operation here is a blocking syscall
-/// (`atomic_write`, `mark_succeeded` via rusqlite, `remove_file`). The
-/// caller holds the store mutex around this call and serializes against
-/// other workers — making this `async` would only add a `.await` that
-/// never yields, since there's no I/O wait point.
-///
-/// clippy::too_many_arguments allow: 8 args; a builder/param struct
-/// would add boilerplate disproportionate to the value (every arg is
-/// part of the same logical "write+mark" operation; none are optional;
-/// the call is internal with two callers).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn write_artifacts_and_mark(
-    store: &mut Store,
-    transcribe_output: TranscribeOutput,
+/// Writes txt then json. If a crash happens between the two, recovery
+/// sees a complete txt but missing json metadata — preferable to the
+/// reverse. Returns the computed `duration_s`, which
+/// [`mark_after_artifacts`] needs for the DB row.
+pub(crate) fn write_artifacts_durable(
+    transcribe_output: &TranscribeOutput,
     claim: &Claim,
     samples_len: usize,
-    wav_path: PathBuf,
+    opts: &ProcessOptions,
     fetcher_name: &'static str,
     transcript_source: &'static str,
-    opts: &ProcessOptions,
-) -> Result<ProcessOutcome> {
+) -> Result<Option<f64>> {
     // duration_s derives from the 0014 audio invariant (16 kHz mono):
     // samples_len / 16_000. Caller captured samples_len before the
     // transcribe call moved the Vec.
@@ -497,7 +470,7 @@ pub(crate) fn write_artifacts_and_mark(
         fetcher: fetcher_name.to_string(),
         transcript_source: transcript_source.to_string(),
         model: transcribe_output.model_id.clone(),
-        raw_signals: Some(RawSignals::from_transcribe_output(&transcribe_output)),
+        raw_signals: Some(RawSignals::from_transcribe_output(transcribe_output)),
     };
     // T4 perf-tweaks: compact JSON shrinks the raw_signals payload
     // meaningfully (per-token id+text+p+plog dominates by token count;
@@ -508,13 +481,56 @@ pub(crate) fn write_artifacts_and_mark(
     let json_path = shard_dir.join(format!("{}.json", claim.video_id));
     artifacts::atomic_write(&json_path, &json_bytes)?;
 
+    Ok(duration_s)
+}
+
+/// Phase 4b — DB acknowledgement (0008 second half) + wav cleanup,
+/// extracted from [`write_artifacts_and_mark`] (Epic 4c).
+///
+/// The ONLY part of phase 4 that needs the store: pipelined callers lock
+/// exactly around this call. **Must never be called before
+/// [`write_artifacts_durable`] has returned Ok for the same claim** — that
+/// ordering IS the 0008 invariant.
+///
+/// Returns [`ProcessOutcome::StaleAfterSuccess`] when `mark_succeeded`
+/// updates 0 rows (concurrent sweep cleared the claim during
+/// transcription). Artifacts are durable per 0008; the row sits in
+/// `pending` and will be re-claimed.
+///
+/// `transcript_source` is passed in (instead of calling
+/// `transcriber.name()` inside) because the pipelined worker holds an
+/// `Arc<dyn Transcriber>` — the caller captures `transcriber.name()`
+/// before the transcribe move per the same pattern that captures
+/// `samples_len`.
+///
+/// Sync (not async): every operation here is a blocking syscall
+/// (`mark_succeeded` via rusqlite, `remove_file`). The caller holds the
+/// store mutex around this call and serializes against other workers —
+/// making this `async` would only add a `.await` that never yields, since
+/// there's no I/O wait point.
+///
+/// clippy::too_many_arguments allow: 8 args; a builder/param struct
+/// would add boilerplate disproportionate to the value (every arg is
+/// part of the same logical "mark" operation; none are optional; the
+/// call is internal with two callers).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn mark_after_artifacts(
+    store: &mut Store,
+    claim: &Claim,
+    duration_s: Option<f64>,
+    language: &str,
+    wav_path: PathBuf,
+    fetcher_name: &'static str,
+    transcript_source: &'static str,
+    opts: &ProcessOptions,
+) -> Result<ProcessOutcome> {
     // 0008: artifacts durable, now mark the row succeeded.
     let changed = store.mark_succeeded(
         &claim.video_id,
         &opts.worker_id,
         SuccessArtifacts {
             duration_s,
-            language_detected: Some(transcribe_output.language.clone()),
+            language_detected: Some(language.to_string()),
             fetcher: fetcher_name,
             transcript_source,
         },
@@ -551,6 +567,61 @@ pub(crate) fn write_artifacts_and_mark(
 
     tracing::info!(video_id = claim.video_id.as_str(), "succeeded");
     Ok(ProcessOutcome::Succeeded)
+}
+
+/// Phase 4 helper extracted from [`transcribe_and_write`] (T17, Path A):
+/// write artifacts → mark_succeeded → cleanup wav.
+///
+/// **0008 invariant (load-bearing), revised owner (Epic 4c).** The
+/// invariant is now owned by the PAIR
+/// [`write_artifacts_durable`] → [`mark_after_artifacts`]: both artifacts
+/// (txt then json) must be durable on disk BEFORE
+/// `store.mark_succeeded`. A crash
+/// between artifact writes and `mark_succeeded` leaves the row in
+/// `in_progress`, which the next run's `sweep_stale_claims` reclaims (per
+/// 0024); the artifacts on disk are re-written on the next attempt
+/// (atomic_write is idempotent). A regression in the order would silently
+/// pass tests on the happy path but corrupt invariants in a
+/// crash-mid-write scenario.
+///
+/// This function is the composition of that pair, kept for the serial
+/// path (`transcribe_and_write`). `pipelined::transcribe_worker` calls
+/// the two halves directly so its store lock covers only the DB
+/// acknowledgement — the durable writes (and their fsyncs) run unlocked.
+///
+/// clippy::too_many_arguments allow: 8 args; a builder/param struct
+/// would add boilerplate disproportionate to the value (every arg is
+/// part of the same logical "write+mark" operation; none are optional;
+/// the call is internal).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_artifacts_and_mark(
+    store: &mut Store,
+    transcribe_output: TranscribeOutput,
+    claim: &Claim,
+    samples_len: usize,
+    wav_path: PathBuf,
+    fetcher_name: &'static str,
+    transcript_source: &'static str,
+    opts: &ProcessOptions,
+) -> Result<ProcessOutcome> {
+    let duration_s = write_artifacts_durable(
+        &transcribe_output,
+        claim,
+        samples_len,
+        opts,
+        fetcher_name,
+        transcript_source,
+    )?;
+    mark_after_artifacts(
+        store,
+        claim,
+        duration_s,
+        &transcribe_output.language,
+        wav_path,
+        fetcher_name,
+        transcript_source,
+        opts,
+    )
 }
 
 #[cfg(test)]

@@ -18,8 +18,8 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    classify_fetch_phase, cookie_opts_for, fetch_and_decode, write_artifacts_and_mark,
-    ProcessOptions, ProcessOutcome, ProcessStats,
+    classify_fetch_phase, cookie_opts_for, fetch_and_decode, mark_after_artifacts,
+    write_artifacts_durable, ProcessOptions, ProcessOutcome, ProcessStats,
 };
 use crate::errors::TranscribeError;
 use crate::failure::{classify_transcribe_error, ClassifiedFailure};
@@ -343,7 +343,7 @@ pub async fn fetch_worker(
                     wav_path,
                     // T18 Decision B: stamp the fetcher's identifier onto
                     // the item so the transcribe worker can pass it to
-                    // `write_artifacts_and_mark` (instead of a hardcoded
+                    // the phase-4 helpers (instead of a hardcoded
                     // "ytdlp" literal).
                     fetcher_name: fetcher.name(),
                     // ADR 0038: stamp the policy this item was actually
@@ -455,8 +455,8 @@ pub async fn fetch_worker(
 
 /// Phase 2 transcribe worker. 1 instance per 0027. Drains
 /// [`FetchedItem`]s emitted by N fetch workers and runs phases 3+4 per
-/// item: transcribe (NO store lock) → write artifacts + mark_succeeded
-/// (store lock, sub-50ms critical section) → cleanup wav.
+/// item: transcribe (NO store lock) → write artifacts (NO store lock) →
+/// mark_succeeded (store lock, sub-50ms critical section) → cleanup wav.
 ///
 /// **Loop structure.** A `biased` `tokio::select!` at the loop top
 /// prefers the cancellation arm when both are ready — without `biased`,
@@ -464,16 +464,19 @@ pub async fn fetch_worker(
 /// (`recv() == None`) exits cleanly (fetch workers drained per 0026).
 ///
 /// **0008 invariant (load-bearing).** Artifacts (txt + json) must be
-/// durable on disk BEFORE `mark_succeeded`. The
-/// [`write_artifacts_and_mark`] helper (factored from T15's
-/// `transcribe_and_write` per T17 Path A) is the single source of truth
-/// for that ordering — both serial and pipelined paths delegate to it.
+/// durable on disk BEFORE `mark_succeeded`. The ordering owner is the
+/// pair [`write_artifacts_durable`] → [`mark_after_artifacts`] (Epic 4c
+/// split of T17's `write_artifacts_and_mark`); the serial path calls
+/// their composition, this worker calls the halves directly.
 ///
 /// **Mutex hold-time discipline.** `transcriber.transcribe(samples, …)`
 /// is NOT inside `store.lock().await` — on `large-v3-turbo-q5_0` that
 /// call is ~1s, and holding the store mutex across it would starve fetch
-/// workers' `claim_next`. The store guard is acquired only for the
-/// write + mark phase (sub-50ms total).
+/// workers' `claim_next`. Neither are the artifact writes (Epic 4c): a
+/// shard-dir creation plus two `atomic_write`s means two file fsyncs and
+/// a directory fsync, and every fetch worker's claim/failure dispatch
+/// would queue behind them. The store guard is acquired only for
+/// `mark_after_artifacts`.
 ///
 /// **Cancellation composition (ADR 0025 strict text).** Per ADR 0025:
 /// the per-item transcribe call is wrapped in `tokio::select!` against
@@ -502,7 +505,7 @@ pub async fn fetch_worker(
 ///   input-side accounting, mirroring `run_serial`).
 ///
 /// **Success-side stale-claim routing (T18 Decision A).** When
-/// `write_artifacts_and_mark` returns `Ok(StaleAfterSuccess)`,
+/// `mark_after_artifacts` returns `Ok(StaleAfterSuccess)`,
 /// `mark_succeeded` updated 0 rows: artifacts are durable per 0008,
 /// but the predicate `status='in_progress' AND claimed_by=?` missed
 /// (a concurrent sweep cleared the claim mid-transcription). The
@@ -591,24 +594,35 @@ pub async fn transcribe_worker(
                     "transcribed"
                 );
 
-                // Phase 4: write artifacts + mark_succeeded under the
-                // store mutex. The 0008 invariant lives inside
-                // `write_artifacts_and_mark` — both serial and pipelined
-                // call the same helper so a future change to the
-                // ordering would land in one place.
-                let mut guard = store.lock().await;
-                let outcome = write_artifacts_and_mark(
-                    &mut guard,
-                    transcribe_output,
+                // Phase 4a (0008 first half): durable artifact writes with
+                // NO store lock — the fsyncs must not serialize other
+                // workers' claim/failure dispatch behind this mutex.
+                let duration_s = write_artifacts_durable(
+                    &transcribe_output,
                     &claim,
                     samples_len,
-                    wav_path,
+                    &opts,
                     fetcher_name,
                     transcriber.name(),
-                    &opts,
                 )
-                .with_context(|| format!("write_artifacts_and_mark for {}", claim.video_id))?;
-                drop(guard);
+                .with_context(|| format!("write_artifacts_durable for {}", claim.video_id))?;
+
+                // Phase 4b (0008 second half): lock exactly around the DB
+                // acknowledgement.
+                let outcome = {
+                    let mut guard = store.lock().await;
+                    mark_after_artifacts(
+                        &mut guard,
+                        &claim,
+                        duration_s,
+                        &transcribe_output.language,
+                        wav_path,
+                        fetcher_name,
+                        transcriber.name(),
+                        &opts,
+                    )
+                    .with_context(|| format!("mark_after_artifacts for {}", claim.video_id))?
+                };
 
                 // T18 Decision A: route `StaleAfterSuccess` into a counter
                 // symmetric to `stats_stale_after_failure`. Artifacts are
@@ -850,9 +864,10 @@ pub async fn run_pipelined(
                 }
                 // 0025 step 1: cancel the token. Workers observe at next
                 // loop-top poll (fetch) or at the biased select arm
-                // (transcribe). The 0008 invariant lives inside
-                // `write_artifacts_and_mark`; even a cancellation
-                // mid-write leaves artifacts durable.
+                // (transcribe). The 0008 invariant lives in the
+                // `write_artifacts_durable` → `mark_after_artifacts`
+                // pair; even a cancellation mid-write leaves artifacts
+                // durable.
                 token.cancel();
             }
             Err(join_err) if join_err.is_panic() => {
