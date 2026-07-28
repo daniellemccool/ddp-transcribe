@@ -1,5 +1,7 @@
 # Task 02: Fetcher metadata capture — argv, envelope builder, trait widening
 
+> **ARCHIVE NOTE (descoped 2026-07-28):** caption/subtitle collection described below was removed by operator decision at commit afa0253 — the envelope is `{"schema":1,"printed":…}` only. The creator's caption TEXT (`description`, = Research API `video_description`) remains captured via the print template. See task-02-report.md § Descope.
+
 **Files:**
 - Modify: `src/fetcher/mod.rs` (`MetadataCapture` type; `VideoFetcher::acquire` return widened; `FakeFetcher` gains `canned_metadata`)
 - Modify: `src/fetcher/ytdlp.rs` (argv additions; stdout capture 64 KB; envelope builder + sidecar embed/cleanup; lift `CommandOutcome.stdout` usage)

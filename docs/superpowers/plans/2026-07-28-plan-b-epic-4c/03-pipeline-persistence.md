@@ -1,5 +1,7 @@
 # Task 03: Persist the envelope through both pipeline paths (before outcome dispatch)
 
+> **ARCHIVE NOTE (descoped 2026-07-28):** caption/subtitle collection described below was removed by operator decision at commit afa0253 — the envelope is `{"schema":1,"printed":…}` only. The creator's caption TEXT (`description`, = Research API `video_description`) remains captured via the print template. See task-02-report.md § Descope.
+
 **Files:**
 - Modify: `src/pipeline/pipelined.rs` (fetch_worker: insert raw row after the fetch select, before the outcome match)
 - Modify: `src/pipeline/serial.rs` (`process_one`: same, with direct `&mut Store`)
