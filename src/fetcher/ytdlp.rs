@@ -21,45 +21,6 @@ impl YtDlpFetcher {
             timeout,
         }
     }
-
-    /// Conditional secondary invocation (Epic 4c): fetch caption content
-    /// for a video whose printed line listed caption tracks.
-    ///
-    /// Wholly best-effort. ANY failure — `RunError` or nonzero exit — logs
-    /// a warning and yields no captions; the caller's fetch outcome is
-    /// untouched by anything that happens here. That is why caption content
-    /// no longer rides the outcome-defining primary argv.
-    ///
-    /// The stderr excerpt is deliberately NOT logged: yt-dlp echoes the
-    /// cookie path in several of its own error messages, and this log line
-    /// has no scrub step (ADR 0035). `stdout_capture_bytes: 0` for the same
-    /// reason there's nothing to read — this run prints nothing we want.
-    async fn fetch_caption_sidecars(
-        &self,
-        video_id: &str,
-        source_url: &str,
-        video_dir: &Path,
-        cookies: Option<&Path>,
-    ) -> Vec<PathBuf> {
-        let (args, redact) = build_caption_fetch_args(video_id, source_url, video_dir, cookies);
-        let succeeded = matches!(
-            run(CommandSpec {
-                program: "yt-dlp",
-                args,
-                timeout: self.timeout,
-                stderr_capture_bytes: 8 * 1024,
-                stdout_capture_bytes: 0,
-                redact_arg_indices: &redact,
-            })
-            .await,
-            Ok(outcome) if outcome.exit_code == 0
-        );
-        if !succeeded {
-            tracing::warn!(video_id, "caption fetch failed; captions omitted");
-            return Vec::new();
-        }
-        collect_caption_sidecars(video_dir, video_id)
-    }
 }
 
 /// Field-limited dict print (Epic 4c). One line of JSON (~0.6 KB measured
@@ -68,18 +29,14 @@ impl YtDlpFetcher {
 /// set is wider than the typed schema-v5 columns; extras live only in the
 /// raw envelope, available to future re-parses without re-fetch.
 ///
-/// `--print` itself costs zero extra network requests: the info dict is
-/// already extracted for the download. The `subtitles`/`automatic_captions`
-/// members of this template are only a *listing* of available tracks —
-/// fetching caption **content** costs one extra, conditional invocation
-/// (see [`build_caption_fetch_args`]), which never rides the argv below.
+/// `--print` costs zero extra network requests, unconditionally: the info
+/// dict is already extracted for the download, and metadata capture adds
+/// no second yt-dlp invocation of any kind.
 ///
-/// The listing is not free-standing: yt-dlp populates `subtitles` only when
-/// the `writesubtitles` param is set (`extract_subtitles`,
-/// `yt_dlp/extractor/common.py:3870`), so the primary argv must carry
-/// `--write-subs --write-auto-subs --sub-langs "-all"` for this template
-/// member to be anything but empty. See `build_yt_dlp_args`.
-pub(crate) const METADATA_PRINT_TEMPLATE: &str = "%(.{id,title,description,uploader,uploader_id,channel_id,timestamp,duration,view_count,like_count,comment_count,repost_count,subtitles,automatic_captions})j";
+/// Captions/subtitles are deliberately absent (operator descope
+/// 2026-07-28): nothing here requests them, so `subtitles` and
+/// `automatic_captions` would be permanently empty were they listed.
+pub(crate) const METADATA_PRINT_TEMPLATE: &str = "%(.{id,title,description,uploader,uploader_id,channel_id,timestamp,duration,view_count,like_count,comment_count,repost_count})j";
 
 /// Build the yt-dlp argv and the expected output WAV path for a single video.
 ///
@@ -156,30 +113,6 @@ fn build_yt_dlp_args(
         "--no-simulate".into(),
         "--print".into(),
         METADATA_PRINT_TEMPLATE.into(),
-        // Caption LISTING only — no track is downloaded here.
-        //
-        // yt-dlp populates the info dict's `subtitles` field only when the
-        // `writesubtitles` param is set (`extract_subtitles`,
-        // `yt_dlp/extractor/common.py:3870`), so without these flags the
-        // printed template's `subtitles` member is always empty and the
-        // secondary invocation's gate could never open. The zero-language
-        // selection `-all` is what keeps this safe: `_write_subtitles`
-        // early-returns on an empty selection (`elif not subtitles: return
-        // ret`, `yt_dlp/YoutubeDL.py:4458`) before any download is
-        // attempted. Live-verified 2026-07-28 on a captioned corpus video —
-        // printed `subtitles` populated, ZERO sidecar files written, exit 0.
-        //
-        // Track DOWNLOADS must never ride this invocation: a subtitle
-        // download failure raises `DownloadError` unless `ignoreerrors` is
-        // set (`yt_dlp/YoutubeDL.py:~4498`), which would flip a good fetch
-        // to nonzero exit and manufacture a spurious video failure. Content
-        // capture therefore stays on the guarded, best-effort secondary
-        // invocation (`build_caption_fetch_args`) — the epic's
-        // never-a-new-failure-mode invariant holds by construction.
-        "--write-subs".into(),
-        "--write-auto-subs".into(),
-        "--sub-langs".into(),
-        "-all".into(),
         "-f".into(),
         selector.into(),
         // T7 perf-tweaks: `-S` only affects format ordering within a
@@ -223,88 +156,6 @@ fn build_yt_dlp_args(
     (args, wav_path, redact)
 }
 
-/// Build the argv for the conditional secondary caption-only invocation
-/// (Epic 4c). Pure function; unit-testable.
-///
-/// `--skip-download` means no media transfer: this run only fetches the
-/// caption tracks the primary run's printed line said exist, writing
-/// sidecars into `video_dir` under the SAME `-o` template the primary uses
-/// (so `collect_caption_sidecars` finds them by the same naming rule).
-///
-/// This invocation's outcome is discarded — any failure is best-effort and
-/// leaves the video's fetch outcome untouched. That is the whole point of
-/// splitting it out of the primary argv.
-///
-/// Cookies mirror the primary exactly (ADR 0035): when `Some`, append
-/// `--cookies <path>` immediately before the trailing `source_url`
-/// positional, and report the path arg's index so the caller can pass
-/// `CommandSpec::redact_arg_indices`.
-fn build_caption_fetch_args(
-    video_id: &str,
-    source_url: &str,
-    video_dir: &Path,
-    cookies: Option<&Path>,
-) -> (Vec<String>, Vec<usize>) {
-    let output_template = format!("{}/{}.%(ext)s", video_dir.display(), video_id);
-    let mut args = vec![
-        "--no-playlist".into(),
-        "--no-warnings".into(),
-        "--quiet".into(),
-        "--skip-download".into(),
-        "--write-subs".into(),
-        "--write-auto-subs".into(),
-        // Without an explicit language selection yt-dlp downloads a single
-        // preferred language (English-biased), so a multi-track video would
-        // silently lose every other track despite the envelope's captions
-        // map being keyed per file. Take them all — the envelope embeds one
-        // entry per sidecar, and the per-track cap bounds the cost.
-        "--sub-langs".into(),
-        "all".into(),
-        "-o".into(),
-        output_template,
-    ];
-
-    let mut redact = Vec::new();
-    if let Some(cookie_path) = cookies {
-        args.push("--cookies".into());
-        args.push(cookie_path.display().to_string());
-        redact.push(args.len() - 1);
-    }
-
-    args.push(source_url.to_string());
-    (args, redact)
-}
-
-/// Shallow peek at the printed line: does it list any caption track?
-///
-/// This is the ONE place the fetcher inspects the printed JSON — a two-key
-/// existence check to decide whether the conditional secondary caption
-/// invocation is warranted. The envelope still stores the line UNPARSED;
-/// typed parsing remains `load-metadata`'s job.
-///
-/// Corrected coverage (n=11 re-probe, 2026-07-28): 4/11 corpus videos list
-/// caption tracks, ~36%. The earlier "≈0%" figure was an artifact of
-/// probing without the listing flags — yt-dlp leaves `subtitles` empty
-/// unless `writesubtitles` is set, so the gate looked structurally shut.
-/// The secondary therefore really runs, for roughly a third of fetches,
-/// once per video that reaches a clean primary; its efficiency matters.
-///
-/// True iff `subtitles` or `automatic_captions` is a non-empty JSON object.
-/// Anything else — absent key, `null`, `{}`, a non-object, or input that
-/// isn't JSON at all — is false, so the secondary invocation is skipped and
-/// the fetch behaves exactly as it did before caption capture existed.
-fn printed_lists_caption_tracks(printed: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(printed) else {
-        return false;
-    };
-    ["subtitles", "automatic_captions"].iter().any(|key| {
-        value
-            .get(*key)
-            .and_then(serde_json::Value::as_object)
-            .is_some_and(|tracks| !tracks.is_empty())
-    })
-}
-
 /// Redact the cookie file path from a stderr excerpt so it never lands in
 /// error messages or the state DB (ADR 0035). Pure function, factored out
 /// of `acquire` for unit-testability.
@@ -315,100 +166,15 @@ fn scrub_cookie_path(excerpt: String, cookies: Option<&Path>) -> String {
     }
 }
 
-/// Subtitle-sidecar extensions yt-dlp can write for TikTok tracks.
-///
-/// Bare `json` matters specifically for TikTok: the extractor's `EXT_MAP`
-/// maps `creator_caption` tracks to extension `json`, so creator-authored
-/// captions — the very tracks this feature exists to capture — land as
-/// `{id}.{lang}.json` and would otherwise be neither embedded nor cleaned
-/// up. Broadening the match is safe here because nothing else writes
-/// `{id}*.json` into the per-video dir: the primary invocation extracts
-/// only the WAV and we never pass `--write-info-json`.
-const CAPTION_EXTS: &[&str] = &[
-    "vtt", "srt", "ass", "lrc", "json", "json3", "srv1", "srv2", "srv3", "ttml",
-];
-
-/// Names of files still sitting in `video_dir` under the `{video_id}.`
-/// prefix that are neither the WAV we want nor anything the caption pass
-/// collected — run after the secondary invocation's collect-and-delete.
-///
-/// Purely observational: this reports, it never deletes. A caption track
-/// arriving with an extension outside [`CAPTION_EXTS`] (a yt-dlp naming
-/// change, a new TikTok track type) would otherwise accumulate silently;
-/// surfacing it in the logs catches that without a pattern mistake ever
-/// being able to remove a media file. Sorted for deterministic log output.
-fn uncollected_sidecar_residue(video_dir: &Path, video_id: &str) -> Vec<String> {
-    let prefix = format!("{video_id}.");
-    let wav = format!("{video_id}.wav");
-    let mut residue: Vec<String> = std::fs::read_dir(video_dir)
-        .into_iter()
-        .flatten()
-        .filter_map(std::result::Result::ok)
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|name| name.starts_with(&prefix) && *name != wav)
-        .collect();
-    residue.sort();
-    residue
-}
-
-/// Max bytes embedded per caption track; larger tracks are skipped (a
-/// truncated subtitle file is corrupt, not useful) with a warn log.
-const CAPTION_TRACK_CAP: usize = 256 * 1024;
-
-/// Find caption sidecars for `video_id` in `video_dir`: files named
-/// `{video_id}.<lang>.<caption ext>` (yt-dlp's naming under our `-o`
-/// template). Pure directory scan; returns sorted paths for determinism.
-fn collect_caption_sidecars(video_dir: &Path, video_id: &str) -> Vec<PathBuf> {
-    let prefix = format!("{video_id}.");
-    let mut found: Vec<PathBuf> = std::fs::read_dir(video_dir)
-        .into_iter()
-        .flatten()
-        .filter_map(std::result::Result::ok)
-        .map(|e| e.path())
-        .filter(|p| {
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let ext = p.extension().and_then(|x| x.to_str()).unwrap_or("");
-            name.starts_with(&prefix) && CAPTION_EXTS.contains(&ext)
-        })
-        .collect();
-    found.sort();
-    found
-}
-
-/// Delete every caption sidecar `collect_caption_sidecars` finds for
-/// `video_id` in `video_dir`.
-///
-/// The per-video dir (`ytdlp-{video_id}`) survives failed attempts, so a
-/// sidecar written by a killed or aborted earlier attempt would otherwise
-/// be collected and embedded by a later attempt as if it were freshly
-/// fetched. `acquire` calls this on EVERY attempt, right after
-/// `create_dir_all` and before the primary run, so what the envelope
-/// embeds can only be what this attempt fetched.
-///
-/// Best-effort: a failed unlink warns and is otherwise ignored — cleanup
-/// must never manufacture a fetch failure.
-fn clear_caption_sidecars(video_dir: &Path, video_id: &str) {
-    for stale in collect_caption_sidecars(video_dir, video_id) {
-        if let Err(e) = std::fs::remove_file(&stale) {
-            tracing::warn!(
-                file = %stale.display(),
-                error = %e,
-                "stale caption sidecar removal failed"
-            );
-        }
-    }
-}
-
 /// Build the versioned raw envelope (Epic 4c). Returns `None` when there is
 /// nothing trustworthy to store: no capture, empty stdout, or stdout at the
 /// capture bound (the bounded reader keeps the LAST `cap` bytes, so a full
 /// buffer means the head was dropped ⇒ unparseable). The printed line is
 /// embedded UNPARSED — parsing is `load-metadata`'s job, replayably.
-fn build_metadata_envelope(
-    stdout: Option<&[u8]>,
-    capture_cap: usize,
-    caption_files: &[PathBuf],
-) -> Option<String> {
+///
+/// Shape: `{"schema":1,"printed":"<unparsed line>"}`. `schema` is the
+/// loader's compatibility gate.
+fn build_metadata_envelope(stdout: Option<&[u8]>, capture_cap: usize) -> Option<String> {
     let bytes = stdout?;
     if bytes.is_empty() || bytes.len() >= capture_cap {
         return None;
@@ -419,52 +185,14 @@ fn build_metadata_envelope(
         return None;
     }
 
-    let mut captions = std::collections::BTreeMap::new();
-    for path in caption_files {
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        match std::fs::metadata(path).map(|m| m.len()) {
-            Ok(len) if usize::try_from(len).unwrap_or(usize::MAX) <= CAPTION_TRACK_CAP => {
-                match std::fs::read_to_string(path) {
-                    Ok(content) => {
-                        captions.insert(name.to_string(), content);
-                    }
-                    Err(e) => {
-                        tracing::warn!(file = name, error = %e, "caption sidecar unreadable; skipping");
-                    }
-                }
-            }
-            Ok(len) => {
-                tracing::warn!(
-                    file = name,
-                    bytes = len,
-                    "caption sidecar over cap; skipping"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(file = name, error = %e, "caption sidecar stat failed; skipping");
-            }
-        }
-    }
-
     #[derive(serde::Serialize)]
     struct MetadataEnvelope<'a> {
         schema: u32,
         printed: &'a str,
-        captions: Option<std::collections::BTreeMap<String, String>>,
     }
-    let env = MetadataEnvelope {
-        schema: 1,
-        printed,
-        captions: if captions.is_empty() {
-            None
-        } else {
-            Some(captions)
-        },
-    };
-    // Serialization of strings/maps cannot fail in practice; treat an error
-    // as "no envelope" per the never-a-new-failure-mode invariant.
+    let env = MetadataEnvelope { schema: 1, printed };
+    // Serialization of strings cannot fail in practice; treat an error as
+    // "no envelope" per the never-a-new-failure-mode invariant.
     serde_json::to_string(&env).ok()
 }
 
@@ -487,12 +215,6 @@ impl VideoFetcher for YtDlpFetcher {
                 }),
             );
         }
-
-        // Epic 4c: the per-video dir survives failed attempts, so wipe any
-        // caption sidecar an earlier attempt left behind BEFORE this
-        // attempt runs — otherwise a later attempt would embed a stale
-        // track as if it had just fetched it.
-        clear_caption_sidecars(&video_dir, video_id);
 
         let (args, wav_path, redact) = build_yt_dlp_args(
             video_id,
@@ -519,65 +241,16 @@ impl VideoFetcher for YtDlpFetcher {
 
         // Epic 4c: build the envelope BEFORE interpreting exit status — the
         // printed line lands pre-transfer, so mid-download deaths still
-        // yield metadata.
-        //
-        // Shallow-peek the printed line first: only when it lists caption
-        // tracks (~36% of the corpus, n=11 re-probe 2026-07-28) is the
-        // secondary caption invocation worth its network cost. Everything
-        // from here to the envelope is best-effort; the primary `outcome`
-        // above already decided this video's fate and nothing below can
-        // change it.
-        //
-        // The secondary is additionally gated on a clean primary exit, so a
-        // persistently failing video doesn't pay a page re-extraction on
-        // every retry. Keying on exit code (not `wav_path.exists()`) is
-        // deliberate: a metadata-only success still deserves its captions.
-        // Whichever attempt eventually exits 0 captures them, and the
-        // envelope's last-write-wins upsert keeps that row.
-        let printed = match outcome.stdout.as_deref() {
-            Some(bytes) => String::from_utf8_lossy(bytes)
-                .trim_end_matches(['\n', '\r'])
-                .to_string(),
-            None => String::new(),
-        };
-        let caption_fetch_warranted =
-            outcome.exit_code == 0 && printed_lists_caption_tracks(&printed);
-        let sidecars = if caption_fetch_warranted {
-            self.fetch_caption_sidecars(
-                video_id,
-                source_url,
-                &video_dir,
-                opts.cookies_file.as_deref(),
-            )
-            .await
-        } else {
-            Vec::new()
-        };
-
-        // Sidecars are read + embedded, then deleted so the per-video dir
-        // stays clean.
-        let capture = build_metadata_envelope(outcome.stdout.as_deref(), STDOUT_CAP, &sidecars)
+        // yield metadata. Everything here is best-effort; the primary
+        // `outcome` above already decided this video's fate and nothing
+        // below can change it.
+        let capture = build_metadata_envelope(outcome.stdout.as_deref(), STDOUT_CAP)
             .map(|envelope_json| MetadataCapture { envelope_json });
         if capture.is_none() {
             // Spec policy: empty/truncated/absent print output ⇒ no raw row,
             // fetch proceeds normally, event logged (the loader independently
             // skip-counts unparseable blobs on its side).
             tracing::warn!(video_id, "no metadata envelope captured for this fetch");
-        }
-        for f in &sidecars {
-            if let Err(e) = std::fs::remove_file(f) {
-                tracing::warn!(file = %f.display(), error = %e, "caption sidecar cleanup failed");
-            }
-        }
-        if caption_fetch_warranted {
-            let residue = uncollected_sidecar_residue(&video_dir, video_id);
-            if !residue.is_empty() {
-                tracing::warn!(
-                    video_id,
-                    files = residue.join(", "),
-                    "uncollected caption/sidecar residue"
-                );
-            }
         }
 
         if outcome.exit_code != 0 {
@@ -655,21 +328,15 @@ mod tests {
     /// extracted for the download. `--no-simulate` is required or `--print`
     /// would imply simulate mode and skip the download.
     ///
-    /// The primary carries the caption flags at ZERO-language selection
-    /// (`--sub-langs "-all"`) — a listing, never a download. Without the
-    /// flags yt-dlp leaves the printed `subtitles` field empty
-    /// (`extract_subtitles` is gated on `writesubtitles`), which would nail
-    /// the secondary invocation's gate permanently shut. With `-all`,
-    /// `_write_subtitles` early-returns before any track download can fail.
-    ///
-    /// The asymmetry against `build_caption_fetch_args` (which passes
-    /// `--sub-langs all`, download-everything) IS the design: a subtitle
-    /// download failure raises `DownloadError`, so downloads must only ever
-    /// ride the guarded, best-effort secondary invocation. The epic's
-    /// primary invariant — metadata capture never creates a new failure
-    /// mode — is enforced by construction.
+    /// Operator descope 2026-07-28: captions/subtitles are NOT collected.
+    /// No subtitle flag may appear on this argv — a subtitle download
+    /// failure raises `DownloadError` (fatal in the pinned yt-dlp), and
+    /// even listing-only capture (`--sub-langs "-all"`) spends the
+    /// primary's timeout budget on TikTok's `_get_subtitles`. Metadata
+    /// capture therefore adds exactly two flags and nothing else, so the
+    /// epic's never-a-new-failure-mode invariant holds by construction.
     #[test]
-    fn build_args_lists_captions_without_downloading() {
+    fn build_args_includes_metadata_print_only() {
         let video_dir = PathBuf::from("/tmp/test-dir");
         let (args, _, _) = build_yt_dlp_args(
             "abc123",
@@ -688,35 +355,18 @@ mod tests {
         );
         assert!(args.iter().any(|a| a == "--no-simulate"));
 
-        // Listing flags present — without them the printed `subtitles`
-        // field is always empty and the secondary can never be triggered.
-        assert!(args.iter().any(|a| a == "--write-subs"));
-        assert!(args.iter().any(|a| a == "--write-auto-subs"));
-        let langs_idx = args
-            .iter()
-            .position(|a| a == "--sub-langs")
-            .expect("--sub-langs must be present on the primary");
-        assert_eq!(
-            args.get(langs_idx + 1).map(String::as_str),
-            Some("-all"),
-            "zero-language selection: `_write_subtitles` early-returns before \
-             any track download, so a sub failure can never flip this \
-             invocation's exit code"
-        );
-
-        // The secondary is the ONLY place a track is actually downloaded —
-        // download-everything there, download-nothing here.
-        let (caption_args, _) =
-            build_caption_fetch_args("abc123", "https://example.com/v", &video_dir, None);
-        let caption_langs_idx = caption_args
-            .iter()
-            .position(|a| a == "--sub-langs")
-            .expect("--sub-langs must be present on the secondary");
-        assert_eq!(
-            caption_args.get(caption_langs_idx + 1).map(String::as_str),
-            Some("all"),
-            "the -all/all asymmetry is the design: downloads are fatal on \
-             failure, so they ride only the guarded secondary invocation"
+        // Descoped: no subtitle surface at all.
+        for flag in ["--write-subs", "--write-auto-subs", "--sub-langs"] {
+            assert!(
+                !args.iter().any(|a| a == flag),
+                "{flag} must not appear: captions are descoped (2026-07-28)"
+            );
+        }
+        assert!(
+            !METADATA_PRINT_TEMPLATE.contains("subtitles")
+                && !METADATA_PRINT_TEMPLATE.contains("automatic_captions"),
+            "the print template must not request caption listings — nothing \
+             sets `writesubtitles`, so they could only ever be empty"
         );
 
         // Trailing positional is still the URL; cookie redaction unaffected.
@@ -864,247 +514,32 @@ mod tests {
         assert_eq!(scrubbed, excerpt);
     }
 
+    /// Envelope contract after the 2026-07-28 descope:
+    /// `{"schema":1,"printed":"<unparsed line>"}` — two keys, no more.
     #[test]
     fn build_envelope_wraps_printed_line_unparsed() {
         let stdout = b"{\"id\": \"123\", \"title\": \"t\"}\n".to_vec();
-        let env = build_metadata_envelope(Some(&stdout), 64 * 1024, &[]).expect("envelope");
+        let env = build_metadata_envelope(Some(&stdout), 64 * 1024).expect("envelope");
         let v: serde_json::Value = serde_json::from_str(&env).unwrap();
         assert_eq!(v["schema"], 1);
         assert_eq!(v["printed"], "{\"id\": \"123\", \"title\": \"t\"}");
-        assert!(v["captions"].is_null());
+        let obj = v.as_object().expect("envelope is a JSON object");
+        assert!(
+            !obj.contains_key("captions"),
+            "captions are descoped: the key must be absent, not null"
+        );
+        assert_eq!(obj.len(), 2, "envelope carries exactly schema + printed");
     }
 
     #[test]
     fn build_envelope_none_on_empty_or_truncated_stdout() {
         // Empty stdout → no envelope.
-        assert!(build_metadata_envelope(Some(&[]), 64, &[]).is_none());
+        assert!(build_metadata_envelope(Some(&[]), 64).is_none());
         // At-the-bound stdout means the bounded reader may have dropped
         // leading bytes (truncated ⇒ unparseable) → no envelope.
         let at_cap = vec![b'x'; 64];
-        assert!(build_metadata_envelope(Some(&at_cap), 64, &[]).is_none());
+        assert!(build_metadata_envelope(Some(&at_cap), 64).is_none());
         // No capture at all → no envelope.
-        assert!(build_metadata_envelope(None, 64, &[]).is_none());
-    }
-
-    #[test]
-    fn build_envelope_embeds_caption_sidecars() {
-        let dir = tempfile::tempdir().unwrap();
-        let vtt = dir.path().join("abc123.en.vtt");
-        std::fs::write(&vtt, "WEBVTT\n\n00:01.000 --> 00:02.000\nParis\n").unwrap();
-        let stdout = b"{\"id\": \"abc123\"}".to_vec();
-        let env = build_metadata_envelope(Some(&stdout), 64 * 1024, std::slice::from_ref(&vtt))
-            .expect("envelope");
-        let v: serde_json::Value = serde_json::from_str(&env).unwrap();
-        assert!(v["captions"]["abc123.en.vtt"]
-            .as_str()
-            .unwrap()
-            .contains("Paris"));
-    }
-
-    #[test]
-    fn collect_caption_sidecars_filters_by_extension_and_prefix() {
-        let dir = tempfile::tempdir().unwrap();
-        let keep = dir.path().join("abc123.en.vtt");
-        // TikTok's `creator_caption` tracks land as bare `.json` (the
-        // extractor's EXT_MAP) — the creator-authored captions this feature
-        // exists for, so they must be collected, not just `json3`.
-        let keep_creator_json = dir.path().join("abc123.en.json");
-        let wrong_prefix = dir.path().join("other.en.vtt");
-        let wrong_ext = dir.path().join("abc123.wav");
-        for p in [&keep, &keep_creator_json, &wrong_prefix, &wrong_ext] {
-            std::fs::write(p, "x").unwrap();
-        }
-        let found = collect_caption_sidecars(dir.path(), "abc123");
-        // Sorted for determinism: ".en.json" < ".en.vtt".
-        assert_eq!(found, vec![keep_creator_json, keep]);
-    }
-
-    /// The secondary invocation downloads no media and writes sidecars
-    /// under the same `-o` template the primary uses.
-    #[test]
-    fn build_caption_fetch_args_skips_download_and_writes_subs() {
-        let video_dir = PathBuf::from("/tmp/test-dir");
-        let (args, redact) =
-            build_caption_fetch_args("abc123", "https://example.com/v", &video_dir, None);
-        assert!(args.iter().any(|a| a == "--skip-download"));
-        assert!(args.iter().any(|a| a == "--write-subs"));
-        assert!(args.iter().any(|a| a == "--write-auto-subs"));
-        // Without an explicit selection yt-dlp takes one preferred language
-        // (English-biased) and a multi-track video loses the rest.
-        let langs_idx = args
-            .iter()
-            .position(|a| a == "--sub-langs")
-            .expect("--sub-langs must be present or only one language is fetched");
-        assert_eq!(args.get(langs_idx + 1).map(String::as_str), Some("all"));
-        let o_idx = args
-            .iter()
-            .position(|a| a == "-o")
-            .expect("-o flag must be present");
-        assert_eq!(
-            args.get(o_idx + 1).map(String::as_str),
-            Some("/tmp/test-dir/abc123.%(ext)s"),
-            "sidecars must land where collect_caption_sidecars looks"
-        );
-        assert!(
-            !args.iter().any(|a| a == "-x" || a == "-f"),
-            "caption run must not select or extract media"
-        );
-        assert_eq!(
-            args.last().map(String::as_str),
-            Some("https://example.com/v")
-        );
-        assert!(redact.is_empty());
-    }
-
-    /// ADR 0035: the secondary invocation mirrors the primary's cookie
-    /// handling exactly — same path, same dynamically computed redact index.
-    #[test]
-    fn build_caption_fetch_args_mirrors_primary_cookie_redaction() {
-        let video_dir = PathBuf::from("/tmp/test-dir");
-        let cookie = PathBuf::from("/secret/tiktok-cookies.txt");
-        let (args, redact) =
-            build_caption_fetch_args("abc123", "https://example.com/v", &video_dir, Some(&cookie));
-        let ci = args
-            .iter()
-            .position(|a| a == "--cookies")
-            .expect("--cookies present");
-        assert_eq!(
-            args.get(ci + 1).map(String::as_str),
-            Some("/secret/tiktok-cookies.txt")
-        );
-        assert_eq!(
-            redact,
-            vec![ci + 1],
-            "cookie path arg index must be redacted in logs"
-        );
-        assert_eq!(
-            args.last().map(String::as_str),
-            Some("https://example.com/v"),
-            "cookies must be inserted before the trailing source_url positional"
-        );
-    }
-
-    /// The shallow peek gates the secondary invocation. Anything short of a
-    /// non-empty track object means "no captions exist" ⇒ no extra request.
-    #[test]
-    fn printed_lists_caption_tracks_false_when_no_tracks() {
-        // Keys absent entirely.
-        assert!(!printed_lists_caption_tracks(r#"{"id":"abc","title":"t"}"#));
-        // Explicit nulls — yt-dlp's shape when the extractor found nothing.
-        assert!(!printed_lists_caption_tracks(
-            r#"{"subtitles":null,"automatic_captions":null}"#
-        ));
-        // Present but empty objects.
-        assert!(!printed_lists_caption_tracks(
-            r#"{"subtitles":{},"automatic_captions":{}}"#
-        ));
-    }
-
-    #[test]
-    fn printed_lists_caption_tracks_true_under_either_key() {
-        assert!(printed_lists_caption_tracks(
-            r#"{"subtitles":{"en":[{"ext":"vtt"}]},"automatic_captions":{}}"#
-        ));
-        assert!(printed_lists_caption_tracks(
-            r#"{"subtitles":null,"automatic_captions":{"en":[{"ext":"vtt"}]}}"#
-        ));
-    }
-
-    /// Non-JSON input (a yt-dlp error line, a truncated print, garbage) must
-    /// not panic and must not provoke a secondary request.
-    #[test]
-    fn printed_lists_caption_tracks_false_on_non_json() {
-        assert!(!printed_lists_caption_tracks(
-            "ERROR: unable to extract info"
-        ));
-        assert!(!printed_lists_caption_tracks(""));
-        assert!(!printed_lists_caption_tracks(r#"{"subtitles":"#));
-    }
-
-    /// Stale-sidecar guard: the per-video dir survives failed attempts, so
-    /// a caption file an aborted earlier attempt wrote must be gone before
-    /// the next attempt can embed it as if fresh. Non-caption artifacts in
-    /// the same dir are untouched.
-    #[test]
-    fn clear_caption_sidecars_removes_stale_and_spares_other_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let stale = dir.path().join("abc123.en.vtt");
-        let wav = dir.path().join("abc123.wav");
-        std::fs::write(&stale, "WEBVTT\n\nstale\n").unwrap();
-        std::fs::write(&wav, "RIFF").unwrap();
-
-        clear_caption_sidecars(dir.path(), "abc123");
-
-        assert!(!stale.exists(), "stale caption sidecar must be removed");
-        assert!(wav.exists(), "non-caption artifacts must be untouched");
-    }
-
-    /// Residue hygiene: after the caption pass collects and deletes what it
-    /// recognises, anything left under the `{video_id}.` prefix is reported
-    /// (never deleted) so an unknown-extension track surfaces in the logs
-    /// instead of accumulating. The WAV we actually want is not residue.
-    #[test]
-    fn uncollected_sidecar_residue_reports_leftovers_but_not_the_wav() {
-        let dir = tempfile::tempdir().unwrap();
-        for name in [
-            "abc123.wav",
-            "abc123.en.unknownsub",
-            "abc123.part",
-            "other.en.vtt",
-        ] {
-            std::fs::write(dir.path().join(name), "x").unwrap();
-        }
-        let residue = uncollected_sidecar_residue(dir.path(), "abc123");
-        assert_eq!(
-            residue,
-            vec![
-                "abc123.en.unknownsub".to_string(),
-                "abc123.part".to_string()
-            ],
-            "the WAV and other videos' files are not residue; output is sorted"
-        );
-    }
-
-    #[test]
-    fn uncollected_sidecar_residue_empty_on_a_clean_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("abc123.wav"), "RIFF").unwrap();
-        assert!(uncollected_sidecar_residue(dir.path(), "abc123").is_empty());
-    }
-
-    /// The per-track cap is per-TRACK, not per-set: an oversize file is
-    /// skipped while a small sibling is still embedded. A truncated subtitle
-    /// file is corrupt rather than useful, so skipping is the right call.
-    #[test]
-    fn build_envelope_skips_oversize_caption_track_per_track() {
-        let dir = tempfile::tempdir().unwrap();
-        let stdout = b"{\"id\": \"abc123\"}".to_vec();
-
-        let huge = dir.path().join("abc123.en.vtt");
-        std::fs::write(&huge, "x".repeat(CAPTION_TRACK_CAP + 1)).unwrap();
-
-        // Oversize track alone ⇒ nothing embedded at all.
-        let env = build_metadata_envelope(Some(&stdout), 64 * 1024, std::slice::from_ref(&huge))
-            .expect("envelope");
-        let v: serde_json::Value = serde_json::from_str(&env).unwrap();
-        assert!(
-            v["captions"].is_null(),
-            "an over-cap track is skipped, leaving no captions map"
-        );
-
-        // A small sibling alongside it is still embedded.
-        let small = dir.path().join("abc123.nl.vtt");
-        std::fs::write(&small, "WEBVTT\n\n00:01.000 --> 00:02.000\nParis\n").unwrap();
-        let env =
-            build_metadata_envelope(Some(&stdout), 64 * 1024, &[huge, small]).expect("envelope");
-        let v: serde_json::Value = serde_json::from_str(&env).unwrap();
-        assert!(
-            v["captions"]["abc123.en.vtt"].is_null(),
-            "over-cap track stays skipped when a sibling is present"
-        );
-        assert!(v["captions"]["abc123.nl.vtt"]
-            .as_str()
-            .unwrap()
-            .contains("Paris"));
+        assert!(build_metadata_envelope(None, 64).is_none());
     }
 }

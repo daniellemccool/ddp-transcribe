@@ -111,7 +111,6 @@ pub fn run_migrate(path: &Path) -> Result<()> {
              ALTER TABLE videos ADD COLUMN view_count INTEGER;
              ALTER TABLE videos ADD COLUMN like_count INTEGER;
              ALTER TABLE videos ADD COLUMN comment_count INTEGER;
-             ALTER TABLE videos ADD COLUMN captions_json TEXT;
              ALTER TABLE videos ADD COLUMN metadata_fetched_at INTEGER;
              CREATE TABLE IF NOT EXISTS video_metadata_raw (
                  video_id   TEXT PRIMARY KEY NOT NULL,
@@ -120,7 +119,7 @@ pub fn run_migrate(path: &Path) -> Result<()> {
                  FOREIGN KEY (video_id) REFERENCES videos(video_id)
              );",
         )
-        .context("v4→v5: metadata columns ×9 + video_metadata_raw table")?;
+        .context("v4→v5: metadata columns ×8 + video_metadata_raw table")?;
         version = "5".to_string();
     }
 

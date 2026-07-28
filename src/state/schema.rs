@@ -36,7 +36,6 @@ CREATE TABLE IF NOT EXISTS videos (
     view_count          INTEGER,
     like_count          INTEGER,
     comment_count       INTEGER,
-    captions_json       TEXT,
     metadata_fetched_at INTEGER,
     first_seen_at       INTEGER NOT NULL,
     updated_at          INTEGER NOT NULL
@@ -92,7 +91,8 @@ CREATE TABLE IF NOT EXISTS batch_runs (
 
 CREATE TABLE IF NOT EXISTS video_metadata_raw (
     -- Raw fetch-time metadata envelope (Epic 4c): versioned JSON wrapping
-    -- yt-dlp's --print output UNPARSED plus any embedded caption tracks.
+    -- yt-dlp's --print output UNPARSED: a schema + printed pair, nothing
+    -- else (captions descoped 2026-07-28).
     -- One row per unique video, last-write-wins across retries. Parsed
     -- only by `load-metadata` — replayable without re-fetch.
     video_id   TEXT PRIMARY KEY NOT NULL,

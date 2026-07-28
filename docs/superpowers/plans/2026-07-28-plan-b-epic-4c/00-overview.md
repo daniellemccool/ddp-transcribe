@@ -4,9 +4,9 @@
 >
 > **Each task is its own file** in this directory (`01-…md` … `05-…md`). Open only the task you're working on. Task files are self-contained; do NOT load the spec or other task files into a subagent's context.
 
-**Goal:** Every yt-dlp fetch also captures a raw metadata envelope (title/description, uploader, engagement counts, caption tracks) into a new `video_metadata_raw` table — regardless of fetch outcome, with zero extra network requests — and a new post-run `load-metadata` subcommand parses those blobs into typed nullable columns on `videos` (schema v5), replayably.
+**Goal:** Every yt-dlp fetch also captures a raw metadata envelope (title/description, uploader, engagement counts) into a new `video_metadata_raw` table — regardless of fetch outcome, with zero extra network requests — and a new post-run `load-metadata` subcommand parses those blobs into typed nullable columns on `videos` (schema v5), replayably.
 
-**Architecture:** Raw-first: the fetcher appends `--no-simulate --print "%(.{…})j"` (+ `--write-subs --write-auto-subs`) to the existing invocation, captures ≤64 KB of stdout (validated live: ~615 B/video), wraps it UNPARSED in a versioned envelope with any subtitle-sidecar contents embedded, and returns it alongside BOTH the success and failure outcome; the pipeline inserts the envelope before outcome dispatch. Parsing happens only in `load-metadata` (streaming keyset pagination, batched UPDATEs) — any parse bug is fixable forever by re-parse, never re-fetch. Spec: `docs/superpowers/specs/2026-07-28-epic-4c-fetch-metadata-design.md`.
+**Architecture:** Raw-first: the fetcher appends `--no-simulate --print "%(.{…})j"` to the existing invocation, captures ≤64 KB of stdout (validated live: ~615 B/video), wraps it UNPARSED in a versioned envelope, and returns it alongside BOTH the success and failure outcome; the pipeline inserts the envelope before outcome dispatch. Parsing happens only in `load-metadata` (streaming keyset pagination, batched UPDATEs) — any parse bug is fixable forever by re-parse, never re-fetch. Spec: `docs/superpowers/specs/2026-07-28-epic-4c-fetch-metadata-design.md`.
 
 **Tech Stack:** Rust 2021, tokio, rusqlite, clap 4, serde/serde_json (all existing). **No new dependencies.**
 
@@ -30,7 +30,8 @@ Every task's requirements implicitly include:
 
 ## Ground truth (verified live 2026-07-28, yt-dlp 2026.07.04)
 
-- Print template `%(.{id,title,description,uploader,uploader_id,channel_id,timestamp,duration,view_count,like_count,comment_count,repost_count,subtitles,automatic_captions})j` emits ONE line of JSON, ~615 bytes on a real corpus video, all fields populated (`subtitles`/`automatic_captions` may be `null`/`{}` — 0/46 probed corpus videos had tracks).
+- Print template `%(.{id,title,description,uploader,uploader_id,channel_id,timestamp,duration,view_count,like_count,comment_count,repost_count})j` emits ONE line of JSON, ~615 bytes on a real corpus video, all fields populated.
+- **Operator descope 2026-07-28: captions/subtitles are NOT collected** (decision after risk analysis: subtitle downloads are fatal-on-failure in pinned yt-dlp, and listing-only capture still cost primary timeout budget; corrected coverage evidence ~36% is recorded for the epic close). Envelope schema:1 = `{schema, printed}`.
 - `process::run` ALREADY returns `CommandOutcome` (with captured stdout) on nonzero exit — only `RunError` paths (timeout/spawn/io) lose stdout, which is acceptable (no metadata on those). **No `src/process.rs` behavior change is needed**; Task 02 only lifts the `#[allow(dead_code)]` on `CommandOutcome.stdout` (its comment says it exists because all call sites pass 0 — no longer true).
 - Production scale: 144 donors / 4,847,408 watch entries / 2,982,471 unique videos (2026-07-28 inbox). Efficiency notes in the spec.
 
@@ -38,8 +39,8 @@ Every task's requirements implicitly include:
 
 | # | File | Deliverable |
 |---|------|-------------|
-| 01 | `01-schema-v5-raw-store.md` | Schema v5 (`video_metadata_raw` + 9 nullable `videos` columns), migrate ladder v4→v5, `Store::upsert_metadata_raw` |
-| 02 | `02-fetcher-capture.md` | `MetadataCapture` type; `VideoFetcher::acquire` returns `(Option<MetadataCapture>, Result<…>)`; yt-dlp argv + envelope builder + sidecar embed; FakeFetcher injection; call sites thread the tuple (capture discarded until Task 03) |
+| 01 | `01-schema-v5-raw-store.md` | Schema v5 (`video_metadata_raw` + 8 nullable `videos` columns), migrate ladder v4→v5, `Store::upsert_metadata_raw` |
+| 02 | `02-fetcher-capture.md` | `MetadataCapture` type; `VideoFetcher::acquire` returns `(Option<MetadataCapture>, Result<…>)`; yt-dlp argv + envelope builder; FakeFetcher injection; call sites thread the tuple (capture discarded until Task 03) |
 | 03 | `03-pipeline-persistence.md` | Pipelined + serial paths insert the envelope via `upsert_metadata_raw` BEFORE outcome dispatch, best-effort; integration tests prove raw rows for succeeded AND failed videos |
 | 04 | `04-load-metadata.md` | `load-metadata` subcommand: streaming loader (`src/metadata_loader.rs`), `Store::apply_metadata_batch`, `LoadStats` per 0007, `--dry-run`, idempotence, missing-DB bail |
 | 05 | `05-production-hardening.md` | Operator-review fixes: unique `atomic_write` tmp names (cross-process collision), artifact fsyncs OUTSIDE the store lock (pipelined phase-4 split + ADR-0008 revision), honest `cleanup_tmp_files` count |

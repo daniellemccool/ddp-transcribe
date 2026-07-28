@@ -20,7 +20,7 @@ fn upsert_metadata_raw_inserts_and_returns_one() {
     let (mut store, db) = store_with_video(&dir);
 
     let n = store
-        .upsert_metadata_raw("vid_a", r#"{"schema":1,"printed":"{}","captions":null}"#)
+        .upsert_metadata_raw("vid_a", r#"{"schema":1,"printed":"{}"}"#)
         .unwrap();
     assert_eq!(n, 1);
 
@@ -42,13 +42,10 @@ fn upsert_metadata_raw_overwrites_last_write_wins() {
     let (mut store, db) = store_with_video(&dir);
 
     store
-        .upsert_metadata_raw("vid_a", r#"{"schema":1,"printed":"first","captions":null}"#)
+        .upsert_metadata_raw("vid_a", r#"{"schema":1,"printed":"first"}"#)
         .unwrap();
     let n = store
-        .upsert_metadata_raw(
-            "vid_a",
-            r#"{"schema":1,"printed":"second","captions":null}"#,
-        )
+        .upsert_metadata_raw("vid_a", r#"{"schema":1,"printed":"second"}"#)
         .unwrap();
     assert_eq!(n, 1);
 
