@@ -136,8 +136,14 @@ pub enum Command {
         #[arg(long, env = "DDP_TRANSCRIBE_COOKIES_FILE")]
         cookies_file: Option<PathBuf>,
         /// Automatic in-batch retry budget per video (lifetime attempts =
-        /// retries + 1). Default 1.
-        #[arg(long, default_value_t = 1)]
+        /// retries + 1). Default 1. Range-bounded at parse time: negative
+        /// values would silently zero the budget and i64::MAX would
+        /// overflow at `retries + 1` (epic-4 followup).
+        #[arg(
+            long,
+            default_value_t = 1,
+            value_parser = clap::builder::RangedI64ValueParser::<i64>::new().range(0..=1_000_000)
+        )]
         retries: i64,
     },
     /// Upgrade a pre-Epic-2 (v1) state.sqlite to the current schema version.

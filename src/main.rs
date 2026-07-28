@@ -26,12 +26,7 @@ async fn main() -> Result<()> {
     let cli = cli::Cli::parse();
     init_tracing(cli.global.log_format);
     let cfg = config::Config::from_args(&cli.global);
-    tracing::info!(
-        profile = ?cfg.profile,
-        state_db = ?cfg.state_db,
-        whisper_model_path = ?cfg.whisper_model_path,
-        "config resolved"
-    );
+    log_resolved_config(&cfg, &cli.command);
 
     match cli.command {
         cli::Command::Init => {
@@ -403,6 +398,44 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Config echo scoped to what the invoked subcommand actually consumes
+/// (epic-4 followup: echoing whisper_model_path for `ingest` sent the
+/// operator chasing a "why is it using tiny?" false alarm). Process is
+/// the only model-loading arm; ingest reads the inbox; status --verify
+/// reads the transcripts tree.
+fn log_resolved_config(cfg: &config::Config, command: &cli::Command) {
+    match command {
+        cli::Command::Process { .. } => tracing::info!(
+            profile = ?cfg.profile,
+            state_db = ?cfg.state_db,
+            transcripts = ?cfg.transcripts,
+            whisper_model_path = ?cfg.whisper_model_path,
+            classification = ?cfg.classification_path,
+            "config resolved"
+        ),
+        cli::Command::Ingest { .. } => tracing::info!(
+            profile = ?cfg.profile,
+            state_db = ?cfg.state_db,
+            inbox = ?cfg.inbox,
+            "config resolved"
+        ),
+        cli::Command::Status { verify: true, .. } => tracing::info!(
+            profile = ?cfg.profile,
+            state_db = ?cfg.state_db,
+            transcripts = ?cfg.transcripts,
+            "config resolved"
+        ),
+        cli::Command::Init
+        | cli::Command::Migrate
+        | cli::Command::Status { .. }
+        | cli::Command::RecomputeWindow { .. } => tracing::info!(
+            profile = ?cfg.profile,
+            state_db = ?cfg.state_db,
+            "config resolved"
+        ),
+    }
 }
 
 fn hostname_or_default() -> String {
