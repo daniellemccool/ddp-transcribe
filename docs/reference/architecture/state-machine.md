@@ -8,7 +8,7 @@ The state machine is a single sqlite database accessed via the `Store` type in `
 
 ### Schema overview
 
-The schema is declared in `src/state/schema.rs`. Three application tables and one metadata table are created:
+The schema is declared in `src/state/schema.rs`. Five application tables and one metadata table are created:
 
 **`videos`** — one row per distinct `video_id`; the lifecycle row.
 
@@ -30,10 +30,18 @@ The schema is declared in `src/state/schema.rs`. Three application tables and on
 | `last_retryable_message` | TEXT | NULL | Error message from last retryable failure |
 | `terminal_reason` | TEXT | NULL | Reason tag from terminal failure |
 | `terminal_message` | TEXT | NULL | Error message from terminal failure |
+| `video_description` | TEXT | NULL | Creator caption text (schema v5; `load-metadata` writes it) |
+| `uploader` | TEXT | NULL | Uploader handle (schema v5) |
+| `uploader_id` | TEXT | NULL | Uploader numeric ID (schema v5) |
+| `video_created_at` | INTEGER | NULL | Video upload time, Unix epoch (schema v5) |
+| `view_count` | INTEGER | NULL | Point-in-time view count (schema v5) |
+| `like_count` | INTEGER | NULL | Point-in-time like count (schema v5) |
+| `comment_count` | INTEGER | NULL | Point-in-time comment count (schema v5) |
+| `metadata_fetched_at` | INTEGER | NULL | When the envelope behind the seven columns above was captured (schema v5) |
 | `first_seen_at` | INTEGER | NOT NULL | Unix epoch seconds of first ingest |
 | `updated_at` | INTEGER | NOT NULL | Unix epoch seconds of last status change |
 
-(`src/state/schema.rs:4–30`)
+The eight schema-v5 columns are all nullable and are written **only** by `load-metadata`; NULL means the loader has not run over that video's envelope (or the envelope was unparseable). The engagement counts are snapshots as of `metadata_fetched_at`, not current values — see [ADR 0042](../../decisions/0042-fetch-time-metadata-is-captured-raw-first-parsing-is-a-replayable-post-run-step.md). (`src/state/schema.rs`)
 
 **`watch_history`** — one row per `(respondent_id, video_id, watched_at)` tuple; links a donor participant to their watch events. `watched_at` is the parsed Unix-epoch timestamp (per [ADR 0039](../../decisions/0039-ddp-watch-history-timestamps-are-treated-as-utc-documentary-only-and-empirically-unresolved.md), UTC-assumed, documentary evidence, empirically unresolved); `watched_at_raw` (schema v4, Epic 4b) preserves the verbatim DDP `Date` string as the hedge against that unresolved verdict. `in_window` (boolean) records whether the row falls inside the analysis window supplied at ingest — computed once at ingest and changed only by the `recompute-window` subcommand (per [ADR 0040](../../decisions/0040-analysis-window-is-computed-at-ingest-recompute-window-is-the-only-flag-mutator.md)); absent bounds at ingest time mean every row lands `in_window = 1`. References `videos` via foreign key. (`src/state/schema.rs:36–44`)
 
@@ -43,7 +51,9 @@ The schema is declared in `src/state/schema.rs`. Three application tables and on
 
 **`batch_runs`** — one row per `process` invocation (Epic 4a): the durable census and its generating policy. Opened at batch start with the params JSON and the active classification TOML (`policy_toml`), closed at batch end with the census JSON. A census without its policy is not reproducible attrition documentation, so both ride in the same row. (`src/state/schema.rs`)
 
-The schema currently ships at version `"4"` (`src/state/schema.rs`; `SCHEMA_VERSION` constant — Epic 4b bumped v3 → v4 to add `watch_history.watched_at_raw`; `in_window` has existed since v1, but ingest hardcoded it `true` until Epic 4b wired up real window bounds). A partial index on `(status, attempt_count, first_seen_at, video_id) WHERE status = 'pending'` accelerates `claim_next`'s attempt-aware scan — Epic 4a reordered it to `attempt_count ASC` first so retries drain behind fresh work (`src/state/schema.rs`).
+**`video_metadata_raw`** — one row per unique `video_id` (PK), holding `fetched_at` and the fetch-time metadata envelope `raw_json` verbatim (schema v5, Epic 4c). Written by `upsert_metadata_raw` on every fetch that produced a print line — success and classified-failure alike — with last-write-wins across retries. Nothing parses it at runtime; `load-metadata` reads it after the batch. References `videos` via foreign key. (`src/state/schema.rs`)
+
+The schema currently ships at version `"5"` (`src/state/schema.rs`; `SCHEMA_VERSION` constant). Epic 4c bumped v4 → v5, and added exactly two things: the `video_metadata_raw` table and the eight nullable metadata columns on `videos` listed above. Nothing else changed — no index, no constraint, no existing column. (Epic 4b's v3 → v4 added `watch_history.watched_at_raw`; `in_window` has existed since v1, but ingest hardcoded it `true` until Epic 4b wired up real window bounds.) A partial index on `(status, attempt_count, first_seen_at, video_id) WHERE status = 'pending'` accelerates `claim_next`'s attempt-aware scan — Epic 4a reordered it to `attempt_count ASC` first so retries drain behind fresh work (`src/state/schema.rs`).
 
 ### Lifecycle states
 
@@ -153,13 +163,19 @@ Current mutators on `Store`:
 
 - **`open_batch_run(params_json, policy_toml) -> Result<i64>`** / **`close_batch_run(run_id, census_json) -> Result<usize>`** — Epic 4a batch-lifecycle bookkeeping. `open_batch_run` inserts the `batch_runs` row (params + active policy TOML) and returns its `run_id`; it returns `Result<i64>` rather than the 0006 row-count because the caller needs the identity of the row it just created (an identity-insert carve-out from ADR 0006, documented in its doc comment). `close_batch_run` stamps the census JSON and finish time, returning the 0006 row-change count. (`src/state/mod.rs`)
 
+- **`upsert_metadata_raw(video_id: &str, envelope_json: &str) -> Result<usize>`** — Epic 4c ([ADR 0042](../../decisions/0042-fetch-time-metadata-is-captured-raw-first-parsing-is-a-replayable-post-run-step.md)): inserts the fetch-time metadata envelope into `video_metadata_raw`, stamping `fetched_at = unix_now()`. `INSERT … ON CONFLICT(video_id) DO UPDATE` — last-write-wins across retries. **Deliberately not claim-guarded**: it runs before outcome dispatch on both pipeline paths, and its worst case under a stale claim is a slightly stale engagement snapshot that self-heals on the next fetch. Callers treat any `Err` as best-effort (warn + continue). (`src/state/mod.rs`)
+
+- **`apply_metadata_batch(rows: &[MetadataColumns]) -> Result<usize>`** — Epic 4c: `load-metadata`'s write half. Opens one `IMMEDIATE` transaction per page and `UPDATE`s the eight schema-v5 columns on `videos` for each parsed row, returning the summed row-change count. A row whose `videos` entry no longer exists matches 0 — counted as `rows_without_video`, never an error. (`src/state/mod.rs`)
+
+The loader's read half is `Store::metadata_raw_page(after_video_id: Option<&str>, limit: usize) -> Result<Vec<RawMetadataRow>>` in `src/state/queries.rs` — keyset pagination ordered by `video_id`, with the first page and subsequent pages issued as separate prepared statements (a single `OR … IS NULL` shape planned as a full table scan per page, which is O(n²) over a 3M-row table).
+
 Redirect signature rationale to ADRs 0006 and 0023.
 
 ## Schema-version policy
 
-`Store::open` reads `meta.schema_version` and compares it against the binary's `SCHEMA_VERSION` constant (currently `"4"`, `src/state/schema.rs`). On mismatch it returns `StateError::SchemaVersionMismatch { expected, found }` whose `Display` impl instructs the operator to run `ddp-transcribe migrate` (`src/state/mod.rs`). There is no in-process auto-migrate.
+`Store::open` reads `meta.schema_version` and compares it against the binary's `SCHEMA_VERSION` constant (currently `"5"`, `src/state/schema.rs`). On mismatch it returns `StateError::SchemaVersionMismatch { expected, found }` whose `Display` impl instructs the operator to run `ddp-transcribe migrate` (`src/state/mod.rs`). There is no in-process auto-migrate.
 
-Migration runs in the dedicated `migrate` subcommand (`src/state/migrate.rs`), which bypasses the version check, applies the migration SQL in a single transaction, and bumps `meta.schema_version`. The migration ladder handles v1 → v2 (adding the four failure-classification columns via `ALTER TABLE`), v2 → v3 (Epic 4a: the `batch_runs` table plus the attempt-aware pending index), and v3 → v4 (Epic 4b: `watch_history.watched_at_raw`, per [ADR 0039](../../decisions/0039-ddp-watch-history-timestamps-are-treated-as-utc-documentary-only-and-empirically-unresolved.md)). `migrate` is idempotent — a no-op if the DB is already current. Per [ADR 0022](../../decisions/0022-schema-version-hard-fails-at-store-open-migration-is-an-explicit-cli-subcommand.md), failing closed and asking for human action is the correct default.
+Migration runs in the dedicated `migrate` subcommand (`src/state/migrate.rs`), which bypasses the version check, applies the migration SQL in a single transaction, and bumps `meta.schema_version`. The migration ladder has four stages: v1 → v2 (adding the four failure-classification columns via `ALTER TABLE`), v2 → v3 (Epic 4a: the `batch_runs` table plus the attempt-aware pending index), v3 → v4 (Epic 4b: `watch_history.watched_at_raw`, per [ADR 0039](../../decisions/0039-ddp-watch-history-timestamps-are-treated-as-utc-documentary-only-and-empirically-unresolved.md)), and v4 → v5 (Epic 4c: the eight metadata columns on `videos` plus the `video_metadata_raw` table, per [ADR 0042](../../decisions/0042-fetch-time-metadata-is-captured-raw-first-parsing-is-a-replayable-post-run-step.md)). `migrate` is idempotent — a no-op if the DB is already current. Per [ADR 0022](../../decisions/0022-schema-version-hard-fails-at-store-open-migration-is-an-explicit-cli-subcommand.md), failing closed and asking for human action is the correct default.
 
 ## Operator visibility
 
@@ -175,7 +191,7 @@ Per [ADR 0008](../../decisions/0008-artifacts-are-durable-on-disk-before-mark-su
 - **Crash before artifact write** — the row stays `in_progress`; stale sweep recovers it; the next attempt re-runs the full fetch + transcribe.
 - **Crash after `mark_succeeded`** — fully durable; both artifact and state row are committed.
 
-The artifact-write ordering is enforced in `write_artifacts_and_mark` in `src/pipeline/mod.rs` (the writes land before `mark_succeeded`; `transcribe_and_write` wraps it on the serial path). Full discussion of the artifact side of this invariant is in [`transcription.md`](transcription.md). Redirect crash-recovery rationale to ADR 0008.
+Since Epic 4c the ordering is owned by a **pair** of functions in `src/pipeline/mod.rs` rather than one: `write_artifacts_durable` (both artifacts written, fsynced, renamed — no `Store` involvement) then `mark_after_artifacts` (`mark_succeeded` plus the WAV cleanup). The pipelined transcribe worker calls the two halves directly so its store lock covers only the DB acknowledgement, leaving the fsyncs unlocked; the serial path calls `write_artifacts_and_mark`, which is now just the composition of the pair. The invariant is unchanged — artifacts durable before `mark_succeeded` — but a reviewer checking it must check the call *sequence* at each site, not a single function body. Full discussion of the artifact side of this invariant is in [`transcription.md`](transcription.md). Redirect crash-recovery rationale to ADR 0008.
 
 ## Failure classification
 
@@ -208,3 +224,4 @@ The two diagnostic column pairs are preserved across subsequent flips: the retry
 | 0039 | DDP timestamps are UTC-assumed, empirically unresolved | `watch_history.watched_at` / `watched_at_raw`. |
 | 0040 | Analysis window computed at ingest; `recompute-window` is the only flag mutator | `watch_history.in_window`; schema v4. |
 | 0041 | `status` is read-only; the 0017 done-contract lives behind `--verify` | Operator visibility above. |
+| 0042 | Fetch-time metadata is captured raw-first; parsing is a replayable post-run step | `video_metadata_raw`; the eight metadata columns; `upsert_metadata_raw` / `apply_metadata_batch`; schema v5. Cross-cuts data input. |

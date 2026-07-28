@@ -484,3 +484,87 @@ it instead mutates state for real. `recompute-window --dry-run` covers
 re-deriving `in_window` for rows already in the DB, but not the first
 ingest of a new export, where the mutation is `watch_history` inserts plus
 `videos` upserts, not just the `in_window` recompute.
+
+---
+
+### `main.rs` re-declares the library's entire module tree
+
+**Found in:** operator review, 2026-07-28 (during Epic 4c).
+**Disposition:** Real structural debt, but far too broad for an Epic 4c rider —
+it touches every module declaration in the crate and would have to land as its
+own change with a full-suite rerun. Cites ADR-0002's deferred bin/lib
+reassessment, which parked exactly this question.
+**Trigger to revisit:** Epic 5 hygiene bundle, alongside `run_serial`
+retirement, the `state/mod.rs` split, and the sync-IO sweep.
+
+`src/main.rs` re-declares nearly every module that `src/lib.rs` already
+exposes, so the binary compiles its own copy of most of the crate rather than
+importing `ddp_transcribe::…`. Three consequences:
+
+- **Double compilation** of the bulk of the crate on every build — paid on
+  every `cargo build`, `cargo clippy --all-targets`, and `cargo test`.
+- **Broadened public surface.** Items are `pub` because the *binary's* copy
+  needs them across module boundaries, which pushes visibility wider than the
+  library alone would require, and makes "is this part of the public API?"
+  unanswerable (the same ambiguity ADR-0002 flagged and the `Store::pragma_string`
+  entry above is blocked on).
+- **A driver of the accumulated suppressions.** An item used only by the
+  library's copy is dead in the binary's copy and vice versa, which is why a
+  chunk of the crate's `dead_code` / `unused_imports` allows exist at all.
+  Removing the duplication should let several of them be deleted outright
+  rather than re-justified.
+
+Idiomatic fix: `main.rs` declares no modules and imports `ddp_transcribe::…`
+from the single canonical tree in `lib.rs`. Do it as one mechanical change with
+the suppression cleanup as a follow-on, not interleaved.
+
+---
+
+### Startup `cleanup_tmp_files` sweep can delete a concurrent process's in-flight tmp
+
+**Found in:** Epic 4c Task 05 review (restated by codex-advisor while reviewing
+the unique-tmp-name change). Pre-existing behavior, not introduced by 4c.
+**Disposition:** Blast radius is limited to multi-process deployments, which is
+exactly the SRC two-GPU setup — but the failure is self-healing (the losing
+write fails, the row stays `in_progress`, the stale sweep reclaims it and the
+next attempt re-writes the artifact idempotently per ADR-0008). Not worth a
+rushed fix inside 4c.
+**Trigger to revisit:** Epic 5, bundled with the other
+`output::cleanup_tmp_files` polish entry above.
+
+`cleanup_tmp_files` (`src/output/artifacts.rs`) sweeps every file whose name
+contains `.tmp` under the transcripts root at startup. Epic 4c made each
+in-flight tmp name unique per writing process (`{name}.tmp-{pid}-{seq}`), which
+removed the *collision* — two processes can no longer write the same tmp path —
+but the startup sweep still matches on the substring, so a second instance
+starting up while the first is mid-write will happily unlink the first's
+in-flight tmp file. The fix is to make the sweep skip tmp files belonging to a
+live pid (or to any pid other than its own), not to narrow the glob — a crashed
+run's leftovers must still be reclaimable.
+
+---
+
+### `upsert_metadata_raw` is not claim-guarded
+
+**Found in:** Epic 4c Task 03 review (triaged to backlog at the time).
+**Disposition:** Accepted tradeoff, documented in the mutator and in ADR-0042 —
+recorded here so the acceptance is a decision on the record rather than an
+oversight someone rediscovers. Revisit only if the blast radius grows.
+**Trigger to revisit:** Epic 5, or sooner if metadata ever gains a consumer for
+which snapshot freshness is load-bearing.
+
+Every other in-flight `Store` mutator carries `AND claimed_by = ?` in its WHERE
+predicate (ADR-0023), so a worker whose claim was swept out from under it
+cannot write. `upsert_metadata_raw` deliberately does not: it runs *before*
+outcome dispatch, at a point where the row's claim state has not been
+re-checked, and it is `INSERT … ON CONFLICT DO UPDATE` (last-write-wins by
+design, so retries refresh the envelope). A stale worker can therefore overwrite
+a newer envelope with an older one.
+
+The blast radius is confined to metadata: the affected row's *lifecycle* is
+untouched (the guarded mutators still reject the stale claim), so the worst
+outcome is a slightly stale engagement snapshot with a `metadata_fetched_at`
+that honestly reports when that snapshot was taken. It self-heals on the next
+successful fetch of the same video. Adding the guard would mean threading
+`worker_id` into a call site whose whole point is that it runs unconditionally
+on both the success and failure paths — which is why it was not done.
