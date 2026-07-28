@@ -34,6 +34,7 @@ async fn pipeline_processes_one_video_to_succeeded_with_fake_fetcher() {
         canned_stderr: std::sync::Mutex::new(None),
         received_opts: std::sync::Mutex::new(Vec::new()),
         fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
+        canned_metadata: std::sync::Mutex::new(None),
     };
 
     let transcriber = FakeTranscriber::scripted(TranscribeOutput {
@@ -115,6 +116,7 @@ async fn pipeline_writes_raw_signals_to_json_artifact() {
         canned_stderr: std::sync::Mutex::new(None),
         received_opts: std::sync::Mutex::new(Vec::new()),
         fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
+        canned_metadata: std::sync::Mutex::new(None),
     };
 
     // Scripted output with one realistic segment+token so the projection
@@ -334,6 +336,7 @@ async fn run_serial_classifies_transcribe_failure_as_retryable_and_continues() -
         canned_stderr: std::sync::Mutex::new(None),
         received_opts: std::sync::Mutex::new(Vec::new()),
         fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
+        canned_metadata: std::sync::Mutex::new(None),
     };
     let transcriber = FakeTranscriber::always_fails_retryable();
 
@@ -467,6 +470,7 @@ async fn run_serial_escalates_transcribe_bug_as_err() -> anyhow::Result<()> {
         canned_stderr: std::sync::Mutex::new(None),
         received_opts: std::sync::Mutex::new(Vec::new()),
         fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
+        canned_metadata: std::sync::Mutex::new(None),
     };
     let transcriber = FakeTranscriber::always_fails_bug();
 

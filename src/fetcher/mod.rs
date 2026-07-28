@@ -62,14 +62,33 @@ pub struct FetchOpts {
     pub format_policy: FetchPolicy,
 }
 
+/// Raw fetch-time metadata capture (Epic 4c): the versioned envelope JSON
+/// stored verbatim in `video_metadata_raw`. Produced on success AND
+/// tool-failure paths; absent on structural failures (timeout/spawn/io).
+///
+/// The field is produced here but not yet READ by the bin — Task 03's
+/// `upsert_metadata_raw` hook is the first consumer, so `#[allow(dead_code)]`
+/// per 0002 keeps `--all-targets -D warnings` green until then; Task 03
+/// removes it.
+#[derive(Debug, Clone)]
+pub struct MetadataCapture {
+    #[allow(dead_code)]
+    pub envelope_json: String,
+}
+
 #[async_trait]
 pub trait VideoFetcher: Send + Sync {
+    /// Acquire the video's audio. The first tuple element is the raw
+    /// metadata envelope when the tool produced one — present on success
+    /// AND classified-failure paths (the printed line lands before the
+    /// media transfer), absent on structural failures. Callers persist it
+    /// BEFORE interpreting the outcome (Epic 4c).
     async fn acquire(
         &self,
         video_id: &str,
         source_url: &str,
         opts: &FetchOpts,
-    ) -> Result<Acquisition, FetchError>;
+    ) -> (Option<MetadataCapture>, Result<Acquisition, FetchError>);
 
     /// Identifier of the fetcher implementation, recorded in
     /// `TranscriptMetadata::fetcher` and `SuccessArtifacts::fetcher`.
@@ -115,6 +134,11 @@ pub struct FakeFetcher {
     /// succeeding (each failed acquire decrements). 0/absent = the canned
     /// behavior applies immediately. Failure text comes from `canned_stderr`.
     pub fail_first_n: std::sync::Mutex<std::collections::HashMap<String, u32>>,
+    /// Epic 4c: when Some, every acquire returns this envelope string as
+    /// its MetadataCapture (alongside whatever outcome the other knobs
+    /// configure). Lets integration tests drive raw-row persistence
+    /// through real worker dispatch.
+    pub canned_metadata: std::sync::Mutex<Option<String>>,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -130,6 +154,7 @@ impl FakeFetcher {
             canned_stderr: std::sync::Mutex::new(None),
             received_opts: std::sync::Mutex::new(Vec::new()),
             fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
+            canned_metadata: std::sync::Mutex::new(None),
         }
     }
 
@@ -146,6 +171,7 @@ impl FakeFetcher {
             canned_stderr: std::sync::Mutex::new(Some(stderr.to_string())),
             received_opts: std::sync::Mutex::new(Vec::new()),
             fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
+            canned_metadata: std::sync::Mutex::new(None),
         }
     }
 
@@ -162,6 +188,7 @@ impl FakeFetcher {
             canned_stderr: std::sync::Mutex::new(None),
             received_opts: std::sync::Mutex::new(Vec::new()),
             fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
+            canned_metadata: std::sync::Mutex::new(None),
         };
         (fetcher, gate)
     }
@@ -178,7 +205,7 @@ impl VideoFetcher for FakeFetcher {
         video_id: &str,
         _source_url: &str,
         opts: &FetchOpts,
-    ) -> Result<Acquisition, FetchError> {
+    ) -> (Option<MetadataCapture>, Result<Acquisition, FetchError>) {
         // Recorder: pushed unconditionally, before any of the
         // fail/succeed branches below, so Epic 3's cookie-routing tests
         // can assert what the caller actually threaded through.
@@ -186,6 +213,16 @@ impl VideoFetcher for FakeFetcher {
             .lock()
             .expect("received_opts mutex")
             .push(opts.clone());
+
+        // Epic 4c: computed once and returned alongside EVERY outcome
+        // below, mirroring the real fetcher (the envelope rides both the
+        // success and the classified-failure paths).
+        let capture = self
+            .canned_metadata
+            .lock()
+            .expect("canned_metadata mutex")
+            .clone()
+            .map(|envelope_json| MetadataCapture { envelope_json });
 
         // One-shot gate: take the Notify out of the slot (so subsequent calls
         // skip), then await `notified()` outside the slot guard so we don't
@@ -215,12 +252,15 @@ impl VideoFetcher for FakeFetcher {
                         .expect("canned_stderr lock")
                         .clone()
                         .unwrap_or_else(|| "transient fake failure".to_string());
-                    return Err(FetchError::ToolFailed {
-                        tool: "yt-dlp",
-                        exit_code: 1,
-                        signal: None,
-                        stderr_excerpt: stderr,
-                    });
+                    return (
+                        capture,
+                        Err(FetchError::ToolFailed {
+                            tool: "yt-dlp",
+                            exit_code: 1,
+                            signal: None,
+                            stderr_excerpt: stderr,
+                        }),
+                    );
                 }
                 // Budget spent → managed; skip the always-fail paths below so
                 // the canned success can run.
@@ -241,27 +281,34 @@ impl VideoFetcher for FakeFetcher {
                 .expect("canned_stderr mutex")
                 .clone();
             if let Some(stderr_excerpt) = canned_err {
-                return Err(FetchError::ToolFailed {
-                    tool: "yt-dlp",
-                    exit_code: 1,
-                    signal: None,
-                    stderr_excerpt,
-                });
+                return (
+                    capture,
+                    Err(FetchError::ToolFailed {
+                        tool: "yt-dlp",
+                        exit_code: 1,
+                        signal: None,
+                        stderr_excerpt,
+                    }),
+                );
             }
         }
 
         if self.always_fails {
-            return Err(FetchError::NetworkError(format!(
-                "FakeFetcher::always_fails synthetic failure for {video_id}"
-            )));
+            return (
+                capture,
+                Err(FetchError::NetworkError(format!(
+                    "FakeFetcher::always_fails synthetic failure for {video_id}"
+                ))),
+            );
         }
         let map = self.canned.lock().expect("canned mutex");
-        match map.get(video_id) {
+        let result = match map.get(video_id) {
             Some(path) => Ok(Acquisition::AudioFile(path.clone())),
             None => Err(FetchError::ParseError(format!(
                 "FakeFetcher has no canned response for {video_id}"
             ))),
-        }
+        };
+        (capture, result)
     }
 
     fn name(&self) -> &'static str {
@@ -288,13 +335,30 @@ mod tests {
             canned_stderr: std::sync::Mutex::new(None),
             received_opts: std::sync::Mutex::new(Vec::new()),
             fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
+            canned_metadata: std::sync::Mutex::new(None),
         };
-        let result = fake
+        let (capture, result) = fake
             .acquire("7234567890123456789", "url", &FetchOpts::default())
-            .await
-            .unwrap();
-        match result {
+            .await;
+        assert!(capture.is_none(), "no canned metadata configured");
+        match result.unwrap() {
             Acquisition::AudioFile(p) => assert_eq!(p, PathBuf::from("/tmp/fake.wav")),
         }
+    }
+
+    /// Epic 4c: `canned_metadata` rides every outcome the other knobs
+    /// configure — here the always-fails path, mirroring the real fetcher's
+    /// "envelope survives a classified failure" contract.
+    #[tokio::test]
+    async fn fake_fetcher_returns_canned_metadata_alongside_failure() {
+        let fake = FakeFetcher::always_fails();
+        *fake.canned_metadata.lock().expect("canned_metadata mutex") =
+            Some(r#"{"schema":1,"printed":"{}"}"#.to_string());
+        let (capture, result) = fake.acquire("vid_a", "url", &FetchOpts::default()).await;
+        assert_eq!(
+            capture.expect("capture present").envelope_json,
+            r#"{"schema":1,"printed":"{}"}"#
+        );
+        assert!(result.is_err(), "always_fails outcome unchanged by capture");
     }
 }

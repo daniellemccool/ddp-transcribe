@@ -311,6 +311,7 @@ pub async fn fetch_worker(
             }
             r = fetch_and_decode(fetcher.as_ref(), &claim, &fetch_opts) => r,
         };
+        let (_metadata_capture, fetch_result) = fetch_result; // Epic 4c Task 03 wires persistence
 
         match fetch_result {
             Ok((samples, wav_path)) => {

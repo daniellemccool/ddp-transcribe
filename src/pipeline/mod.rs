@@ -289,14 +289,25 @@ pub(crate) fn cookie_opts_for(
 /// `opts` (Epic 3 T08) carries the per-claim cookie decision computed by
 /// [`cookie_opts_for`] at the call site — this function does not decide
 /// policy, only threads the decision to `fetcher.acquire`.
+///
+/// Epic 4c: the first tuple element is the raw metadata envelope the fetcher
+/// captured, if any. It is returned on EVERY path — including decode
+/// failures — so the caller can persist it before interpreting the outcome.
 pub(crate) async fn fetch_and_decode(
     fetcher: &dyn VideoFetcher,
     claim: &Claim,
     opts: &FetchOpts,
-) -> Result<(Vec<f32>, PathBuf), FetchPhaseError> {
-    let acquisition = fetcher
+) -> (
+    Option<crate::fetcher::MetadataCapture>,
+    Result<(Vec<f32>, PathBuf), FetchPhaseError>,
+) {
+    let (capture, acquisition) = fetcher
         .acquire(&claim.video_id, &claim.source_url, opts)
-        .await?;
+        .await;
+    let acquisition = match acquisition {
+        Ok(a) => a,
+        Err(e) => return (capture, Err(e.into())),
+    };
 
     // Plan A's `Acquisition` has only one variant; Plan B will add `Unavailable`
     // and `ReadyTranscript`, at which point the `match` becomes load-bearing.
@@ -317,9 +328,14 @@ pub(crate) async fn fetch_and_decode(
     // Decode WAV → owned Vec<f32> samples (0014: 16 kHz mono validated
     // inside decode_wav). Owned samples cross the worker-thread boundary
     // per 0016.
-    let samples = audio::decode_wav(&wav_path)?;
+    // Epic 4c: a decode failure still carries the capture — the envelope
+    // was produced by the fetch that preceded it.
+    let samples = match audio::decode_wav(&wav_path) {
+        Ok(s) => s,
+        Err(e) => return (capture, Err(e.into())),
+    };
 
-    Ok((samples, wav_path))
+    (capture, Ok((samples, wav_path)))
 }
 
 /// Phase 3+4: transcribe → write artifacts → mark_succeeded → cleanup wav.
