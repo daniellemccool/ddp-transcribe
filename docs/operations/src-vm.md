@@ -5,8 +5,9 @@ live against the running workspace that day. Supersedes the untracked
 `docs/local/SRC-RUNBOOK.md` / `SRC-BAKE-*` set and `docs/local/src-bootstrap.sh`,
 which describe a storage-hop git topology that does not exist on the VM — treat
 those as historical. Epic 4a amended the *operate* section (triage retired,
-retry moved in-pipeline, classification became an operator TOML); the topology
-and update procedure are stable.
+retry moved in-pipeline, classification became an operator TOML); Epic 4c added
+the post-run `load-metadata` step and the v4 → v5 migration; the topology and
+update procedure are stable.
 
 ## Topology (what actually exists)
 
@@ -49,22 +50,29 @@ deployed. Verify after every update:
 ddp-transcribe -V && ddp-transcribe -h | head -12   # subcommand list matches expectations
 ```
 
-After deploying an Epic 4b (v4-schema) binary, migrate the state DB before
+After deploying an Epic 4c (v5-schema) binary, migrate the state DB before
 running anything else against it:
 
 ```bash
-ddp-transcribe --state-db ~/ddp-state/state.sqlite migrate   # v3 -> v4, idempotent
+ddp-transcribe --state-db ~/ddp-state/state.sqlite migrate   # -> v5, idempotent
 ```
 
-`migrate` adds `watch_history.watched_at_raw` (the timezone-verdict hedge,
-ADR-0039) and is a no-op if the DB is already at v4. The binary refuses to
+The ladder is sequential, so one `migrate` call takes a v3 DB all the way to
+v5. v3 → v4 adds `watch_history.watched_at_raw` (the timezone-verdict hedge,
+ADR-0039); v4 → v5 adds the `video_metadata_raw` table and eight nullable
+metadata columns on `videos` (ADR-0042). `migrate` is a no-op if the DB is
+already at v5. The binary refuses to
 open an un-migrated DB for any other subcommand — `Store::open` hard-fails
 with a typed `SchemaVersionMismatch` error naming the expected/found
 versions and instructing `migrate` (ADR-0022).
 
-## Operating (current, Epic 4a)
+## Operating (current, Epic 4c)
 
-Canonical invocation is the bare binary with explicit paths (CWD-independent):
+The operator sequence for a batch is **`ingest` → `process` → `load-metadata` →
+`status`**. Canonical invocation is the bare binary with explicit paths
+(CWD-independent). **Every global flag (`--state-db`, `--transcripts`,
+`--inbox`, `--whisper-model`, `--classification`, …) goes BEFORE the
+subcommand** — the parser rejects them after it.
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 ddp-transcribe \
@@ -97,6 +105,38 @@ CUDA_VISIBLE_DEVICES=0 ddp-transcribe \
   the start-of-batch sweep on the first 4a run; expect the census to report
   ~3,915 swept_terminal + ~2,871 requeued + 301 parked_for_cookies (no cookies)
   on that first run.
+
+### Post-run metadata load (Epic 4c)
+
+Every `process` run stores each video's raw yt-dlp metadata envelope in
+`video_metadata_raw` — for failed fetches too (tool failures, that is —
+timeouts and spawn failures lose the captured output; the retry self-heals),
+at zero extra network cost. Nothing parses it during the run. After a batch:
+
+```bash
+ddp-transcribe --state-db ~/ddp-state/state.sqlite load-metadata --dry-run
+ddp-transcribe --state-db ~/ddp-state/state.sqlite load-metadata
+```
+
+- Output is one `examined / loaded / skipped-unparseable / without-video` line.
+  `--dry-run` does the full examine-and-parse pass and reports real counts
+  without writing (its `without-video` is always 0 — it never touches `videos`).
+- **Replayable by design:** the loader only reads stored blobs, so it is safe to
+  re-run any time and a parse bug is fixed by re-running a newer binary — never
+  by re-fetching the corpus (ADR-0042). Nothing is lost by running it early and
+  again later.
+- It writes eight columns on `videos`: `video_description`, `uploader`,
+  `uploader_id`, `video_created_at`, `view_count`, `like_count`,
+  `comment_count`, `metadata_fetched_at`.
+- **For the PI:** `video_description` is the creator's **caption text** — what
+  the Research API calls `video_description` — and it is captured for every
+  video yt-dlp can reach, including ones whose download failed. Engagement
+  counts are point-in-time snapshots as of `metadata_fetched_at`, not current
+  values. **Subtitle/caption *tracks* are not collected** (operator descope,
+  2026-07-28: track downloads are fatal-on-failure in the pinned yt-dlp and even
+  listing them spends the fetch's timeout budget); neither are comments
+  (Research API only). Spoken content reaches the study through whisper
+  transcription, not through platform-served caption tracks.
 
 ### Status quickstart (Epic 4b)
 
@@ -135,8 +175,14 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite --transcripts ~/ddp-work/tran
   invisible to review. The repo lives on the workstation.
 - Terminal garbling over SSH: `export TERM=xterm-256color`.
 - The config-echo line is scoped per subcommand since Epic 4b — `init`/`ingest`/
-  `migrate`/`status`/`recompute-window` no longer log `whisper_model_path`
-  (resolved; was a cosmetic false-alarm risk in Epic 3/4a logs).
+  `migrate`/`status`/`recompute-window`/`load-metadata` no longer log
+  `whisper_model_path` (resolved; was a cosmetic false-alarm risk in Epic 3/4a
+  logs).
+- Global flags are **not** `global = true` in clap (except `--compute-lang-probs`),
+  so `ddp-transcribe process --state-db …` is a parse error. Always put
+  `--state-db` / `--transcripts` / `--whisper-model` / `--inbox` /
+  `--classification` before the subcommand, as every example here does. (Filed
+  for Epic 5: make them true globals.)
 - Bulk file transfer off the volume: iRODS/Yoda per-file overhead dominates below
   ~1 MB/file; parallelize disjoint shard ranges or use a bundle transfer. 120k
   files single-stream ≈ 24 h (measured 2026-07-07).

@@ -50,6 +50,7 @@ async fn fetch_worker_drains_pending_rows_and_exits() -> anyhow::Result<()> {
         canned_stderr: std::sync::Mutex::new(None),
         received_opts: std::sync::Mutex::new(Vec::new()),
         fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
+        canned_metadata: std::sync::Mutex::new(None),
     };
 
     let shared: SharedStore = Arc::new(TokioMutex::new(store));
@@ -331,6 +332,7 @@ async fn fetch_worker_threads_cookies_on_sensitive_login_gated_retry() -> anyhow
         canned_stderr: std::sync::Mutex::new(None),
         received_opts: std::sync::Mutex::new(Vec::new()),
         fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
+        canned_metadata: std::sync::Mutex::new(None),
     });
 
     let (tx, mut rx) = mpsc::channel::<FetchedItem>(2);
@@ -420,6 +422,7 @@ async fn fetch_worker_uses_frugal_on_no_data_blocks_retry() -> anyhow::Result<()
         canned_stderr: std::sync::Mutex::new(None),
         received_opts: std::sync::Mutex::new(Vec::new()),
         fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
+        canned_metadata: std::sync::Mutex::new(None),
     });
 
     run_single_fetch_worker(store.clone(), Arc::clone(&fetcher) as Arc<dyn VideoFetcher>).await;
@@ -683,6 +686,7 @@ async fn requires_cookie_parks_without_cookies_and_requeues_with() -> anyhow::Re
         canned_stderr: StdMutex::new(None),
         received_opts: StdMutex::new(Vec::new()),
         fail_first_n: StdMutex::new(HashMap::new()),
+        canned_metadata: std::sync::Mutex::new(None),
     });
     let transcriber2: Arc<dyn Transcriber> = Arc::new(FakeTranscriber::echo());
     let opts2 = ProcessOptions {
@@ -761,6 +765,7 @@ async fn fetch_worker_stale_terminal_claim_not_counted_in_census() -> anyhow::Re
         )),
         received_opts: std::sync::Mutex::new(Vec::new()),
         fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
+        canned_metadata: std::sync::Mutex::new(None),
     };
 
     let shared: SharedStore = Arc::new(TokioMutex::new(store));

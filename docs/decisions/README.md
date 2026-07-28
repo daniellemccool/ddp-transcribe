@@ -66,6 +66,7 @@ Load the ADR(s) whose filename matches the area you are touching.
 
 - [0035 — Cookies ride only SensitiveLoginGated retries, with argv redaction](./0035-cookies-ride-only-sensitivelogingated-retries-with-argv-redaction.md)
 - [0038 — Fetch format is download-first; the frugal selector runs only on NoDataBlocks retries](./0038-fetch-format-is-download-first-the-frugal-selector-runs-only-on-nodatablocks-retries.md)
+- [0042 — Fetch-time metadata is captured raw-first; parsing is a replayable post-run step](./0042-fetch-time-metadata-is-captured-raw-first-parsing-is-a-replayable-post-run-step.md)
 
 ### Ingest
 

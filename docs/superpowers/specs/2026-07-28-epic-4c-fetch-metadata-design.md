@@ -1,6 +1,6 @@
 # Epic 4c — Fetch-time metadata capture (title, captions, engagement)
 
-**Status:** design approved 2026-07-28 (operator brainstorm). Implementation plan to follow.
+**Status:** design approved 2026-07-28 (operator brainstorm). Implementation plan to follow. Partially superseded 2026-07-28: caption/subtitle track collection was descoped by operator decision after implementation-time evidence (subtitle downloads are fatal-on-failure in pinned yt-dlp; the cited 0/46 coverage probe was a measurement artifact — corrected figure ~36%). See EPIC-4C-CLOSE §Deviations and ADR-0042; video_description (the creator's caption text) IS captured.
 **Scope anchor:** must land before the production batch run — yt-dlp metadata capture is forward-only; retroactive capture would require re-fetching the corpus.
 
 ## Context

@@ -123,8 +123,19 @@ impl RawSignals {
     }
 }
 
-/// Atomic write for one file: write to `{path}.tmp`, fsync, rename to `{path}`,
-/// fsync the parent directory. Caller is responsible for parent existence.
+/// Process-wide tmp-name sequence: combined with the pid it makes each
+/// atomic_write's tmp file unique across concurrent processes AND within
+/// this process — two writers racing on the same video each rename their
+/// OWN complete file onto the target (last rename wins; both are complete,
+/// so either outcome is a valid artifact). Epic 4c hardening; 0008's
+/// idempotence contract preserved.
+static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Atomic write for one file: write to `{path}.tmp-{pid}-{seq}`, fsync,
+/// rename to `{path}`, fsync the parent directory. Caller is responsible for
+/// parent existence. The tmp name is unique per writing process and per call
+/// (see [`TMP_SEQ`]) so a concurrent writer of the same target never
+/// truncates or renames away this call's in-flight tmp file.
 pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
     let parent = path
         .parent()
@@ -132,10 +143,12 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
 
     let mut tmp_path = path.to_path_buf();
     let tmp_name = format!(
-        "{}.tmp",
+        "{}.tmp-{}-{}",
         path.file_name()
             .and_then(|s| s.to_str())
-            .with_context(|| format!("path {} has no filename", path.display()))?
+            .with_context(|| format!("path {} has no filename", path.display()))?,
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     );
     tmp_path.set_file_name(tmp_name);
 
@@ -159,8 +172,14 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Sweep all `*.tmp` files under the transcripts root. Called at process
-/// startup so leftover tmp files from crashed runs don't accumulate.
+/// Sweep every file whose name contains `.tmp` under the transcripts root
+/// — covers both the historical fixed `{name}.tmp` leftovers and the Epic 4c
+/// suffixed `{name}.tmp-{pid}-{seq}` scheme. Artifact names are
+/// `{video_id}.txt` / `{video_id}.json` with numeric video ids, so a `.tmp`
+/// substring cannot occur in a real artifact name. Called at process startup
+/// so leftover tmp files from crashed runs don't accumulate. The returned
+/// count reports ONLY files this sweep actually deleted; failures are
+/// warn-logged and not counted.
 pub fn cleanup_tmp_files(transcripts_root: &Path) -> Result<usize> {
     if !transcripts_root.exists() {
         return Ok(0);
@@ -175,9 +194,17 @@ pub fn cleanup_tmp_files(transcripts_root: &Path) -> Result<usize> {
             for shard_entry in std::fs::read_dir(&path)? {
                 let shard_entry = shard_entry?;
                 let p = shard_entry.path();
-                if p.extension().and_then(|s| s.to_str()) == Some("tmp") {
-                    let _ = std::fs::remove_file(&p);
-                    removed += 1;
+                let is_tmp = p
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|n| n.contains(".tmp"));
+                if is_tmp {
+                    match std::fs::remove_file(&p) {
+                        Ok(()) => removed += 1,
+                        Err(e) => {
+                            tracing::warn!(path = %p.display(), error = %e, "tmp cleanup failed; not counted");
+                        }
+                    }
                 }
             }
         }
@@ -197,8 +224,63 @@ mod tests {
         atomic_write(&target, b"world").expect("write succeeds");
 
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "world");
-        let tmp_path = tmp.path().join("hello.txt.tmp");
-        assert!(!tmp_path.exists(), "tmp file should be renamed away");
+        // Epic 4c: tmp names are `{name}.tmp-{pid}-{seq}`, so assert on the
+        // substring rather than a hardcoded name — no tmp file of any shape
+        // may survive the rename.
+        let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "tmp file should be renamed away, found: {leftovers:?}"
+        );
+    }
+
+    /// Epic 4c hardening: a concurrent writer's tmp file (the OLD fixed
+    /// name) must not be touched by this process's atomic_write — unique
+    /// tmp names mean no cross-process collision.
+    #[test]
+    fn atomic_write_does_not_disturb_other_writers_tmp() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("video.txt");
+        let decoy = tmp.path().join("video.txt.tmp");
+        std::fs::write(&decoy, b"other writer's in-flight bytes").unwrap();
+
+        atomic_write(&target, b"mine").expect("write succeeds");
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "mine");
+        assert_eq!(
+            std::fs::read_to_string(&decoy).unwrap(),
+            "other writer's in-flight bytes",
+            "the fixed-name tmp belongs to another process and must survive"
+        );
+    }
+
+    /// cleanup_tmp_files: removes both old-style `.tmp` and new suffixed
+    /// `.tmp-{pid}-{seq}` leftovers, and reports ONLY actual deletions.
+    #[test]
+    fn cleanup_tmp_files_counts_only_real_deletions() {
+        let tmp = TempDir::new().unwrap();
+        let shard = tmp.path().join("ab");
+        std::fs::create_dir_all(&shard).unwrap();
+        std::fs::write(shard.join("v1.txt.tmp"), b"old style").unwrap();
+        std::fs::write(shard.join("v2.json.tmp-1234-7"), b"new style").unwrap();
+        std::fs::write(shard.join("v3.txt"), b"real artifact, kept").unwrap();
+        // A directory whose name matches: remove_file on it fails — it must
+        // not be counted.
+        std::fs::create_dir(shard.join("v4.txt.tmp")).unwrap();
+
+        let removed = cleanup_tmp_files(tmp.path()).unwrap();
+
+        assert_eq!(
+            removed, 2,
+            "two files deleted; the directory failure is not counted"
+        );
+        assert!(!shard.join("v1.txt.tmp").exists());
+        assert!(!shard.join("v2.json.tmp-1234-7").exists());
+        assert!(shard.join("v3.txt").exists());
     }
 
     #[test]

@@ -140,6 +140,79 @@ impl Store {
     }
 }
 
+/// One raw metadata envelope row (Epic 4c loader input).
+#[derive(Debug)]
+pub struct RawMetadataRow {
+    pub video_id: String,
+    pub fetched_at: i64,
+    pub raw_json: String,
+}
+
+fn map_raw_metadata_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RawMetadataRow> {
+    Ok(RawMetadataRow {
+        video_id: r.get(0)?,
+        fetched_at: r.get(1)?,
+        raw_json: r.get(2)?,
+    })
+}
+
+impl Store {
+    /// Keyset page over `video_metadata_raw` ordered by video_id. Streaming
+    /// input for `load_metadata` — never materializes the whole table
+    /// (6–12 GB at production scale). `after_video_id` is the last id of
+    /// the previous page; `None` starts at the beginning.
+    ///
+    /// Split into two cached statements chosen by the cursor rather than one
+    /// `WHERE (?1 IS NULL OR video_id > ?1)` statement: `EXPLAIN QUERY PLAN`
+    /// showed SQLite planning the single OR-NULL shape as a full ordered
+    /// index scan (the plan has to stay valid for the NULL case), so every
+    /// page rescanned from the start of the table — O(n²) total over a
+    /// 3M-row table. Each branch below plans as an index seek instead.
+    pub fn metadata_raw_page(
+        &self,
+        after_video_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<RawMetadataRow>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = match after_video_id {
+            None => {
+                let mut stmt = self
+                    .conn
+                    .prepare_cached(
+                        "SELECT video_id, fetched_at, raw_json FROM video_metadata_raw
+                         ORDER BY video_id
+                         LIMIT ?1",
+                    )
+                    .context("prepare metadata_raw_page (first page)")?;
+                let rows = stmt
+                    .query_map(rusqlite::params![limit], map_raw_metadata_row)
+                    .context("query metadata_raw_page (first page)")?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .context("collect metadata_raw_page (first page)")?;
+                rows
+            }
+            Some(after) => {
+                let mut stmt = self
+                    .conn
+                    .prepare_cached(
+                        "SELECT video_id, fetched_at, raw_json FROM video_metadata_raw
+                         WHERE video_id > ?1
+                         ORDER BY video_id
+                         LIMIT ?2",
+                    )
+                    .context("prepare metadata_raw_page (subsequent page)")?;
+                let rows = stmt
+                    .query_map(rusqlite::params![after, limit], map_raw_metadata_row)
+                    .context("query metadata_raw_page (subsequent page)")?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .context("collect metadata_raw_page (subsequent page)")?;
+                rows
+            }
+        };
+        Ok(rows)
+    }
+}
+
 /// Full videos-row projection for `status --video-id`. Every nullable
 /// column stays Option — the renderer decides what to show.
 #[derive(Debug, Serialize)]

@@ -268,7 +268,18 @@ async fn process_one(
 
     // Epic 3 T08: kind-gated cookie routing (ADR 0035).
     let fetch_opts = cookie_opts_for(claim, &opts.classification, opts.cookies_file.as_deref());
-    let (samples, wav_path) = fetch_and_decode(fetcher, claim, &fetch_opts).await?;
+    let (metadata_capture, fetch_result) = fetch_and_decode(fetcher, claim, &fetch_opts).await;
+    // Epic 4c: raw envelope persists regardless of fetch outcome; best-effort.
+    if let Some(capture) = metadata_capture {
+        if let Err(e) = store.upsert_metadata_raw(&claim.video_id, &capture.envelope_json) {
+            tracing::warn!(
+                video_id = claim.video_id.as_str(),
+                error = %e,
+                "metadata raw insert failed; continuing"
+            );
+        }
+    }
+    let (samples, wav_path) = fetch_result?;
     transcribe_and_write(
         store,
         transcriber,
@@ -345,6 +356,7 @@ mod tests {
             canned_stderr: Mutex::new(None),
             received_opts: Mutex::new(Vec::new()),
             fail_first_n: Mutex::new(HashMap::new()),
+            canned_metadata: Mutex::new(None),
         };
         let transcriber = ScriptedTranscriber {
             output: TranscribeOutput {
@@ -370,10 +382,10 @@ mod tests {
 
         // Sanity check the fetcher returns the canned audio (defensive —
         // the `Acquisition` variant could change).
-        let acq = fetcher
+        let (_capture, acq) = fetcher
             .acquire("vid_a", "https://example/a", &FetchOpts::default())
-            .await?;
-        assert!(matches!(acq, Acquisition::AudioFile(_)));
+            .await;
+        assert!(matches!(acq?, Acquisition::AudioFile(_)));
 
         let opts = ProcessOptions {
             worker_id: "worker-1".into(),

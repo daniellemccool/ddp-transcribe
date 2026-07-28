@@ -387,6 +387,22 @@ pub struct SuccessArtifacts {
     pub transcript_source: &'static str,
 }
 
+/// Typed column values for one video, produced by the metadata loader
+/// (Epic 4c). All-nullable except the snapshot timestamp, which is the
+/// `video_metadata_raw.fetched_at` of the blob these values came from.
+#[derive(Debug, Clone)]
+pub struct MetadataColumns {
+    pub video_id: String,
+    pub video_description: Option<String>,
+    pub uploader: Option<String>,
+    pub uploader_id: Option<String>,
+    pub video_created_at: Option<i64>,
+    pub view_count: Option<i64>,
+    pub like_count: Option<i64>,
+    pub comment_count: Option<i64>,
+    pub metadata_fetched_at: i64,
+}
+
 impl Store {
     /// Atomically claim the next pending video: fresh work first
     /// (`attempt_count ASC` — Epic 4a end-of-queue retries), FIFO by
@@ -510,6 +526,79 @@ impl Store {
         }
 
         tx.commit().context("commit mark_succeeded")?;
+        Ok(changed)
+    }
+
+    /// Insert or overwrite the raw fetch-time metadata envelope for a video
+    /// (Epic 4c). Keyed by video_id — one row per unique video, last write
+    /// wins across retries (engagement counts are point-in-time; fetched_at
+    /// records the snapshot moment). Returns the row-change count per 0006.
+    ///
+    /// Callers treat failures as best-effort (log + continue): metadata
+    /// must never change a video's pipeline outcome.
+    ///
+    /// Task 03 wired both pipeline paths (`fetch_worker` and
+    /// `process_one`) as the first real callers, lifting the placeholder
+    /// `#[allow(dead_code)]` per 0002.
+    pub fn upsert_metadata_raw(&mut self, video_id: &str, envelope_json: &str) -> Result<usize> {
+        let now = unix_now();
+        let changed = self
+            .conn
+            .execute(
+                "INSERT INTO video_metadata_raw (video_id, fetched_at, raw_json)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(video_id) DO UPDATE SET
+                     fetched_at = excluded.fetched_at,
+                     raw_json   = excluded.raw_json",
+                params![video_id, now, envelope_json],
+            )
+            .with_context(|| format!("upsert_metadata_raw for {video_id}"))?;
+        Ok(changed)
+    }
+
+    /// Apply one loader batch in a single transaction (Epic 4c). Overwrites
+    /// unconditionally — last-write-wins replay semantics, so re-running
+    /// `load-metadata` after a parser fix needs no re-fetch. Returns the
+    /// total row-change count per 0006; a row whose video_id no longer
+    /// exists in `videos` contributes 0 (the loader counts it as
+    /// `rows_without_video`, it is not an error).
+    ///
+    /// Note the deliberate absence of a status/claim guard: unlike the
+    /// pipeline mutators (0023), this runs post-run against rows in any
+    /// lifecycle state, and touches only descriptive columns.
+    pub fn apply_metadata_batch(&mut self, rows: &[MetadataColumns]) -> Result<usize> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("begin immediate for apply_metadata_batch")?;
+        let mut changed = 0usize;
+        {
+            let mut stmt = tx
+                .prepare_cached(
+                    "UPDATE videos SET
+                         video_description = ?2, uploader = ?3, uploader_id = ?4,
+                         video_created_at = ?5, view_count = ?6, like_count = ?7,
+                         comment_count = ?8, metadata_fetched_at = ?9
+                     WHERE video_id = ?1",
+                )
+                .context("prepare apply_metadata_batch")?;
+            for row in rows {
+                changed += stmt
+                    .execute(params![
+                        row.video_id,
+                        row.video_description,
+                        row.uploader,
+                        row.uploader_id,
+                        row.video_created_at,
+                        row.view_count,
+                        row.like_count,
+                        row.comment_count,
+                        row.metadata_fetched_at,
+                    ])
+                    .with_context(|| format!("apply_metadata_batch for {}", row.video_id))?;
+            }
+        }
+        tx.commit().context("commit apply_metadata_batch")?;
         Ok(changed)
     }
 

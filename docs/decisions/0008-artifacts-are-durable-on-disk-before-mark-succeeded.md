@@ -14,13 +14,15 @@ priority: invariant
 
 The pipeline writes both transcript artifacts (`.txt`, then `.json`) via
 `output::artifacts::atomic_write` and only then calls `mark_succeeded` —
-the DB acknowledges success last. `write_artifacts_and_mark`
-(`src/pipeline/mod.rs`) owns this ordering for every pipeline variant.
+the DB acknowledges success last. The pair `write_artifacts_durable` →
+`mark_after_artifacts` (`src/pipeline/mod.rs`) owns this ordering for
+every pipeline variant.
 
 ## Guidance
 
 - Review rejects any reordering that can produce a `succeeded` row without both artifacts on disk — that state is silent corruption with no recovery path short of manual DB surgery, whereas `in_progress` with partial artifacts is always recoverable by re-claim.
-- `atomic_write` stays idempotent (write tmp → fsync → rename → fsync parent) so a recovery re-run safely overwrites partial artifacts; keep new artifact kinds on the same helper.
+- `write_artifacts_durable` takes no store handle and must keep none: callers run it outside any store lock (its two file fsyncs plus a directory fsync would otherwise serialize every other worker's claim/failure dispatch) and lock only around `mark_after_artifacts`. `write_artifacts_and_mark` is their composition, kept for the serial path; the pipelined transcribe worker calls the halves directly. Re-merging the two under one lock is a rejected simplification.
+- `atomic_write` stays idempotent (write tmp → fsync → rename → fsync parent) so a recovery re-run safely overwrites partial artifacts, and its tmp name is unique per process and per call (`{name}.tmp-{pid}-{seq}`) so a concurrent writer of the same target renames its own complete file instead of clobbering another's in-flight one; keep new artifact kinds on the same helper.
 - Any future mutator combining DB state with on-disk artifacts inherits the same shape: disk first, DB acknowledgement last.
 - A cancellation or crash mid-write must still leave the ordering intact (the pipelined transcribe worker relies on this inside its cancel window).
 

@@ -72,7 +72,15 @@ finding 3 → Epic 5, finding 4 → Plan C (see those groups below).
 - Transcript-storage assessment: pipelined transcribe worker holds Store mutex across artifact writes+fsyncs though only `mark_succeeded` needs it (0008-ordering-sensitive; own reviewed change) → Epic 5 (perf sweep)
 - Epic 4b final review: status polish + test-debt bundle (`render_event_detail_inline` non-string fallback, missing test fixtures, `run_verify` `e.ok()` miscount, `--respondent-id` typo silently zero-fills, mid-file `use` in status.rs) → Epic 5 hygiene bundle
 - Epic 4b final review: `ingest --dry-run` is not dry — pre-existing wart, raised stakes now that `ingest` takes window flags → Epic 5
+- Epic 4c operator review: `main.rs` re-declares the library's entire module tree (double compilation, broadened `pub` surface, a driver of the accumulated `dead_code` allows) → Epic 5 hygiene bundle (cites ADR-0002's deferred bin/lib reassessment)
+- Epic 4c T05 review: startup `cleanup_tmp_files` sweep can delete a concurrent live process's in-flight tmp — pre-existing, multi-process deployments only → Epic 5 (bundle with the `cleanup_tmp_files` polish entry)
+- Epic 4c T03 review: `upsert_metadata_raw` is not claim-guarded — a stale worker can overwrite a newer envelope (accepted last-write-wins tradeoff; snapshot staleness only, self-heals) → Epic 5
 - Full Epic 5 entries: [followups/epic-5.md](followups/epic-5.md)
+
+**Production run (operational milestones, not code epics)**
+- Epic 4c close: capacity estimate for the production batch — 2,982,471 uniques, throughput / window narrowing / disk (`video_metadata_raw` ~3–6 GB, transient WAVs) → before the first non-pilot `process` batch
+- Epic 4c close: `video_metadata_raw` prune / VACUUM decision — keep for re-parse, prune for export, or reclaim in place → after the first production batch's `load-metadata` completes
+- Full production-run entries: [followups/production-run.md](followups/production-run.md)
 
 **Plan C (short-link resolution, multi-engine, storage scale)**
 - T5: `SHORT_LINK_RE` query parameters → Plan C (short-link resolution lands)

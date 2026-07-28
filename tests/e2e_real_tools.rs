@@ -26,6 +26,14 @@ use std::process::Command;
 use ddp_transcribe::output::artifacts::EXPECTED_RAW_SIGNALS_SCHEMA_VERSION;
 use tempfile::TempDir;
 
+/// The URL both ignored tests fetch. Override with `DDP_TRANSCRIBE_E2E_URL`;
+/// the compiled-in default is a placeholder ID, so a real manual run must
+/// set the variable to a known-good public TikTok video.
+fn e2e_url() -> String {
+    std::env::var("DDP_TRANSCRIBE_E2E_URL")
+        .unwrap_or_else(|_| "https://www.tiktokv.com/share/video/7234567890123456789/".into())
+}
+
 #[test]
 #[ignore]
 fn end_to_end_one_known_url() {
@@ -38,8 +46,7 @@ fn end_to_end_one_known_url() {
     // with a known long-lived public TikTok video; document the choice in README.
     let respondent_file =
         inbox.join("assignment=1_task=1_participant=test_source=tiktok_key=1-tiktok.json");
-    let url = std::env::var("DDP_TRANSCRIBE_E2E_URL")
-        .unwrap_or_else(|_| "https://www.tiktokv.com/share/video/7234567890123456789/".into());
+    let url = e2e_url();
     let payload = format!(
         r#"[
             {{"tiktok_watch_history": [
@@ -167,6 +174,76 @@ fn end_to_end_one_known_url() {
         total_tokens > 0,
         "real audio should produce at least one token across all segments — got {} segments with 0 tokens total",
         segments.len()
+    );
+}
+
+/// Epic 4c: a real fetch captures a parseable metadata envelope. Ignored —
+/// needs network + yt-dlp on PATH (no whisper model, no CUDA: this drives
+/// `YtDlpFetcher::acquire` directly, not the full pipeline). Run manually:
+///
+/// ```text
+/// DDP_TRANSCRIBE_E2E_URL=<real url> cargo test --test e2e_real_tools \
+///     real_fetch_captures_metadata_envelope -- --ignored --test-threads=1
+/// ```
+///
+/// This is also the designated re-verification hook after a yt-dlp upgrade:
+/// the `--print` template's field names are yt-dlp's info-dict keys, and a
+/// rename upstream would silently empty the envelope's typed columns.
+#[tokio::test]
+#[ignore]
+async fn real_fetch_captures_metadata_envelope() {
+    let tmp = TempDir::new().unwrap();
+    let url = e2e_url();
+    // Whatever ID the URL carries; the fetcher only uses it for the work dir
+    // and the output template, and the assertions read `id` from yt-dlp's
+    // own printed line rather than from this string.
+    let video_id = url
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .expect("url has a last path segment")
+        .to_string();
+
+    let fetcher = ddp_transcribe::fetcher::ytdlp::YtDlpFetcher::new(
+        tmp.path(),
+        std::time::Duration::from_secs(300),
+    );
+    let opts = ddp_transcribe::fetcher::FetchOpts::default();
+
+    let (capture, outcome) = {
+        use ddp_transcribe::fetcher::VideoFetcher;
+        fetcher.acquire(&video_id, &url, &opts).await
+    };
+
+    // The envelope rides BOTH the success and the classified-failure path, so
+    // the metadata assertions do not depend on the download having succeeded.
+    // The outcome is reported only for diagnosis.
+    let capture = capture.unwrap_or_else(|| {
+        panic!("no metadata envelope captured (fetch outcome: {outcome:?})");
+    });
+
+    let envelope: serde_json::Value =
+        serde_json::from_str(&capture.envelope_json).expect("envelope is JSON");
+    assert_eq!(
+        envelope["schema"], 1,
+        "envelope schema version must be 1: {}",
+        capture.envelope_json
+    );
+
+    let printed_line = envelope["printed"]
+        .as_str()
+        .expect("envelope.printed is a string");
+    let printed: serde_json::Value =
+        serde_json::from_str(printed_line).expect("printed line is JSON");
+
+    assert!(
+        !printed["id"].as_str().unwrap_or("").is_empty(),
+        "printed id must be a non-empty string: {printed_line}"
+    );
+    assert!(
+        !printed["description"].is_null(),
+        "printed description must not be null — it is the creator caption text \
+         that populates videos.video_description: {printed_line}"
     );
 }
 

@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: &str = "4";
+pub const SCHEMA_VERSION: &str = "5";
 
 pub const SCHEMA_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS videos (
@@ -25,6 +25,18 @@ CREATE TABLE IF NOT EXISTS videos (
     last_retryable_message  TEXT,
     terminal_reason         TEXT,
     terminal_message        TEXT,
+    -- Plan B Epic 4c (schema v5): typed metadata columns populated by the
+    -- post-run `load-metadata` subcommand from video_metadata_raw blobs.
+    -- All nullable; NULL = never loaded. metadata_fetched_at records the
+    -- capture moment (engagement counts are point-in-time snapshots).
+    video_description   TEXT,
+    uploader            TEXT,
+    uploader_id         TEXT,
+    video_created_at    INTEGER,
+    view_count          INTEGER,
+    like_count          INTEGER,
+    comment_count       INTEGER,
+    metadata_fetched_at INTEGER,
     first_seen_at       INTEGER NOT NULL,
     updated_at          INTEGER NOT NULL
 );
@@ -75,5 +87,17 @@ CREATE TABLE IF NOT EXISTS batch_runs (
     params_json  TEXT NOT NULL,
     policy_toml  TEXT NOT NULL,
     census_json  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS video_metadata_raw (
+    -- Raw fetch-time metadata envelope (Epic 4c): versioned JSON wrapping
+    -- yt-dlp's --print output UNPARSED: a schema + printed pair, nothing
+    -- else (captions descoped 2026-07-28).
+    -- One row per unique video, last-write-wins across retries. Parsed
+    -- only by `load-metadata` — replayable without re-fetch.
+    video_id   TEXT PRIMARY KEY NOT NULL,
+    fetched_at INTEGER NOT NULL,
+    raw_json   TEXT NOT NULL,
+    FOREIGN KEY (video_id) REFERENCES videos(video_id)
 );
 ";

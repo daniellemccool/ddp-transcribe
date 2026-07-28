@@ -1,6 +1,6 @@
 # ddp-transcribe — data input
 
-The data-input subsystem covers two stages of the donor's journey: ingest (parsing the TikTok DDP export into rows the state machine can claim) and fetch (downloading the watched-video MP4 and extracting audio for transcription).
+The data-input subsystem covers two stages of the donor's journey: ingest (parsing the TikTok DDP export into rows the state machine can claim) and fetch (downloading the watched-video MP4, extracting audio for transcription, and capturing the video's metadata envelope). A post-run loader (`load-metadata`) turns the captured envelopes into typed columns; it is described at the end of the fetcher section.
 
 ## Ingest
 
@@ -61,7 +61,7 @@ Both tables use `INSERT OR IGNORE` (`src/state/mod.rs:169, 189`), so re-running 
 
 ## Fetcher
 
-The fetcher downloads each claimed video using `yt-dlp` as a subprocess. The orchestrator's fetch workers each invoke the fetcher once per claim; the fetcher returns the local path of the downloaded audio file (or an error), and the file is passed downstream for transcription. Subprocess output is bounded per [ADR 0021](../../decisions/0021-subprocess-output-capture-is-bounded-by-construction.md) — output streams are drained fully to prevent child processes from blocking, with stderr retaining the trailing 8 KiB and stdout discarded.
+The fetcher downloads each claimed video using `yt-dlp` as a subprocess. The orchestrator's fetch workers each invoke the fetcher once per claim; the fetcher returns a `(Option<MetadataCapture>, Result<Acquisition, FetchError>)` pair — the raw metadata envelope alongside the local path of the downloaded audio file (or an error) — and the audio file is passed downstream for transcription. Subprocess output is bounded per [ADR 0021](../../decisions/0021-subprocess-output-capture-is-bounded-by-construction.md) — output streams are drained fully to prevent child processes from blocking, with stderr retaining the trailing 8 KiB and stdout retaining the trailing 64 KiB (Epic 4c; stdout retention was 0 before the metadata capture landed).
 
 ### Subprocess wrapping pattern
 
@@ -79,7 +79,9 @@ The flag list is built in the pure function `build_yt_dlp_args` (`src/fetcher/yt
 
 - `--no-playlist` — prevents yt-dlp from expanding a single URL into a playlist. TikTok URLs sometimes resolve to a creator feed; this ensures we fetch only the specific video.
 
-- `--no-warnings` and `--quiet` — suppress yt-dlp's informational output. yt-dlp writes audio to a file; stdout is not used for the output artifact, and noise in stderr would crowd out real error messages.
+- `--no-warnings` and `--quiet` — suppress yt-dlp's informational output. yt-dlp writes audio to a file; stdout carries only the metadata print line (below), and noise in stderr would crowd out real error messages.
+
+- `--no-simulate --print "%(.{id,title,description,uploader,uploader_id,channel_id,timestamp,duration,view_count,like_count,comment_count,repost_count})j"` — the Epic 4c metadata capture ([ADR 0042](../../decisions/0042-fetch-time-metadata-is-captured-raw-first-parsing-is-a-replayable-post-run-step.md)). `--print` implies `--simulate` unless `--no-simulate` is passed, so both flags are required for the download to still happen. The template is a field-limited dict print of the info dict yt-dlp has already extracted for the download — one line of JSON (~615 B measured live 2026-07-28), with the bulky `formats`/`thumbnails` arrays deliberately excluded. It costs **zero extra network requests and no second invocation**. The template is stored as `METADATA_PRINT_TEMPLATE` (`src/fetcher/ytdlp.rs`); a unit test asserts it names neither `subtitles` nor `automatic_captions` — caption/subtitle collection is a deliberate non-goal (see below).
 
 - `-f download/b[vcodec=h264]/b` — format selector with two fallbacks. `download` is TikTok's pre-rendered share-link MP4 (h264 at ~540p, pre-muxed, served as a static asset). This is preferred over the `bitrateInfo` ABR variants, which intermittently mux h265-video-only files despite being tagged `acodec=aac` by yt-dlp's extractor (yt-dlp issues #15891/#16622). The fallback `b[vcodec=h264]` handles videos where the `download` format is absent (creator-disabled downloads); `b` is the last-resort.
 
@@ -102,7 +104,7 @@ The flag list is built in the pure function `build_yt_dlp_args` (`src/fetcher/yt
 The fetcher configures these caps asymmetrically (`src/fetcher/ytdlp.rs:102–103`):
 
 - **stderr**: `stderr_capture_bytes: 8 * 1024` — the last 8 KiB is retained and surfaced in `CommandOutcome.stderr_excerpt`. This is what appears in `FetchError::ToolFailed.stderr_excerpt` on failure.
-- **stdout**: `stdout_capture_bytes: 0` — stdout is drained to prevent the child blocking on a full pipe, but no bytes are retained (`CommandOutcome.stdout == None`). yt-dlp writes audio to a file, not stdout, so the discard is intentional.
+- **stdout**: `stdout_capture_bytes: 64 * 1024` (the `STDOUT_CAP` constant, `src/fetcher/ytdlp.rs`) — the `--print` line is the only thing yt-dlp writes there under `--quiet`, and 64 KiB is ~100× the measured line length. The cap doubles as a corruption detector: `read_bounded` keeps the *last* `cap` bytes, so a buffer filled to the cap means the head was dropped and the line is unparseable — `build_metadata_envelope` returns `None` in that case rather than storing a truncated blob.
 
 Both streams are still drained concurrently via `tokio::try_join!` (`src/process.rs:178`) so neither can block. The asymmetry in *retention* is specific to the fetcher's call site; the `run` helper itself is symmetric-capable. The *why* for bounded capture is covered by [ADR 0021](../../decisions/0021-subprocess-output-capture-is-bounded-by-construction.md).
 
@@ -129,7 +131,20 @@ After a yt-dlp invocation, the fetcher distinguishes two exit paths from `proces
 
 The fetcher does not extract audio itself via a separate subprocess. Audio extraction is delegated to yt-dlp's own ffmpeg post-processor through the `-x --audio-format wav --postprocessor-args` flags described above. By the time `YtDlpFetcher::acquire` returns, the artifact on disk is already a WAV file.
 
-The `Acquisition::AudioFile(PathBuf)` returned by `acquire` (`src/fetcher/mod.rs:12`) carries the path to this WAV. The **fetch** worker decodes it via `src/audio::decode_wav` (`src/audio.rs:43`, called inside `fetch_and_decode` at `src/pipeline/mod.rs:158`), which validates the format (16 kHz, mono) and decodes the PCM samples to `Vec<f32>`; the decoded samples (not the WAV path) are what travel to the transcribe worker over the channel. The format contract — 16 kHz mono float32 in `[-1.0, 1.0]` — is documented in [ADR 0014](../../decisions/0014-audio-input-invariant-float32-pcm-16-khz-mono-validated-at-decode.md); the conversion is the `/32768.0` normalisation at `src/audio.rs:74`. For what happens next, see [transcription.md](transcription.md).
+The `Acquisition::AudioFile(PathBuf)` returned by `acquire` (`src/fetcher/mod.rs`) carries the path to this WAV. The **fetch** worker decodes it via `src/audio::decode_wav` (`src/audio.rs:43`, called inside `fetch_and_decode` at `src/pipeline/mod.rs:158`), which validates the format (16 kHz, mono) and decodes the PCM samples to `Vec<f32>`; the decoded samples (not the WAV path) are what travel to the transcribe worker over the channel. The format contract — 16 kHz mono float32 in `[-1.0, 1.0]` — is documented in [ADR 0014](../../decisions/0014-audio-input-invariant-float32-pcm-16-khz-mono-validated-at-decode.md); the conversion is the `/32768.0` normalisation at `src/audio.rs:74`. For what happens next, see [transcription.md](transcription.md).
+
+### Metadata capture chain (Epic 4c)
+
+Every fetch also captures the video's metadata, raw-first, per [ADR 0042](../../decisions/0042-fetch-time-metadata-is-captured-raw-first-parsing-is-a-replayable-post-run-step.md). Four links:
+
+1. **Print** — the `--no-simulate --print <template>` pair above puts one line of JSON on the child's stdout, from the info dict the download already required. No extra request, no second invocation.
+2. **Envelope** — `build_metadata_envelope(stdout, cap)` (`src/fetcher/ytdlp.rs`) wraps that line **unparsed** in `{"schema":1,"printed":"<line>"}` and hands it back as `MetadataCapture { envelope_json }` (`src/fetcher/mod.rs`). It returns `None` — no row, a `warn!`, fetch unaffected — when stdout is absent, empty, or at the capture cap. Parsing is not the fetcher's job; `schema` is the loader's compatibility gate.
+3. **Persist** — the envelope is built **before** the exit-code check, so a yt-dlp that died mid-transfer still yields metadata (the print lands before the media transfer). Both pipeline paths — `fetch_worker` (`src/pipeline/pipelined.rs`) and `process_one` (`src/pipeline/serial.rs`) — call `Store::upsert_metadata_raw` **before** dispatching on the fetch outcome, so `video_metadata_raw` covers succeeded and classified-failure videos alike (tool failures, that is — timeouts and spawn failures lose the captured output; the retry self-heals). On the pipelined path the store lock is scoped to the insert alone.
+4. **Load** — nothing parses at runtime. The operator runs `ddp-transcribe load-metadata` after a batch; `src/metadata_loader.rs` streams `video_metadata_raw` in keyset pages of 10,000 (`Store::metadata_raw_page`), parses each envelope (`parse_envelope`), and writes the typed columns one transaction per page (`Store::apply_metadata_batch`). It is idempotent and replayable, and `--dry-run` reports real counts without writing.
+
+**The best-effort invariant.** Metadata never creates a new failure mode. Capture failure logs and stores nothing; insert failure logs and continues; a parse failure increments `LoadStats::rows_skipped_unparseable` and moves to the next row. At no point can a metadata error change a video's status transition — that is the ADR-0042 invariant, and review rejects code that breaches it.
+
+**What this does and does not collect.** The typed columns are `video_description` (the creator's caption text), `uploader`, `uploader_id`, `video_created_at`, `view_count`, `like_count`, `comment_count`, and `metadata_fetched_at` — the engagement counts are **point-in-time snapshots** taken at the moment named by `metadata_fetched_at`, not current values. The printed set is deliberately wider than the columns (`title`, `channel_id`, `duration`, `repost_count` stay raw-only) so a future column addition is a `load-metadata` re-run, not a re-fetch. **Not collected:** comments (Research API only, never available to this pipeline) and caption/subtitle tracks (operator descope, 2026-07-28 — see ADR 0042's alternatives for the evidence). Spoken content reaches the study only through whisper transcription, never through platform-served caption tracks.
 
 ---
 
@@ -143,3 +158,4 @@ The `Acquisition::AudioFile(PathBuf)` returned by `acquire` (`src/fetcher/mod.rs
 | 0037 | Operator-editable TOML classification table with compiled evidence-derived default | Drives the message-class labels/dispositions the fetch-side classifiers produce. |
 | 0039 | DDP timestamps are UTC-assumed, empirically unresolved | `parse_watched_at`; `watched_at_raw` is the hedge. |
 | 0040 | Analysis window computed at ingest; `recompute-window` is the only flag mutator | `--window-start`/`--window-end`; `watch_history.in_window`. |
+| 0042 | Fetch-time metadata is captured raw-first; parsing is a replayable post-run step | The `--print` capture chain, the `video_metadata_raw` envelope, and `load-metadata`'s parse. Cross-cuts the state machine (schema v5). |

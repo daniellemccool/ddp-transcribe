@@ -9,11 +9,11 @@
 - Create: `tests/load_metadata.rs` (binary + public-API integration tests; auto-discovered, NO Cargo.toml block)
 
 **Interfaces:**
-- Consumes (exact, landed in Task 01): `video_metadata_raw (video_id, fetched_at, raw_json)`; `videos` columns `video_description, uploader, uploader_id, video_created_at, view_count, like_count, comment_count, captions_json, metadata_fetched_at`; envelope contract `{"schema":1,"printed":"<json string>","captions":{name:content}|null}` where `printed` parses to yt-dlp fields `id,title,description,uploader,uploader_id,channel_id,timestamp,duration,view_count,like_count,comment_count,repost_count,subtitles,automatic_captions` (any may be null/absent).
+- Consumes (exact, landed in Task 01): `video_metadata_raw (video_id, fetched_at, raw_json)`; `videos` columns (8) `video_description, uploader, uploader_id, video_created_at, view_count, like_count, comment_count, metadata_fetched_at`; envelope contract `{"schema":1,"printed":"<json string>"}` where `printed` parses to yt-dlp fields `id,title,description,uploader,uploader_id,channel_id,timestamp,duration,view_count,like_count,comment_count,repost_count` (any may be null/absent). Captions/subtitles are descoped (operator decision 2026-07-28) — the envelope has no `captions` key and `videos` has no `captions_json` column.
 - Produces:
   - `queries.rs`: `pub struct RawMetadataRow { pub video_id: String, pub fetched_at: i64, pub raw_json: String }` and `Store::metadata_raw_page(&self, after_video_id: Option<&str>, limit: usize) -> anyhow::Result<Vec<RawMetadataRow>>` (keyset pagination `WHERE video_id > ?`, `ORDER BY video_id`, read-only).
-  - `state/mod.rs`: `pub struct MetadataColumns { pub video_id: String, pub video_description: Option<String>, pub uploader: Option<String>, pub uploader_id: Option<String>, pub video_created_at: Option<i64>, pub view_count: Option<i64>, pub like_count: Option<i64>, pub comment_count: Option<i64>, pub captions_json: Option<String>, pub metadata_fetched_at: i64 }` and `Store::apply_metadata_batch(&mut self, rows: &[MetadataColumns]) -> anyhow::Result<usize>` (one transaction per call, `prepare_cached` UPDATE, returns total changed per ADR-0006).
-  - `metadata_loader.rs`: `pub struct LoadStats { pub rows_examined: u64, pub rows_loaded: u64, pub rows_skipped_unparseable: u64, pub rows_without_video: u64, pub captions_embedded: u64 }` (input-side, verb-named per ADR-0007, `Serialize` + `Display`) and `pub fn load_metadata(store: &mut Store, dry_run: bool) -> anyhow::Result<LoadStats>`.
+  - `state/mod.rs`: `pub struct MetadataColumns { pub video_id: String, pub video_description: Option<String>, pub uploader: Option<String>, pub uploader_id: Option<String>, pub video_created_at: Option<i64>, pub view_count: Option<i64>, pub like_count: Option<i64>, pub comment_count: Option<i64>, pub metadata_fetched_at: i64 }` and `Store::apply_metadata_batch(&mut self, rows: &[MetadataColumns]) -> anyhow::Result<usize>` (one transaction per call, `prepare_cached` UPDATE, returns total changed per ADR-0006).
+  - `metadata_loader.rs`: `pub struct LoadStats { pub rows_examined: u64, pub rows_loaded: u64, pub rows_skipped_unparseable: u64, pub rows_without_video: u64 }` (input-side, verb-named per ADR-0007, `Serialize` + `Display`) and `pub fn load_metadata(store: &mut Store, dry_run: bool) -> anyhow::Result<LoadStats>`.
 
 **Semantics (binding):**
 - Streaming: pages of 10,000 raw rows via keyset pagination — never collect the whole table (6–12 GB at production scale).
@@ -21,7 +21,7 @@
 - Unparseable envelope or unparseable `printed` ⇒ `rows_skipped_unparseable += 1`, warn-log with video_id, continue. NEVER fatal (epic invariant).
 - `apply_metadata_batch` UPDATE matching 0 rows (raw row exists but the videos row is gone) ⇒ counted via `rows_without_video` (computed as batch-size minus changed-count), not an error.
 - `--dry-run`: full examine/parse pass, all stats real, zero writes.
-- Field mapping: `description`→`video_description`; `uploader`→`uploader`; `uploader_id`→`uploader_id`; `timestamp`→`video_created_at`; `view_count`/`like_count`/`comment_count` direct; envelope `captions` (when non-null) re-serialized to `captions_json` and `captions_embedded += 1`. `title`, `channel_id`, `duration`, `repost_count`, `subtitles`, `automatic_captions` stay raw-only (deliberately wider print set).
+- Field mapping: `description`→`video_description`; `uploader`→`uploader`; `uploader_id`→`uploader_id`; `timestamp`→`video_created_at`; `view_count`/`like_count`/`comment_count` direct. `title`, `channel_id`, `duration`, `repost_count` stay raw-only (deliberately wider print set).
 
 - [ ] **Step 1: Write the failing loader unit tests**
 
@@ -30,7 +30,7 @@ In `src/metadata_loader.rs` `mod tests` (write the module skeleton first: types 
 ```rust
     #[test]
     fn parse_envelope_maps_printed_fields_to_columns() {
-        let envelope = r#"{"schema":1,"printed":"{\"id\":\"v1\",\"description\":\"hello #tag\",\"uploader\":\"acct\",\"uploader_id\":\"123\",\"timestamp\":1768924271,\"view_count\":9900000,\"like_count\":572300,\"comment_count\":865}","captions":null}"#;
+        let envelope = r#"{"schema":1,"printed":"{\"id\":\"v1\",\"description\":\"hello #tag\",\"uploader\":\"acct\",\"uploader_id\":\"123\",\"timestamp\":1768924271,\"view_count\":9900000,\"like_count\":572300,\"comment_count\":865}"}"#;
         let cols = parse_envelope("v1", 1753700000, envelope).expect("parses");
         assert_eq!(cols.video_id, "v1");
         assert_eq!(cols.video_description.as_deref(), Some("hello #tag"));
@@ -40,31 +40,22 @@ In `src/metadata_loader.rs` `mod tests` (write the module skeleton first: types 
         assert_eq!(cols.view_count, Some(9_900_000));
         assert_eq!(cols.like_count, Some(572_300));
         assert_eq!(cols.comment_count, Some(865));
-        assert!(cols.captions_json.is_none());
         assert_eq!(cols.metadata_fetched_at, 1753700000);
     }
 
     #[test]
     fn parse_envelope_absent_fields_become_null() {
-        let envelope = r#"{"schema":1,"printed":"{\"id\":\"v1\"}","captions":null}"#;
+        let envelope = r#"{"schema":1,"printed":"{\"id\":\"v1\"}"}"#;
         let cols = parse_envelope("v1", 1, envelope).expect("parses");
         assert!(cols.video_description.is_none() && cols.view_count.is_none());
     }
 
     #[test]
-    fn parse_envelope_carries_captions_json() {
-        let envelope = r#"{"schema":1,"printed":"{\"id\":\"v1\"}","captions":{"v1.en.vtt":"WEBVTT body"}}"#;
-        let cols = parse_envelope("v1", 1, envelope).expect("parses");
-        let cj = cols.captions_json.expect("captions serialized");
-        assert!(cj.contains("v1.en.vtt") && cj.contains("WEBVTT body"));
-    }
-
-    #[test]
     fn parse_envelope_rejects_garbage_and_bad_printed() {
         assert!(parse_envelope("v1", 1, "not json").is_none());
-        assert!(parse_envelope("v1", 1, r#"{"schema":1,"printed":"not json","captions":null}"#).is_none());
+        assert!(parse_envelope("v1", 1, r#"{"schema":1,"printed":"not json"}"#).is_none());
         // Unknown future schema version: skip, don't guess.
-        assert!(parse_envelope("v1", 1, r#"{"schema":2,"printed":"{}","captions":null}"#).is_none());
+        assert!(parse_envelope("v1", 1, r#"{"schema":2,"printed":"{}"}"#).is_none());
     }
 ```
 
@@ -97,20 +88,17 @@ pub struct LoadStats {
     pub rows_skipped_unparseable: u64,
     /// Parsed rows whose videos row no longer exists (UPDATE matched 0).
     pub rows_without_video: u64,
-    /// Rows carrying an embedded caption map.
-    pub captions_embedded: u64,
 }
 
 impl std::fmt::Display for LoadStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "examined {} / loaded {} / skipped-unparseable {} / without-video {} / captions {}",
+            "examined {} / loaded {} / skipped-unparseable {} / without-video {}",
             self.rows_examined,
             self.rows_loaded,
             self.rows_skipped_unparseable,
-            self.rows_without_video,
-            self.captions_embedded
+            self.rows_without_video
         )
     }
 }
@@ -119,7 +107,6 @@ impl std::fmt::Display for LoadStats {
 struct Envelope {
     schema: u32,
     printed: String,
-    captions: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// The typed subset of yt-dlp's printed fields the loader maps to columns.
@@ -143,10 +130,6 @@ fn parse_envelope(video_id: &str, fetched_at: i64, raw_json: &str) -> Option<Met
         return None;
     }
     let printed: PrintedFields = serde_json::from_str(&env.printed).ok()?;
-    let captions_json = match &env.captions {
-        Some(map) => Some(serde_json::to_string(map).ok()?),
-        None => None,
-    };
     Some(MetadataColumns {
         video_id: video_id.to_string(),
         video_description: printed.description,
@@ -156,7 +139,6 @@ fn parse_envelope(video_id: &str, fetched_at: i64, raw_json: &str) -> Option<Met
         view_count: printed.view_count,
         like_count: printed.like_count,
         comment_count: printed.comment_count,
-        captions_json,
         metadata_fetched_at: fetched_at,
     })
 }
@@ -176,12 +158,7 @@ pub fn load_metadata(store: &mut Store, dry_run: bool) -> Result<LoadStats> {
         for row in &page {
             stats.rows_examined += 1;
             match parse_envelope(&row.video_id, row.fetched_at, &row.raw_json) {
-                Some(cols) => {
-                    if cols.captions_json.is_some() {
-                        stats.captions_embedded += 1;
-                    }
-                    batch.push(cols);
-                }
+                Some(cols) => batch.push(cols),
                 None => {
                     stats.rows_skipped_unparseable += 1;
                     tracing::warn!(video_id = row.video_id.as_str(), "unparseable metadata envelope; skipped");
@@ -259,7 +236,6 @@ pub struct MetadataColumns {
     pub view_count: Option<i64>,
     pub like_count: Option<i64>,
     pub comment_count: Option<i64>,
-    pub captions_json: Option<String>,
     pub metadata_fetched_at: i64,
 }
 
@@ -279,7 +255,7 @@ pub struct MetadataColumns {
                 "UPDATE videos SET
                      video_description = ?2, uploader = ?3, uploader_id = ?4,
                      video_created_at = ?5, view_count = ?6, like_count = ?7,
-                     comment_count = ?8, captions_json = ?9, metadata_fetched_at = ?10
+                     comment_count = ?8, metadata_fetched_at = ?9
                  WHERE video_id = ?1",
             )?;
             for row in rows {
@@ -293,7 +269,6 @@ pub struct MetadataColumns {
                         row.view_count,
                         row.like_count,
                         row.comment_count,
-                        row.captions_json,
                         row.metadata_fetched_at,
                     ])
                     .with_context(|| format!("apply_metadata_batch for {}", row.video_id))?;
@@ -362,7 +337,7 @@ fn seeded_db(dir: &tempfile::TempDir) -> std::path::PathBuf {
     store
         .upsert_metadata_raw(
             "vid_a",
-            r#"{"schema":1,"printed":"{\"id\":\"vid_a\",\"description\":\"desc A\",\"uploader\":\"acct\",\"timestamp\":1768924271,\"view_count\":42}","captions":null}"#,
+            r#"{"schema":1,"printed":"{\"id\":\"vid_a\",\"description\":\"desc A\",\"uploader\":\"acct\",\"timestamp\":1768924271,\"view_count\":42}"}"#,
         )
         .unwrap();
     store

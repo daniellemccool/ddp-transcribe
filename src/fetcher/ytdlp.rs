@@ -4,7 +4,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::errors::FetchError;
-use crate::fetcher::{Acquisition, FetchOpts, FetchPolicy, VideoFetcher};
+use crate::fetcher::{Acquisition, FetchOpts, FetchPolicy, MetadataCapture, VideoFetcher};
 use crate::process::{run, CommandSpec};
 
 pub struct YtDlpFetcher {
@@ -22,6 +22,21 @@ impl YtDlpFetcher {
         }
     }
 }
+
+/// Field-limited dict print (Epic 4c). One line of JSON (~0.6 KB measured
+/// live 2026-07-28) from the info dict yt-dlp already holds — the bulky
+/// `formats`/`thumbnails` arrays are deliberately excluded. The printed
+/// set is wider than the typed schema-v5 columns; extras live only in the
+/// raw envelope, available to future re-parses without re-fetch.
+///
+/// `--print` costs zero extra network requests, unconditionally: the info
+/// dict is already extracted for the download, and metadata capture adds
+/// no second yt-dlp invocation of any kind.
+///
+/// Captions/subtitles are deliberately absent (operator descope
+/// 2026-07-28): nothing here requests them, so `subtitles` and
+/// `automatic_captions` would be permanently empty were they listed.
+pub(crate) const METADATA_PRINT_TEMPLATE: &str = "%(.{id,title,description,uploader,uploader_id,channel_id,timestamp,duration,view_count,like_count,comment_count,repost_count})j";
 
 /// Build the yt-dlp argv and the expected output WAV path for a single video.
 ///
@@ -90,6 +105,14 @@ fn build_yt_dlp_args(
         "--no-playlist".into(),
         "--no-warnings".into(),
         "--quiet".into(),
+        // Epic 4c metadata capture: --print implies --simulate unless
+        // --no-simulate is passed; the printed line lands on stdout before
+        // the media transfer, so tool-failure outcomes still carry it.
+        // These two flags cost zero extra network requests — the info dict
+        // is already extracted for the download.
+        "--no-simulate".into(),
+        "--print".into(),
+        METADATA_PRINT_TEMPLATE.into(),
         "-f".into(),
         selector.into(),
         // T7 perf-tweaks: `-S` only affects format ordering within a
@@ -143,6 +166,36 @@ fn scrub_cookie_path(excerpt: String, cookies: Option<&Path>) -> String {
     }
 }
 
+/// Build the versioned raw envelope (Epic 4c). Returns `None` when there is
+/// nothing trustworthy to store: no capture, empty stdout, or stdout at the
+/// capture bound (the bounded reader keeps the LAST `cap` bytes, so a full
+/// buffer means the head was dropped ⇒ unparseable). The printed line is
+/// embedded UNPARSED — parsing is `load-metadata`'s job, replayably.
+///
+/// Shape: `{"schema":1,"printed":"<unparsed line>"}`. `schema` is the
+/// loader's compatibility gate.
+fn build_metadata_envelope(stdout: Option<&[u8]>, capture_cap: usize) -> Option<String> {
+    let bytes = stdout?;
+    if bytes.is_empty() || bytes.len() >= capture_cap {
+        return None;
+    }
+    let printed = String::from_utf8_lossy(bytes);
+    let printed = printed.trim_end_matches(['\n', '\r']);
+    if printed.is_empty() {
+        return None;
+    }
+
+    #[derive(serde::Serialize)]
+    struct MetadataEnvelope<'a> {
+        schema: u32,
+        printed: &'a str,
+    }
+    let env = MetadataEnvelope { schema: 1, printed };
+    // Serialization of strings cannot fail in practice; treat an error as
+    // "no envelope" per the never-a-new-failure-mode invariant.
+    serde_json::to_string(&env).ok()
+}
+
 #[async_trait]
 impl VideoFetcher for YtDlpFetcher {
     async fn acquire(
@@ -150,13 +203,18 @@ impl VideoFetcher for YtDlpFetcher {
         video_id: &str,
         source_url: &str,
         opts: &FetchOpts,
-    ) -> Result<Acquisition, FetchError> {
+    ) -> (Option<MetadataCapture>, Result<Acquisition, FetchError>) {
         // Per-video tmp dir keeps yt-dlp's intermediate files contained.
         let video_dir = self.work_dir.join(format!("ytdlp-{video_id}"));
-        std::fs::create_dir_all(&video_dir).map_err(|e| FetchError::WorkDirCreate {
-            path: video_dir.clone(),
-            detail: e.to_string(),
-        })?;
+        if let Err(e) = std::fs::create_dir_all(&video_dir) {
+            return (
+                None,
+                Err(FetchError::WorkDirCreate {
+                    path: video_dir.clone(),
+                    detail: e.to_string(),
+                }),
+            );
+        }
 
         let (args, wav_path, redact) = build_yt_dlp_args(
             video_id,
@@ -166,32 +224,54 @@ impl VideoFetcher for YtDlpFetcher {
             opts.cookies_file.as_deref(),
         );
 
-        let outcome = run(CommandSpec {
+        const STDOUT_CAP: usize = 64 * 1024;
+        let outcome = match run(CommandSpec {
             program: "yt-dlp",
             args,
             timeout: self.timeout,
             stderr_capture_bytes: 8 * 1024,
-            stdout_capture_bytes: 0, // yt-dlp writes audio to a file; stdout unused
+            stdout_capture_bytes: STDOUT_CAP, // Epic 4c: --print line captured
             redact_arg_indices: &redact,
         })
-        .await?;
+        .await
+        {
+            Ok(o) => o,
+            Err(e) => return (None, Err(e.into())),
+        };
+
+        // Epic 4c: build the envelope BEFORE interpreting exit status — the
+        // printed line lands pre-transfer, so mid-download deaths still
+        // yield metadata. Everything here is best-effort; the primary
+        // `outcome` above already decided this video's fate and nothing
+        // below can change it.
+        let capture = build_metadata_envelope(outcome.stdout.as_deref(), STDOUT_CAP)
+            .map(|envelope_json| MetadataCapture { envelope_json });
+        if capture.is_none() {
+            // Spec policy: empty/truncated/absent print output ⇒ no raw row,
+            // fetch proceeds normally, event logged (the loader independently
+            // skip-counts unparseable blobs on its side).
+            tracing::warn!(video_id, "no metadata envelope captured for this fetch");
+        }
 
         if outcome.exit_code != 0 {
             let stderr_excerpt =
                 scrub_cookie_path(outcome.stderr_excerpt, opts.cookies_file.as_deref());
-            return Err(FetchError::ToolFailed {
-                tool: "yt-dlp",
-                exit_code: outcome.exit_code,
-                signal: outcome.signal,
-                stderr_excerpt,
-            });
+            return (
+                capture,
+                Err(FetchError::ToolFailed {
+                    tool: "yt-dlp",
+                    exit_code: outcome.exit_code,
+                    signal: outcome.signal,
+                    stderr_excerpt,
+                }),
+            );
         }
 
         if !wav_path.exists() {
-            return Err(FetchError::MissingOutput { path: wav_path });
+            return (capture, Err(FetchError::MissingOutput { path: wav_path }));
         }
 
-        Ok(Acquisition::AudioFile(wav_path))
+        (capture, Ok(Acquisition::AudioFile(wav_path)))
     }
 
     fn name(&self) -> &'static str {
@@ -240,6 +320,59 @@ mod tests {
             args.get(s_idx + 1).map(String::as_str),
             Some("+size,+br,+res,+fps"),
             "fallback ordering: smallest size first, then bitrate, resolution, fps"
+        );
+    }
+
+    /// Epic 4c: the `--print` metadata flags ride the same invocation —
+    /// zero extra network requests, since the info dict is already
+    /// extracted for the download. `--no-simulate` is required or `--print`
+    /// would imply simulate mode and skip the download.
+    ///
+    /// Operator descope 2026-07-28: captions/subtitles are NOT collected.
+    /// No subtitle flag may appear on this argv — a subtitle download
+    /// failure raises `DownloadError` (fatal in the pinned yt-dlp), and
+    /// even listing-only capture (`--sub-langs "-all"`) spends the
+    /// primary's timeout budget on TikTok's `_get_subtitles`. Metadata
+    /// capture therefore adds exactly two flags and nothing else, so the
+    /// epic's never-a-new-failure-mode invariant holds by construction.
+    #[test]
+    fn build_args_includes_metadata_print_only() {
+        let video_dir = PathBuf::from("/tmp/test-dir");
+        let (args, _, _) = build_yt_dlp_args(
+            "abc123",
+            "https://example.com/v",
+            &video_dir,
+            FetchPolicy::default(),
+            None,
+        );
+        let p_idx = args
+            .iter()
+            .position(|a| a == "--print")
+            .expect("--print flag must be present");
+        assert_eq!(
+            args.get(p_idx + 1).map(String::as_str),
+            Some(METADATA_PRINT_TEMPLATE),
+        );
+        assert!(args.iter().any(|a| a == "--no-simulate"));
+
+        // Descoped: no subtitle surface at all.
+        for flag in ["--write-subs", "--write-auto-subs", "--sub-langs"] {
+            assert!(
+                !args.iter().any(|a| a == flag),
+                "{flag} must not appear: captions are descoped (2026-07-28)"
+            );
+        }
+        assert!(
+            !METADATA_PRINT_TEMPLATE.contains("subtitles")
+                && !METADATA_PRINT_TEMPLATE.contains("automatic_captions"),
+            "the print template must not request caption listings — nothing \
+             sets `writesubtitles`, so they could only ever be empty"
+        );
+
+        // Trailing positional is still the URL; cookie redaction unaffected.
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("https://example.com/v")
         );
     }
 
@@ -379,5 +512,34 @@ mod tests {
         let excerpt = "ERROR: some other failure".to_string();
         let scrubbed = scrub_cookie_path(excerpt.clone(), None);
         assert_eq!(scrubbed, excerpt);
+    }
+
+    /// Envelope contract after the 2026-07-28 descope:
+    /// `{"schema":1,"printed":"<unparsed line>"}` — two keys, no more.
+    #[test]
+    fn build_envelope_wraps_printed_line_unparsed() {
+        let stdout = b"{\"id\": \"123\", \"title\": \"t\"}\n".to_vec();
+        let env = build_metadata_envelope(Some(&stdout), 64 * 1024).expect("envelope");
+        let v: serde_json::Value = serde_json::from_str(&env).unwrap();
+        assert_eq!(v["schema"], 1);
+        assert_eq!(v["printed"], "{\"id\": \"123\", \"title\": \"t\"}");
+        let obj = v.as_object().expect("envelope is a JSON object");
+        assert!(
+            !obj.contains_key("captions"),
+            "captions are descoped: the key must be absent, not null"
+        );
+        assert_eq!(obj.len(), 2, "envelope carries exactly schema + printed");
+    }
+
+    #[test]
+    fn build_envelope_none_on_empty_or_truncated_stdout() {
+        // Empty stdout → no envelope.
+        assert!(build_metadata_envelope(Some(&[]), 64).is_none());
+        // At-the-bound stdout means the bounded reader may have dropped
+        // leading bytes (truncated ⇒ unparseable) → no envelope.
+        let at_cap = vec![b'x'; 64];
+        assert!(build_metadata_envelope(Some(&at_cap), 64).is_none());
+        // No capture at all → no envelope.
+        assert!(build_metadata_envelope(None, 64).is_none());
     }
 }

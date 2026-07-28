@@ -33,11 +33,9 @@ pub struct CommandOutcome {
     pub exit_code: i32,
     /// `None` when the caller set `stdout_capture_bytes == 0` (intentional
     /// discard); `Some(bounded Vec)` otherwise. The vec length is bounded
-    /// by `stdout_capture_bytes`. Per 0002, `#[allow(dead_code)]` retained
-    /// because the bin currently sets `stdout_capture_bytes: 0` at every
-    /// call site (yt-dlp); the field is part of the lib API surface,
-    /// exercised by the integration tests.
-    #[allow(dead_code)]
+    /// by `stdout_capture_bytes`. Consumed in production since Epic 4c:
+    /// `YtDlpFetcher::acquire` requests a 64 KB capture and reads this
+    /// field to build the raw metadata envelope (0002 allow lifted).
     pub stdout: Option<Vec<u8>>,
     pub stderr_excerpt: String,
     /// Unix signal that killed the child, when it did not exit normally

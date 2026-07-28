@@ -12,7 +12,7 @@
 - Produces (Tasks 03/04 rely on these EXACT items):
   - `Store::upsert_metadata_raw(&mut self, video_id: &str, envelope_json: &str) -> anyhow::Result<usize>` — INSERT-or-overwrite keyed by `video_id`, stamps `fetched_at = unix_now()`, returns row-change count per ADR-0006.
   - Schema v5: table `video_metadata_raw (video_id TEXT PRIMARY KEY NOT NULL, fetched_at INTEGER NOT NULL, raw_json TEXT NOT NULL, FOREIGN KEY (video_id) REFERENCES videos(video_id))`.
-  - `videos` nullable columns: `video_description TEXT`, `uploader TEXT`, `uploader_id TEXT`, `video_created_at INTEGER`, `view_count INTEGER`, `like_count INTEGER`, `comment_count INTEGER`, `captions_json TEXT`, `metadata_fetched_at INTEGER`.
+  - `videos` nullable columns (8): `video_description TEXT`, `uploader TEXT`, `uploader_id TEXT`, `video_created_at INTEGER`, `view_count INTEGER`, `like_count INTEGER`, `comment_count INTEGER`, `metadata_fetched_at INTEGER`. **`captions_json TEXT` was descoped 2026-07-28** — this task was already implemented, and the column was dropped from the v5 schema + ladder in-branch before merge; the list above is the shipped shape.
 
 - [ ] **Step 1: Write the failing migrate test**
 
@@ -71,7 +71,6 @@ In `src/state/schema.rs`: change line 1 to `pub const SCHEMA_VERSION: &str = "5"
     view_count          INTEGER,
     like_count          INTEGER,
     comment_count       INTEGER,
-    captions_json       TEXT,
     metadata_fetched_at INTEGER,
 ```
 
@@ -80,7 +79,8 @@ and append the new table after `batch_runs`:
 ```sql
 CREATE TABLE IF NOT EXISTS video_metadata_raw (
     -- Raw fetch-time metadata envelope (Epic 4c): versioned JSON wrapping
-    -- yt-dlp's --print output UNPARSED plus any embedded caption tracks.
+    -- yt-dlp's --print output UNPARSED: a schema + printed pair, nothing
+    -- else (captions descoped 2026-07-28).
     -- One row per unique video, last-write-wins across retries. Parsed
     -- only by `load-metadata` — replayable without re-fetch.
     video_id   TEXT PRIMARY KEY NOT NULL,
@@ -104,7 +104,6 @@ In `src/state/migrate.rs`, module doc: update "Today three stages exist (v1→v2
              ALTER TABLE videos ADD COLUMN view_count INTEGER;
              ALTER TABLE videos ADD COLUMN like_count INTEGER;
              ALTER TABLE videos ADD COLUMN comment_count INTEGER;
-             ALTER TABLE videos ADD COLUMN captions_json TEXT;
              ALTER TABLE videos ADD COLUMN metadata_fetched_at INTEGER;
              CREATE TABLE IF NOT EXISTS video_metadata_raw (
                  video_id   TEXT PRIMARY KEY NOT NULL,
@@ -113,7 +112,7 @@ In `src/state/migrate.rs`, module doc: update "Today three stages exist (v1→v2
                  FOREIGN KEY (video_id) REFERENCES videos(video_id)
              );",
         )
-        .context("v4→v5: metadata columns ×9 + video_metadata_raw table")?;
+        .context("v4→v5: metadata columns ×8 + video_metadata_raw table")?;
         version = "5".to_string();
     }
 ```
@@ -152,7 +151,7 @@ fn upsert_metadata_raw_inserts_and_returns_one() {
     let (mut store, db) = store_with_video(&dir);
 
     let n = store
-        .upsert_metadata_raw("vid_a", r#"{"schema":1,"printed":"{}","captions":null}"#)
+        .upsert_metadata_raw("vid_a", r#"{"schema":1,"printed":"{}"}"#)
         .unwrap();
     assert_eq!(n, 1);
 
@@ -173,9 +172,9 @@ fn upsert_metadata_raw_overwrites_last_write_wins() {
     let dir = tempfile::tempdir().unwrap();
     let (mut store, db) = store_with_video(&dir);
 
-    store.upsert_metadata_raw("vid_a", r#"{"schema":1,"printed":"first","captions":null}"#).unwrap();
+    store.upsert_metadata_raw("vid_a", r#"{"schema":1,"printed":"first"}"#).unwrap();
     let n = store
-        .upsert_metadata_raw("vid_a", r#"{"schema":1,"printed":"second","captions":null}"#)
+        .upsert_metadata_raw("vid_a", r#"{"schema":1,"printed":"second"}"#)
         .unwrap();
     assert_eq!(n, 1);
 

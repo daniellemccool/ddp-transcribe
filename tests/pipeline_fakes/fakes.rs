@@ -129,6 +129,7 @@ pub(crate) fn fails_n_times_then_succeeds(
             video_id.to_string(),
             n,
         )])),
+        canned_metadata: std::sync::Mutex::new(None),
     }
 }
 
