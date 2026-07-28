@@ -374,6 +374,35 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        cli::Command::RecomputeWindow {
+            window_start,
+            window_end,
+            clear,
+            dry_run,
+        } => {
+            let path = &cfg.state_db;
+            if !path.exists() {
+                anyhow::bail!(
+                    "recompute-window: state.sqlite not found at {}. Run `ddp-transcribe init` first.",
+                    path.display()
+                );
+            }
+            // --clear == both bounds None (everything in-window); clap
+            // guarantees clear XOR window flags.
+            let window = if clear {
+                ingest::WindowBounds::default()
+            } else {
+                ingest::WindowBounds::from_dates(window_start, window_end)
+            };
+            let mut store = state::Store::open(path).context("opening state DB")?;
+            if dry_run {
+                let n = store.count_window_mismatches(window.start, window.end_exclusive)?;
+                println!("recompute-window dry-run: would change {n} row(s)");
+            } else {
+                let n = store.recompute_window(window.start, window.end_exclusive)?;
+                println!("recompute-window: changed {n} row(s)");
+            }
+        }
     }
 
     Ok(())

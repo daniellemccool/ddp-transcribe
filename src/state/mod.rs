@@ -970,6 +970,53 @@ impl Store {
             )
             .context("close batch_runs row")
     }
+
+    /// One-shot in_window recomputation over ALL watch_history rows
+    /// (Epic 4b window ADR). Bounds are unix seconds: start inclusive,
+    /// end exclusive (the CLI derives them from inclusive calendar dates);
+    /// both None = clear (everything in-window). Returns the number of
+    /// rows whose flag actually changed, per 0006.
+    pub fn recompute_window(
+        &mut self,
+        start: Option<i64>,
+        end_exclusive: Option<i64>,
+    ) -> Result<usize> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE watch_history
+                 SET in_window = CASE WHEN (?1 IS NULL OR watched_at >= ?1)
+                                       AND (?2 IS NULL OR watched_at < ?2)
+                                  THEN 1 ELSE 0 END
+                 WHERE in_window != CASE WHEN (?1 IS NULL OR watched_at >= ?1)
+                                          AND (?2 IS NULL OR watched_at < ?2)
+                                     THEN 1 ELSE 0 END",
+                params![start, end_exclusive],
+            )
+            .context("recompute watch_history.in_window")?;
+        Ok(changed)
+    }
+
+    /// Dry-run companion to [`Store::recompute_window`]: how many rows
+    /// WOULD change under these bounds. Read-only.
+    pub fn count_window_mismatches(
+        &self,
+        start: Option<i64>,
+        end_exclusive: Option<i64>,
+    ) -> Result<usize> {
+        let n: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM watch_history
+                 WHERE in_window != CASE WHEN (?1 IS NULL OR watched_at >= ?1)
+                                          AND (?2 IS NULL OR watched_at < ?2)
+                                     THEN 1 ELSE 0 END",
+                params![start, end_exclusive],
+                |r| r.get(0),
+            )
+            .context("count in_window mismatches")?;
+        Ok(usize::try_from(n).unwrap_or(0))
+    }
 }
 
 impl Store {

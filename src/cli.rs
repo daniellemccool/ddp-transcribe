@@ -149,6 +149,24 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Recompute watch_history.in_window from explicit window flags.
+    /// One-shot; does not re-read DDP files. Refuses to run bare —
+    /// silently wiping the study's window filter must be impossible.
+    #[command(group(clap::ArgGroup::new("window").required(true).multiple(true)))]
+    RecomputeWindow {
+        /// Inclusive analysis-window start (YYYY-MM-DD, UTC).
+        #[arg(long, value_parser = parse_window_date, group = "window")]
+        window_start: Option<chrono::NaiveDate>,
+        /// Inclusive analysis-window end (YYYY-MM-DD, UTC; covers that whole day).
+        #[arg(long, value_parser = parse_window_date, group = "window")]
+        window_end: Option<chrono::NaiveDate>,
+        /// Explicitly opt into "no filter": set in_window = 1 for ALL rows.
+        #[arg(long, group = "window", conflicts_with_all = ["window_start", "window_end"])]
+        clear: bool,
+        /// Report how many rows would change, without writing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
