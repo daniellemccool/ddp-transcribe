@@ -109,8 +109,9 @@ CUDA_VISIBLE_DEVICES=0 ddp-transcribe \
 ### Post-run metadata load (Epic 4c)
 
 Every `process` run stores each video's raw yt-dlp metadata envelope in
-`video_metadata_raw` — for failed fetches too, at zero extra network cost.
-Nothing parses it during the run. After a batch:
+`video_metadata_raw` — for failed fetches too (tool failures, that is —
+timeouts and spawn failures lose the captured output; the retry self-heals),
+at zero extra network cost. Nothing parses it during the run. After a batch:
 
 ```bash
 ddp-transcribe --state-db ~/ddp-state/state.sqlite load-metadata --dry-run

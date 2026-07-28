@@ -528,7 +528,13 @@ the unique-tmp-name change). Pre-existing behavior, not introduced by 4c.
 exactly the SRC two-GPU setup — but the failure is self-healing (the losing
 write fails, the row stays `in_progress`, the stale sweep reclaims it and the
 next attempt re-writes the artifact idempotently per ADR-0008). Not worth a
-rushed fix inside 4c.
+rushed fix inside 4c. The real blast radius is bigger than "one video loses its
+write": a concurrent instance's startup sweep unlinking an in-flight tmp makes
+`atomic_write`'s rename fail, `write_artifacts_durable` propagates that as an
+error, and the transcribe worker's error cancels the orchestrator — so the
+*whole batch run* aborts, not just the one video. It is recoverable (restart
+picks the DB state back up, nothing is corrupted) but it is a run abort under
+the two-instance SRC deployment, not a one-video loss.
 **Trigger to revisit:** Epic 5, bundled with the other
 `output::cleanup_tmp_files` polish entry above.
 

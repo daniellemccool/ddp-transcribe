@@ -378,9 +378,9 @@ pub(crate) async fn transcribe_and_write(
     opts: &ProcessOptions,
 ) -> Result<ProcessOutcome> {
     // T17 refactor: capture `samples_len` and `transcript_source` BEFORE
-    // the transcribe move so the shared `write_artifacts_and_mark` helper
-    // can be called without re-deriving them from a consumed Vec or a
-    // borrowed &dyn Transcriber.
+    // the transcribe move so `write_artifacts_and_mark` — the serial path's
+    // composition of the two phase-4 halves — can be called without
+    // re-deriving them from a consumed Vec or a borrowed &dyn Transcriber.
     let samples_len = samples.len();
     let transcript_source = transcriber.name();
 
@@ -403,11 +403,13 @@ pub(crate) async fn transcribe_and_write(
     );
 
     // T17 refactor (Path A): the post-transcribe artifact write + DB
-    // mark + wav cleanup lives in `write_artifacts_and_mark`, shared with
-    // `pipelined::transcribe_worker`. Splitting the helper this way keeps
-    // the 0008 ordering invariant in a single place — the pipelined worker
-    // needs the same write+mark logic but can't reuse this whole function
-    // because it must run the transcribe call OUTSIDE the store mutex.
+    // mark + wav cleanup lives in `write_artifacts_and_mark`, which composes
+    // [`write_artifacts_durable`] and [`mark_after_artifacts`] — the same
+    // 0008-ordering halves `pipelined::transcribe_worker` calls directly
+    // (see the doc comment above). Since the Task 05 split this composed
+    // wrapper serves only this serial path; the pipelined worker calls the
+    // two halves itself so it can run the transcribe call OUTSIDE the store
+    // mutex and keep the lock off the durable writes.
     write_artifacts_and_mark(
         store,
         transcribe_output,

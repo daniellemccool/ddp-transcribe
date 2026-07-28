@@ -40,6 +40,10 @@ Plan B has been sized against that number. The estimate needs at least:
   against the boot disk's free space under two instances.
 - **Rate-limit exposure.** ~3M fetches is a different regime from the pilot's
   56k; the failure mix under sustained load is unmeasured.
+- **Coverage, not just size.** `video_metadata_raw` coverage will run meaningfully
+  below attempted-fetch count — the ~15% dead-link cohort and all structural
+  failures (timeouts/spawn) leave no row; only fetches whose extraction
+  succeeded do.
 
 **Note on the disk figure:** the Epic 4c plan quoted "6–12 GB" for
 `video_metadata_raw`, and a comment in `src/metadata_loader.rs` still does.
