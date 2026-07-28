@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: &str = "3";
+pub const SCHEMA_VERSION: &str = "4";
 
 pub const SCHEMA_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS videos (
@@ -38,6 +38,11 @@ CREATE TABLE IF NOT EXISTS watch_history (
     video_id       TEXT NOT NULL,
     watched_at     INTEGER NOT NULL,
     in_window      INTEGER NOT NULL,
+    -- Plan B Epic 4b (schema v4): the verbatim DDP `Date` string, so a
+    -- future timezone reinterpretation never requires re-ingest (see the
+    -- Epic 4b timezone ADR). NULL = row ingested pre-v4; re-ingesting the
+    -- same DDP file backfills it.
+    watched_at_raw TEXT,
     PRIMARY KEY (respondent_id, video_id, watched_at),
     FOREIGN KEY (video_id) REFERENCES videos(video_id)
 );

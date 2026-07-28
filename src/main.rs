@@ -53,12 +53,17 @@ async fn main() -> Result<()> {
             let _store = state::Store::open(path)?;
             tracing::info!(path = %path.display(), "state.sqlite initialized");
         }
-        cli::Command::Ingest { dry_run } => {
+        cli::Command::Ingest {
+            dry_run,
+            window_start,
+            window_end,
+        } => {
             let mut store = state::Store::open(&cfg.state_db).context("opening state DB")?;
             if dry_run {
                 tracing::info!("dry-run: not yet implemented; running real ingest");
             }
-            let stats = ingest::ingest(&cfg.inbox, &mut store).context("ingest failed")?;
+            let window = ingest::WindowBounds::from_dates(window_start, window_end);
+            let stats = ingest::ingest(&cfg.inbox, &mut store, window).context("ingest failed")?;
             tracing::info!(
                 files = stats.files_processed,
                 videos = stats.unique_videos_seen,
@@ -67,6 +72,8 @@ async fn main() -> Result<()> {
                 short_links_skipped = stats.short_links_skipped,
                 invalid_urls_skipped = stats.invalid_urls_skipped,
                 date_parse_failures = stats.date_parse_failures,
+                marked_out_of_window = stats.marked_out_of_window,
+                backfilled_raw_dates = stats.backfilled_raw_dates,
                 "ingest complete"
             );
         }

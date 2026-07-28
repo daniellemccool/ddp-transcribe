@@ -87,6 +87,11 @@ pub struct GlobalArgs {
     pub channel_capacity: Option<usize>,
 }
 
+pub(crate) fn parse_window_date(s: &str) -> Result<chrono::NaiveDate, String> {
+    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .map_err(|e| format!("invalid date {s:?} (expected YYYY-MM-DD): {e}"))
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Create state.sqlite and apply schema. Idempotent.
@@ -95,6 +100,14 @@ pub enum Command {
     Ingest {
         #[arg(long)]
         dry_run: bool,
+        /// Inclusive analysis-window start (YYYY-MM-DD, UTC). Rows outside
+        /// the window ingest with in_window = 0. Absent = unbounded.
+        #[arg(long, value_parser = parse_window_date)]
+        window_start: Option<chrono::NaiveDate>,
+        /// Inclusive analysis-window end (YYYY-MM-DD, UTC; covers that
+        /// whole day). Absent = unbounded.
+        #[arg(long, value_parser = parse_window_date)]
+        window_end: Option<chrono::NaiveDate>,
     },
     /// Run a batch: claim pending videos, fetch + transcribe, write artifacts.
     Process {

@@ -72,7 +72,13 @@ fn upsert_watch_history_inserts() {
         )
         .unwrap();
     let inserted = store
-        .upsert_watch_history("respondent-1", "7234567890123456789", 1_700_000_000, true)
+        .upsert_watch_history(
+            "respondent-1",
+            "7234567890123456789",
+            1_700_000_000,
+            "2026-01-01 00:00:00",
+            true,
+        )
         .unwrap();
     assert_eq!(inserted, 1);
 }
@@ -84,10 +90,22 @@ fn upsert_watch_history_is_idempotent_on_duplicate_pk() {
         .upsert_video("7234567890123456789", "url", true)
         .unwrap();
     let first = store
-        .upsert_watch_history("r1", "7234567890123456789", 1_700_000_000, true)
+        .upsert_watch_history(
+            "r1",
+            "7234567890123456789",
+            1_700_000_000,
+            "2026-01-01 00:00:00",
+            true,
+        )
         .unwrap();
     let second = store
-        .upsert_watch_history("r1", "7234567890123456789", 1_700_000_000, false)
+        .upsert_watch_history(
+            "r1",
+            "7234567890123456789",
+            1_700_000_000,
+            "2026-01-01 00:00:00",
+            false,
+        )
         .unwrap();
     assert_eq!(first, 1);
     assert_eq!(second, 0, "duplicate PK insert returns 0 rows changed");
@@ -96,6 +114,12 @@ fn upsert_watch_history_is_idempotent_on_duplicate_pk() {
 #[test]
 fn upsert_watch_history_fk_violation_when_video_missing() {
     let (_tmp, mut store) = fresh_store();
-    let result = store.upsert_watch_history("r1", "7234567890123456789", 1_700_000_000, true);
+    let result = store.upsert_watch_history(
+        "r1",
+        "7234567890123456789",
+        1_700_000_000,
+        "2026-01-01 00:00:00",
+        true,
+    );
     assert!(result.is_err(), "FK should fail when video row absent");
 }

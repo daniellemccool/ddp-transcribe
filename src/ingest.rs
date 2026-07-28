@@ -8,7 +8,7 @@ use serde::Deserialize;
 use rusqlite::Transaction;
 
 use crate::canonical::{canonicalize_url, Canonical};
-use crate::state::{upsert_video_tx, upsert_watch_history_tx, Store};
+use crate::state::{backfill_watch_raw_tx, upsert_video_tx, upsert_watch_history_tx, Store};
 
 #[derive(Debug, Default, Clone)]
 pub struct IngestStats {
@@ -19,6 +19,41 @@ pub struct IngestStats {
     pub short_links_skipped: usize,
     pub invalid_urls_skipped: usize,
     pub date_parse_failures: usize,
+    /// Rows this pass marked in_window = 0 (outside the supplied window).
+    pub marked_out_of_window: usize,
+    /// Existing rows whose NULL watched_at_raw this pass backfilled.
+    pub backfilled_raw_dates: usize,
+}
+
+/// Analysis-window bounds in unix seconds, derived from inclusive UTC
+/// calendar dates (Epic 4b window ADR). `Default` = no filter (everything
+/// in-window) — matches pre-4b behavior.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WindowBounds {
+    /// Inclusive: 00:00:00Z of --window-start.
+    pub start: Option<i64>,
+    /// Exclusive: 00:00:00Z of the day AFTER --window-end (an inclusive
+    /// calendar end date covers its whole day).
+    pub end_exclusive: Option<i64>,
+}
+
+impl WindowBounds {
+    pub fn from_dates(start: Option<chrono::NaiveDate>, end: Option<chrono::NaiveDate>) -> Self {
+        let to_ts = |d: chrono::NaiveDate| {
+            Utc.from_utc_datetime(&d.and_time(chrono::NaiveTime::MIN))
+                .timestamp()
+        };
+        WindowBounds {
+            start: start.map(to_ts),
+            // succ_opt is None only at NaiveDate::MAX — saturate to "no
+            // upper bound reachable" rather than wrap.
+            end_exclusive: end.map(|d| d.succ_opt().map_or(i64::MAX, to_ts)),
+        }
+    }
+
+    pub fn contains(&self, ts: i64) -> bool {
+        self.start.is_none_or(|s| ts >= s) && self.end_exclusive.is_none_or(|e| ts < e)
+    }
 }
 
 /// Walk `inbox`, parse each `*.json` file, and upsert resolvable rows into the
@@ -29,7 +64,7 @@ pub struct IngestStats {
 /// `watch_history_rows_processed` reflect what the ingest pass observed in the
 /// input, not what the database newly accepted. `watch_history_duplicates` is
 /// the subset of processed rows where the upsert was a no-op (existing PK).
-pub fn ingest(inbox: &Path, store: &mut Store) -> Result<IngestStats> {
+pub fn ingest(inbox: &Path, store: &mut Store, window: WindowBounds) -> Result<IngestStats> {
     let mut stats = IngestStats::default();
     let mut unique_videos: HashSet<String> = HashSet::new();
 
@@ -57,6 +92,7 @@ pub fn ingest(inbox: &Path, store: &mut Store) -> Result<IngestStats> {
                         &entry,
                         &mut stats,
                         &mut unique_videos,
+                        window,
                     )?;
                 }
             }
@@ -77,6 +113,7 @@ fn process_watch_entry(
     entry: &WatchEntry,
     stats: &mut IngestStats,
     unique_videos: &mut HashSet<String>,
+    window: WindowBounds,
 ) -> Result<()> {
     let canon = canonicalize_url(&entry.link);
     let video_id = match canon {
@@ -114,10 +151,25 @@ fn process_watch_entry(
     unique_videos.insert(video_id.clone());
     upsert_video_tx(tx, &video_id, &entry.link, true)?;
 
-    let inserted = upsert_watch_history_tx(tx, respondent_id, &video_id, watched_at, true)?;
+    let in_window = window.contains(watched_at);
+    if !in_window {
+        stats.marked_out_of_window += 1;
+    }
+    let inserted = upsert_watch_history_tx(
+        tx,
+        respondent_id,
+        &video_id,
+        watched_at,
+        &entry.date,
+        in_window,
+    )?;
     stats.watch_history_rows_processed += 1;
     if inserted == 0 {
         stats.watch_history_duplicates += 1;
+        // Pre-v4 rows carry NULL watched_at_raw; re-ingest is the designed
+        // backfill path. in_window is deliberately untouched here.
+        stats.backfilled_raw_dates +=
+            backfill_watch_raw_tx(tx, respondent_id, &video_id, watched_at, &entry.date)?;
     }
     Ok(())
 }
@@ -239,5 +291,32 @@ mod tests {
     fn parse_watched_at_returns_none_on_garbage_with_partial_utc() {
         assert!(parse_watched_at("not a date UTC").is_none());
         assert!(parse_watched_at("UTC").is_none());
+    }
+
+    #[test]
+    fn window_bounds_inclusive_dates() {
+        let d = |y, m, dd| chrono::NaiveDate::from_ymd_opt(y, m, dd).unwrap();
+        let w = WindowBounds::from_dates(Some(d(2026, 2, 1)), Some(d(2026, 2, 28)));
+        let ts = |s: &str| parse_watched_at(s).unwrap();
+        assert!(
+            w.contains(ts("2026-02-01 00:00:00")),
+            "start midnight inclusive"
+        );
+        assert!(
+            w.contains(ts("2026-02-28 23:59:59")),
+            "end date inclusive through its last second"
+        );
+        assert!(!w.contains(ts("2026-01-31 23:59:59")));
+        assert!(
+            !w.contains(ts("2026-03-01 00:00:00")),
+            "day after end excluded"
+        );
+        assert!(
+            WindowBounds::default().contains(ts("1999-01-01 00:00:00")),
+            "no flags = everything in window"
+        );
+        let start_only = WindowBounds::from_dates(Some(d(2026, 2, 1)), None);
+        assert!(start_only.contains(ts("2030-01-01 00:00:00")));
+        assert!(!start_only.contains(ts("2026-01-31 23:59:59")));
     }
 }

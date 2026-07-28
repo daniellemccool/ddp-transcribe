@@ -1,8 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 //! Confirm the v2 schema: new nullable columns present on `videos`.
-//! SCHEMA_VERSION constant is "3" as of Epic 4a (schema v3 layers batch_runs
-//! + the attempt-aware pending index on top; these Epic 2 columns are
+//! SCHEMA_VERSION constant is "4" as of Epic 4b (schema v4 layers
+//! watch_history.watched_at_raw on top; these Epic 2 columns are
 //!   unchanged), fresh DB records the current version in meta.
 
 use anyhow::Result;
@@ -21,8 +21,8 @@ fn columns_in(conn: &Connection, table: &str) -> Vec<String> {
 }
 
 #[test]
-fn schema_version_constant_is_v3() {
-    assert_eq!(SCHEMA_VERSION, "3");
+fn schema_version_constant_is_v4() {
+    assert_eq!(SCHEMA_VERSION, "4");
 }
 
 #[test]

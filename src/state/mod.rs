@@ -227,13 +227,20 @@ impl Store {
         respondent_id: &str,
         video_id: &str,
         watched_at: i64,
+        watched_at_raw: &str,
         in_window: bool,
     ) -> Result<usize> {
         let changed = self
             .conn
             .execute(
                 UPSERT_WATCH_HISTORY_SQL,
-                params![respondent_id, video_id, watched_at, i64::from(in_window)],
+                params![
+                    respondent_id,
+                    video_id,
+                    watched_at,
+                    i64::from(in_window),
+                    watched_at_raw
+                ],
             )
             .with_context(|| {
                 format!(
@@ -260,8 +267,15 @@ const UPSERT_VIDEO_SQL: &str = "INSERT OR IGNORE INTO videos
                   first_seen_at, updated_at)
                  VALUES (?1, ?2, ?3, 'pending', ?4, ?4)";
 const UPSERT_WATCH_HISTORY_SQL: &str = "INSERT OR IGNORE INTO watch_history
-                 (respondent_id, video_id, watched_at, in_window)
-                 VALUES (?1, ?2, ?3, ?4)";
+                 (respondent_id, video_id, watched_at, in_window, watched_at_raw)
+                 VALUES (?1, ?2, ?3, ?4, ?5)";
+/// Backfill the raw DDP Date string onto a pre-v4 row. Deliberately does
+/// NOT touch in_window: recompute-window is the only path that changes
+/// flags after ingest (Epic 4b window ADR).
+const BACKFILL_WATCH_RAW_SQL: &str = "UPDATE watch_history
+                 SET watched_at_raw = ?4
+                 WHERE respondent_id = ?1 AND video_id = ?2 AND watched_at = ?3
+                   AND watched_at_raw IS NULL";
 
 /// Transaction-scoped upsert for the batch ingest path. `prepare_cached` prepares
 /// the statement once and reuses it for every row in the walk. Shares
@@ -288,16 +302,43 @@ pub(crate) fn upsert_watch_history_tx(
     respondent_id: &str,
     video_id: &str,
     watched_at: i64,
+    watched_at_raw: &str,
     in_window: bool,
 ) -> Result<usize> {
     let changed = tx
         .prepare_cached(UPSERT_WATCH_HISTORY_SQL)
         .context("preparing upsert_watch_history")?
-        .execute(params![respondent_id, video_id, watched_at, i64::from(in_window)])
+        .execute(params![
+            respondent_id,
+            video_id,
+            watched_at,
+            i64::from(in_window),
+            watched_at_raw
+        ])
         .with_context(|| {
             format!(
                 "upserting watch_history (respondent={respondent_id}, video={video_id}, watched_at={watched_at})"
             )
+        })?;
+    Ok(changed)
+}
+
+/// Transaction-scoped backfill of watched_at_raw for an existing row
+/// (INSERT OR IGNORE hit). Returns the row-change count per 0006:
+/// 1 = backfilled a NULL, 0 = row already carried its raw string.
+pub(crate) fn backfill_watch_raw_tx(
+    tx: &rusqlite::Transaction<'_>,
+    respondent_id: &str,
+    video_id: &str,
+    watched_at: i64,
+    watched_at_raw: &str,
+) -> Result<usize> {
+    let changed = tx
+        .prepare_cached(BACKFILL_WATCH_RAW_SQL)
+        .context("preparing backfill_watch_raw")?
+        .execute(params![respondent_id, video_id, watched_at, watched_at_raw])
+        .with_context(|| {
+            format!("backfilling watched_at_raw (respondent={respondent_id}, video={video_id})")
         })?;
     Ok(changed)
 }
