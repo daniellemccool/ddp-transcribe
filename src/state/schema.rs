@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: &str = "5";
+pub const SCHEMA_VERSION: &str = "6";
 
 pub const SCHEMA_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS videos (
@@ -99,5 +99,17 @@ CREATE TABLE IF NOT EXISTS video_metadata_raw (
     fetched_at INTEGER NOT NULL,
     raw_json   TEXT NOT NULL,
     FOREIGN KEY (video_id) REFERENCES videos(video_id)
+);
+
+CREATE TABLE IF NOT EXISTS ingested_files (
+    -- Epic-4c-era production hardening: file-level ingest ledger. A row
+    -- exists iff the named file's rows were fully committed (the ledger
+    -- upsert rides the same per-file transaction). A later run skips any
+    -- file whose (name, size, mtime) triple matches; changed files
+    -- reprocess (row upserts stay the correctness backstop).
+    file_name   TEXT PRIMARY KEY NOT NULL,
+    size_bytes  INTEGER NOT NULL,
+    mtime       INTEGER NOT NULL,
+    ingested_at INTEGER NOT NULL
 );
 ";

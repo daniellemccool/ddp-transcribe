@@ -258,6 +258,20 @@ impl Store {
     pub(crate) fn transaction(&mut self) -> Result<rusqlite::Transaction<'_>> {
         self.conn.transaction().context("begin ingest transaction")
     }
+
+    /// The `ingested_files` fingerprint recorded for `file_name` (basename),
+    /// as `(size_bytes, mtime)`; `None` = never fully ingested. Read on the
+    /// connection rather than inside the per-file transaction because it
+    /// decides whether that transaction is opened at all. `prepare_cached`
+    /// keeps it to one prepare across the whole walk.
+    pub(crate) fn ingested_file_fingerprint(&self, file_name: &str) -> Result<Option<(i64, i64)>> {
+        self.conn
+            .prepare_cached(SELECT_INGESTED_FILE_SQL)
+            .context("preparing ingested_file_fingerprint")?
+            .query_row(params![file_name], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()
+            .with_context(|| format!("reading ingest ledger row for {file_name}"))
+    }
 }
 
 /// Shared INSERT-OR-IGNORE SQL so the `&mut self` convenience methods and the
@@ -320,6 +334,36 @@ pub(crate) fn upsert_watch_history_tx(
                 "upserting watch_history (respondent={respondent_id}, video={video_id}, watched_at={watched_at})"
             )
         })?;
+    Ok(changed)
+}
+
+/// Ingest ledger read + write (schema v6). The upsert is last-write-wins on
+/// `file_name` so a changed file's fingerprint is refreshed in place.
+const SELECT_INGESTED_FILE_SQL: &str =
+    "SELECT size_bytes, mtime FROM ingested_files WHERE file_name = ?1";
+const UPSERT_INGESTED_FILE_SQL: &str = "INSERT INTO ingested_files
+                 (file_name, size_bytes, mtime, ingested_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(file_name) DO UPDATE SET
+                     size_bytes  = excluded.size_bytes,
+                     mtime       = excluded.mtime,
+                     ingested_at = excluded.ingested_at";
+
+/// Record that `file_name` (basename only — the inbox directory may move
+/// between hosts) was fully ingested at the given fingerprint. Called INSIDE
+/// the same transaction that commits that file's rows, so the ledger row
+/// exists iff the data is committed. Returns the row-change count per 0006.
+pub(crate) fn upsert_ingested_file_tx(
+    tx: &rusqlite::Transaction<'_>,
+    file_name: &str,
+    size_bytes: i64,
+    mtime: i64,
+) -> Result<usize> {
+    let changed = tx
+        .prepare_cached(UPSERT_INGESTED_FILE_SQL)
+        .context("preparing upsert_ingested_file")?
+        .execute(params![file_name, size_bytes, mtime, unix_now()])
+        .with_context(|| format!("recording ingest ledger row for {file_name}"))?;
     Ok(changed)
 }
 

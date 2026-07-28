@@ -8,7 +8,9 @@ use serde::Deserialize;
 use rusqlite::Transaction;
 
 use crate::canonical::{canonicalize_url, Canonical};
-use crate::state::{backfill_watch_raw_tx, upsert_video_tx, upsert_watch_history_tx, Store};
+use crate::state::{
+    backfill_watch_raw_tx, upsert_ingested_file_tx, upsert_video_tx, upsert_watch_history_tx, Store,
+};
 
 #[derive(Debug, Default, Clone)]
 pub struct IngestStats {
@@ -30,6 +32,16 @@ pub struct IngestStats {
     pub computed_out_of_window: usize,
     /// Existing rows whose NULL watched_at_raw this pass backfilled.
     pub backfilled_raw_dates: usize,
+    /// Files this pass could not turn into rows at all — bad filename, stat
+    /// failure, unreadable bytes, or JSON that is not a `Vec<Section>` (the
+    /// platform writes `{"status":"data_submission declined"}` stubs into
+    /// the same inbox). Parallel to `files_processed` per 0007: a skipped
+    /// file is counted here and nowhere else, and never aborts the run.
+    pub files_skipped_unparseable: usize,
+    /// Files skipped because the `ingested_files` ledger already records
+    /// this exact (name, size, mtime) triple. Parallel to `files_processed`
+    /// per 0007 — the normal fast path on a re-run over a 142-file inbox.
+    pub files_skipped_already_ingested: usize,
 }
 
 /// Analysis-window bounds in unix seconds, derived from inclusive UTC
@@ -67,10 +79,19 @@ impl WindowBounds {
 /// store. Plan A skips short links with a WARN log; Plan C writes them to a
 /// pending_resolutions table.
 ///
+/// A file the pass cannot turn into rows — bad filename, stat/read failure,
+/// or JSON that is not a `Vec<Section>` — is logged, counted in
+/// `files_skipped_unparseable`, and stepped over; it never aborts the run.
+/// A file that parses but carries no watch history is processed normally
+/// (zero rows), not skipped. Files whose `ingested_files` fingerprint still
+/// matches are skipped before they are even read.
+///
 /// Counters are input-side: `unique_videos_seen` and
 /// `watch_history_rows_processed` reflect what the ingest pass observed in the
 /// input, not what the database newly accepted. `watch_history_duplicates` is
 /// the subset of processed rows where the upsert was a no-op (existing PK).
+/// The three file-level counters are parallel per 0007: each walked file
+/// increments exactly one of them.
 pub fn ingest(inbox: &Path, store: &mut Store, window: WindowBounds) -> Result<IngestStats> {
     let mut stats = IngestStats::default();
     let mut unique_videos: HashSet<String> = HashSet::new();
@@ -82,12 +103,53 @@ pub fn ingest(inbox: &Path, store: &mut Store, window: WindowBounds) -> Result<I
     // the per-row commit cost. `prepare_cached` lives on the connection, so the two
     // statements stay prepared across files. INSERT-OR-IGNORE keeps re-runs idempotent.
     for path in walk_json_files(inbox)? {
-        let respondent_id = parse_respondent_id_from_filename(&path)
-            .with_context(|| format!("parsing respondent_id from {}", path.display()))?;
+        let respondent_id = match parse_respondent_id_from_filename(&path) {
+            Ok(id) => id,
+            Err(e) => {
+                skip_unparseable(&path, &e, &mut stats);
+                continue;
+            }
+        };
 
-        let raw = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-        let sections: Vec<Section> = serde_json::from_slice(&raw)
-            .with_context(|| format!("parsing JSON from {}", path.display()))?;
+        // Ledger check BEFORE the read: on a re-run over an unchanged inbox
+        // this is the only I/O the file costs — one stat plus one indexed
+        // SELECT, instead of parsing megabytes of JSON to discover that
+        // every row is a no-op upsert.
+        let fingerprint = match std::fs::metadata(&path) {
+            Ok(meta) => file_fingerprint(&path, &meta),
+            Err(e) => {
+                skip_unparseable(&path, &anyhow::Error::new(e), &mut stats);
+                continue;
+            }
+        };
+        if let Some((name, size, mtime)) = &fingerprint {
+            // A ledger read failure is a broken store, not a broken file:
+            // propagate rather than silently re-ingesting everything.
+            if store.ingested_file_fingerprint(name)? == Some((*size, *mtime)) {
+                // Debug, not warn: this is the normal fast path.
+                tracing::debug!(file = %path.display(), "file skipped (already ingested)");
+                stats.files_skipped_already_ingested += 1;
+                continue;
+            }
+        }
+
+        let raw = match std::fs::read(&path) {
+            Ok(raw) => raw,
+            Err(e) => {
+                skip_unparseable(&path, &anyhow::Error::new(e), &mut stats);
+                continue;
+            }
+        };
+        // The donation platform writes decline stubs (`{"status":
+        // "data_submission declined"}` — a top-level object, not an array)
+        // into the same inbox. Those must cost one counted skip, never the run.
+        let sections: Vec<Section> = match serde_json::from_slice(&raw) {
+            Ok(sections) => sections,
+            Err(e) => {
+                skip_unparseable(&path, &anyhow::Error::new(e), &mut stats);
+                continue;
+            }
+        };
 
         let tx = store.transaction()?;
         for section in sections {
@@ -104,6 +166,12 @@ pub fn ingest(inbox: &Path, store: &mut Store, window: WindowBounds) -> Result<I
                 }
             }
         }
+        // Ledger row rides the SAME transaction as the file's rows, so it
+        // exists iff that file's data is committed — a crash mid-file leaves
+        // no ledger row and the next run reprocesses it.
+        if let Some((name, size, mtime)) = &fingerprint {
+            upsert_ingested_file_tx(&tx, name, *size, *mtime)?;
+        }
         tx.commit()
             .with_context(|| format!("committing ingest transaction for {}", path.display()))?;
 
@@ -112,6 +180,36 @@ pub fn ingest(inbox: &Path, store: &mut Store, window: WindowBounds) -> Result<I
 
     stats.unique_videos_seen = unique_videos.len();
     Ok(stats)
+}
+
+/// One bad file must never veto the run (July-2026 production incident: a
+/// platform-written decline stub aborted a 142-file ingest). Log the whole
+/// context chain (`{e:#}`, so the operator sees the underlying cause, not
+/// just "file skipped"), count it, and let the caller `continue`.
+fn skip_unparseable(path: &Path, e: &anyhow::Error, stats: &mut IngestStats) {
+    tracing::warn!(
+        file = %path.display(),
+        error = %format!("{e:#}"),
+        "file skipped (unparseable)"
+    );
+    stats.files_skipped_unparseable += 1;
+}
+
+/// The ledger fingerprint for a walked file: `(basename, size, mtime-secs)`.
+/// `None` means the file cannot be fingerprinted — a non-UTF-8 basename, or
+/// an mtime outside the unix-seconds range. Such a file is treated as
+/// permanently unmatchable: it is processed every run and no ledger row is
+/// written, which is the safe direction (redundant work, never skipped data).
+fn file_fingerprint(path: &Path, meta: &std::fs::Metadata) -> Option<(String, i64, i64)> {
+    let name = path.file_name().and_then(|s| s.to_str())?;
+    let size = i64::try_from(meta.len()).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_secs()).ok())?;
+    Some((name.to_string(), size, mtime))
 }
 
 fn process_watch_entry(
