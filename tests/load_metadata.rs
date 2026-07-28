@@ -171,6 +171,43 @@ fn load_metadata_counts_orphan_raw_rows_without_failing() {
     );
 }
 
+/// `Store::metadata_raw_page` cursor semantics span two statements (the
+/// first-page/no-cursor branch and the subsequent-page/`WHERE video_id >
+/// ?1` branch) — walking every page must still visit each row exactly
+/// once, in ascending video_id order, proving both branches agree.
+#[test]
+fn metadata_raw_page_walks_all_rows_exactly_once_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("state.sqlite");
+    let mut store = ddp_transcribe::state::Store::open(&db).unwrap();
+
+    let ids = ["vid_a", "vid_b", "vid_c", "vid_d", "vid_e"];
+    for id in ids {
+        store.upsert_video(id, "https://example/v", false).unwrap();
+        store
+            .upsert_metadata_raw(id, r#"{"schema":1,"printed":"{}"}"#)
+            .unwrap();
+    }
+
+    let mut seen = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page = store.metadata_raw_page(after.as_deref(), 2).unwrap();
+        if page.is_empty() {
+            break;
+        }
+        after = Some(page.last().unwrap().video_id.clone());
+        seen.extend(page.into_iter().map(|r| r.video_id));
+    }
+
+    let mut expected = ids.to_vec();
+    expected.sort_unstable();
+    assert_eq!(
+        seen, expected,
+        "union of pages == all rows, ascending, no dupes"
+    );
+}
+
 #[test]
 fn load_metadata_refuses_missing_db() {
     let dir = tempfile::tempdir().unwrap();
