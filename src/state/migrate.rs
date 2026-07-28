@@ -1,7 +1,7 @@
 //! Pre-Epic-2 → current schema migration ladder (0022; extended by Epic 4a
-//! for v2→v3, Epic 4b for v3→v4). Opens the DB raw, bypassing Store::open's
-//! version check; runs the ladder + UPDATE meta inside one transaction.
-//! Idempotent on already-migrated DBs.
+//! for v2→v3, Epic 4b for v3→v4, Epic 4c for v4→v5). Opens the DB raw,
+//! bypassing Store::open's version check; runs the ladder + UPDATE meta
+//! inside one transaction. Idempotent on already-migrated DBs.
 
 use std::path::Path;
 
@@ -57,8 +57,8 @@ pub fn run_migrate(path: &Path) -> Result<()> {
     }
 
     // Sequential ladder: each stage advances a local `version` string.
-    // Today three stages exist (v1→v2, v2→v3, v3→v4); future epics will
-    // append more blocks as the schema bumps further. Unknown starting
+    // Today four stages exist (v1→v2, v2→v3, v3→v4, v4→v5); future epics
+    // will append more blocks as the schema bumps further. Unknown starting
     // versions still bail below.
     let tx = conn
         .transaction()
@@ -100,6 +100,28 @@ pub fn run_migrate(path: &Path) -> Result<()> {
         tx.execute_batch("ALTER TABLE watch_history ADD COLUMN watched_at_raw TEXT;")
             .context("v3→v4: watch_history.watched_at_raw")?;
         version = "4".to_string();
+    }
+
+    if version == "4" {
+        tx.execute_batch(
+            "ALTER TABLE videos ADD COLUMN video_description TEXT;
+             ALTER TABLE videos ADD COLUMN uploader TEXT;
+             ALTER TABLE videos ADD COLUMN uploader_id TEXT;
+             ALTER TABLE videos ADD COLUMN video_created_at INTEGER;
+             ALTER TABLE videos ADD COLUMN view_count INTEGER;
+             ALTER TABLE videos ADD COLUMN like_count INTEGER;
+             ALTER TABLE videos ADD COLUMN comment_count INTEGER;
+             ALTER TABLE videos ADD COLUMN captions_json TEXT;
+             ALTER TABLE videos ADD COLUMN metadata_fetched_at INTEGER;
+             CREATE TABLE IF NOT EXISTS video_metadata_raw (
+                 video_id   TEXT PRIMARY KEY NOT NULL,
+                 fetched_at INTEGER NOT NULL,
+                 raw_json   TEXT NOT NULL,
+                 FOREIGN KEY (video_id) REFERENCES videos(video_id)
+             );",
+        )
+        .context("v4→v5: metadata columns ×9 + video_metadata_raw table")?;
+        version = "5".to_string();
     }
 
     if version != SCHEMA_VERSION {

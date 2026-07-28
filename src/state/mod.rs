@@ -513,6 +513,34 @@ impl Store {
         Ok(changed)
     }
 
+    /// Insert or overwrite the raw fetch-time metadata envelope for a video
+    /// (Epic 4c). Keyed by video_id — one row per unique video, last write
+    /// wins across retries (engagement counts are point-in-time; fetched_at
+    /// records the snapshot moment). Returns the row-change count per 0006.
+    ///
+    /// Callers treat failures as best-effort (log + continue): metadata
+    /// must never change a video's pipeline outcome.
+    ///
+    /// Not yet called from the bin (Task 03's fetch-time hook is the first
+    /// consumer); tests link the lib directly. `#[allow(dead_code)]` per
+    /// 0002 — Task 03 removes it.
+    #[allow(dead_code)]
+    pub fn upsert_metadata_raw(&mut self, video_id: &str, envelope_json: &str) -> Result<usize> {
+        let now = unix_now();
+        let changed = self
+            .conn
+            .execute(
+                "INSERT INTO video_metadata_raw (video_id, fetched_at, raw_json)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(video_id) DO UPDATE SET
+                     fetched_at = excluded.fetched_at,
+                     raw_json   = excluded.raw_json",
+                params![video_id, now, envelope_json],
+            )
+            .with_context(|| format!("upsert_metadata_raw for {video_id}"))?;
+        Ok(changed)
+    }
+
     /// Flip a video row from `in_progress` to `failed_retryable`, recording
     /// the failure classification (kind + message) per 0023. Same
     /// stale-claim predicate as `mark_succeeded`. Returns the row-change
