@@ -43,7 +43,7 @@ async fn stderr_excerpt_preserves_tail_when_subprocess_overflows_cap() {
         "{{ printf 'START\\n'; head -c {filler_len} /dev/zero | tr '\\0' x; printf 'END_OF_STREAM\\n'; }} >&2",
     );
     let spec = CommandSpec {
-        program: "sh",
+        program: "sh".to_string(),
         args: vec!["-c".into(), cmd],
         timeout: Duration::from_secs(10),
         stderr_capture_bytes: CAP,
@@ -74,7 +74,7 @@ async fn stderr_excerpt_preserves_tail_when_subprocess_overflows_cap() {
 #[tokio::test]
 async fn stdout_is_none_when_capture_bytes_zero() {
     let spec = CommandSpec {
-        program: "echo",
+        program: "echo".to_string(),
         args: vec!["hello world".into()],
         timeout: Duration::from_secs(5),
         stderr_capture_bytes: 1024,
@@ -92,7 +92,7 @@ async fn stdout_is_none_when_capture_bytes_zero() {
 #[tokio::test]
 async fn stdout_is_some_when_capture_bytes_nonzero() {
     let spec = CommandSpec {
-        program: "echo",
+        program: "echo".to_string(),
         args: vec!["hello world".into()],
         timeout: Duration::from_secs(5),
         stderr_capture_bytes: 1024,
@@ -108,7 +108,7 @@ async fn stdout_is_some_when_capture_bytes_nonzero() {
 #[tokio::test]
 async fn exit_code_passes_through_bounded_capture() {
     let spec = CommandSpec {
-        program: "false",
+        program: "false".to_string(),
         args: vec![],
         timeout: Duration::from_secs(5),
         stderr_capture_bytes: 1024,

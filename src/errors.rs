@@ -5,10 +5,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum FetchError {
     #[error("subprocess `{tool}` timed out after {duration:?}")]
-    ToolTimeout {
-        tool: &'static str,
-        duration: Duration,
-    },
+    ToolTimeout { tool: String, duration: Duration },
 
     // Final-review fix (Epic 3 close): the verbatim Task 02 brief template
     // omitted `signal`, so a signal-killed child (exit_code == -1) displayed
@@ -21,7 +18,7 @@ pub enum FetchError {
         "subprocess `{tool}` exited with status {exit_code} (signal {signal:?}): {stderr_excerpt}"
     )]
     ToolFailed {
-        tool: &'static str,
+        tool: String,
         exit_code: i32,
         /// Unix signal that killed the child, when it did not exit normally
         /// (`ExitStatus::code() == None`). Distinguishes OOM-kill (SIGKILL)
@@ -31,10 +28,10 @@ pub enum FetchError {
     },
 
     #[error("tool not found or not executable: {tool}: {detail}")]
-    ToolNotFound { tool: &'static str, detail: String },
+    ToolNotFound { tool: String, detail: String },
 
     #[error("system io error running {tool}: {detail}")]
-    SystemIo { tool: &'static str, detail: String },
+    SystemIo { tool: String, detail: String },
 
     #[error("failed to create work dir {path}: {detail}")]
     WorkDirCreate {
@@ -116,7 +113,7 @@ mod tests {
     #[test]
     fn fetch_error_displays_with_context() {
         let err = FetchError::ToolTimeout {
-            tool: "yt-dlp",
+            tool: "yt-dlp".to_string(),
             duration: Duration::from_secs(300),
         };
         let msg = format!("{err}");
@@ -127,7 +124,7 @@ mod tests {
     #[test]
     fn fetch_tool_failed_display_surfaces_signal() {
         let killed = FetchError::ToolFailed {
-            tool: "yt-dlp",
+            tool: "yt-dlp".to_string(),
             exit_code: -1,
             signal: Some(9),
             stderr_excerpt: "killed".into(),
@@ -139,7 +136,7 @@ mod tests {
         );
 
         let normal = FetchError::ToolFailed {
-            tool: "yt-dlp",
+            tool: "yt-dlp".to_string(),
             exit_code: 1,
             signal: None,
             stderr_excerpt: "some error".into(),

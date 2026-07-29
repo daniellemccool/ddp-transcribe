@@ -144,6 +144,41 @@ fn process_retries_accepts_bounds() {
 }
 
 #[test]
+fn process_checkpoint_every_requires_checkpoint_cmd() {
+    // An interval with nothing to run is an operator typo, not a silent
+    // no-op: clap's `requires` turns it into a usage error.
+    Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args(["process", "--checkpoint-every", "5m"])
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn process_checkpoint_cmd_with_interval_parses() {
+    // Parse-only check: the pair gets PAST argument parsing and fails later
+    // on the missing state DB / model, not with a usage error (exit != 2).
+    let assert = Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args([
+            "--state-db",
+            "/nonexistent/x.sqlite",
+            "process",
+            "--checkpoint-cmd",
+            "/x",
+            "--checkpoint-every",
+            "5m",
+        ])
+        .assert()
+        .failure();
+    assert_ne!(
+        assert.get_output().status.code(),
+        Some(2),
+        "--checkpoint-cmd with --checkpoint-every must parse"
+    );
+}
+
+#[test]
 fn config_echo_omits_model_path_for_non_model_subcommands() {
     let tmp = tempfile::TempDir::new().unwrap();
     let db = tmp.path().join("state.sqlite");

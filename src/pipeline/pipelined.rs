@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -725,6 +725,89 @@ pub async fn transcribe_worker(
     }
 }
 
+/// Epic 5a: supervised periodic operator checkpoint hook.
+///
+/// A long uncapped run used to sync artifacts to durable storage only at
+/// run boundaries; this task runs the operator's `--checkpoint-cmd` once
+/// per `--checkpoint-every` for as long as the batch is alive, so a run
+/// that spans days checkpoints inside the run.
+///
+/// **It NEVER returns `Err`.** The only `return` is `Ok(())` on
+/// cancellation. Per 0025 the orchestrator cancels the whole run on the
+/// first `Err` from any joined task, so an `Err` here — for a hook the
+/// operator wrote, on a machine whose disk may be full — would let a
+/// broken sync script kill a live campaign's batch. Nonzero exit, timeout,
+/// and spawn failure all warn, bump `checkpoints_failed`, and keep
+/// looping. Review rejects any `?` or `return Err` on the hook path.
+///
+/// **Loop shape: sleep, then run.** No firing at t=0 — the run boundary
+/// already syncs, so an immediate hook would duplicate it.
+///
+/// The hook goes through [`crate::process::run`]'s bounded machinery per
+/// 0021 (never a raw `tokio::process` spawn), with `timeout` set to the
+/// interval itself: a hook slower than its own period is a configuration
+/// error, surfaced as a timeout warn instead of piling up overlapping
+/// invocations.
+///
+/// The task touches no `Store`, no claim, and no pipeline state — it is a
+/// timer, a subprocess, and two counters. It also holds no `tx` clone (it
+/// never sends fetch items), so 0025's load-bearing `drop(tx)` semantics
+/// are untouched. Overlap with the operator's externally scheduled
+/// run-boundary sync is safe by that script's own `flock` serialization
+/// (deployment runbook).
+async fn checkpoint_task(
+    token: CancellationToken,
+    cfg: super::CheckpointConfig,
+    checkpoints_run: Arc<AtomicU64>,
+    checkpoints_failed: Arc<AtomicU64>,
+) -> Result<()> {
+    loop {
+        tokio::select! {
+            () = token.cancelled() => {
+                tracing::info!("checkpoint hook: cancellation observed; exiting");
+                return Ok(());
+            }
+            () = tokio::time::sleep(cfg.every) => {
+                match crate::process::run(crate::process::CommandSpec {
+                    program: cfg.cmd.display().to_string(),
+                    args: vec![],
+                    timeout: cfg.every,
+                    stderr_capture_bytes: 8 * 1024,
+                    stdout_capture_bytes: 4 * 1024,
+                    redact_arg_indices: &[],
+                })
+                .await
+                {
+                    Ok(outcome) if outcome.exit_code == 0 => {
+                        checkpoints_run.fetch_add(1, Ordering::Relaxed);
+                        tracing::info!(
+                            cmd = %cfg.cmd.display(),
+                            "checkpoint hook ran"
+                        );
+                    }
+                    Ok(outcome) => {
+                        checkpoints_failed.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(
+                            cmd = %cfg.cmd.display(),
+                            exit_code = outcome.exit_code,
+                            stderr = outcome.stderr_excerpt.as_str(),
+                            "checkpoint hook failed; continuing"
+                        );
+                    }
+                    Err(error) => {
+                        checkpoints_failed.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(
+                            cmd = %cfg.cmd.display(),
+                            %error,
+                            "checkpoint hook did not run; continuing"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Phase 2 entry point: pipelined orchestrator.
 ///
 /// Spawns N `fetch_worker` tasks + 1 `transcribe_worker` task into a
@@ -764,6 +847,14 @@ pub async fn transcribe_worker(
 /// inner workers also tolerate stale claims via the two
 /// `stats_stale_after_*` counters; the top-of-run sweep is for
 /// process-crash recovery only.
+///
+/// **Checkpoint task (Epic 5a).** When `opts.checkpoint` is `Some`, one
+/// extra task ([`checkpoint_task`]) joins the same JoinSet. It is not a
+/// worker: no `tx` clone, no store, no claims — a timer that runs the
+/// operator's hook and can only return `Ok(())`. Because it loops until
+/// cancelled, the supervision loop below cancels the token once all
+/// `1 + download_workers` real workers have joined; without that a clean
+/// drain would park on `join_next()` forever.
 pub async fn run_pipelined(
     store: SharedStore,
     fetcher: Arc<dyn VideoFetcher>,
@@ -804,6 +895,11 @@ pub async fn run_pipelined(
     // Mutex<Store> guard in fetch_worker, so the check+claim+increment is
     // race-free across all concurrent fetch workers.
     let claims_counter = Arc::new(AtomicUsize::new(0));
+    // Epic 5a: operator checkpoint hook outcome counters. u64 (not the
+    // AtomicUsize the row-counters use) because these count timer firings,
+    // not rows, and `ProcessStats`'s checkpoint fields are u64.
+    let checkpoints_run = Arc::new(AtomicU64::new(0));
+    let checkpoints_failed = Arc::new(AtomicU64::new(0));
     let mut join_set: JoinSet<Result<()>> = JoinSet::new();
 
     // Spawn the transcribe worker FIRST so the channel has a consumer
@@ -842,6 +938,27 @@ pub async fn run_pipelined(
             Arc::clone(&opts_arc),
         ));
     }
+    // Epic 5a: the periodic operator checkpoint hook, when configured. It
+    // joins the same JoinSet + CancellationToken protocol as the workers
+    // (0025) but is NOT one of them: it gets no `tx` clone (it never sends
+    // fetch items) and no store handle, so the drop(tx) drain semantics
+    // below are untouched. It exits only on cancellation — the supervision
+    // loop fires that once every worker has joined.
+    let checkpoint_enabled = opts_arc.checkpoint.is_some();
+    if let Some(cfg) = opts_arc.checkpoint.clone() {
+        tracing::info!(
+            cmd = %cfg.cmd.display(),
+            every_secs = cfg.every.as_secs(),
+            "operator checkpoint hook enabled"
+        );
+        join_set.spawn(checkpoint_task(
+            token.clone(),
+            cfg,
+            Arc::clone(&checkpoints_run),
+            Arc::clone(&checkpoints_failed),
+        ));
+    }
+
     // 0025 step 2: drop the orchestrator's own tx so the channel closes
     // as soon as every fetch_worker drops its clone. Without this drop
     // the transcribe_worker would park on recv() forever even after all
@@ -854,7 +971,20 @@ pub async fn run_pipelined(
     // (via `record_fetch_failure` / `mark_terminal_failure` + the shared
     // counters).
     let mut first_error: Option<anyhow::Error> = None;
+    // Epic 5a: the checkpoint task loops until cancelled, so on a clean
+    // drain nothing would ever cancel it and `join_next()` would block
+    // forever. The workers ARE the batch: 1 transcribe + N fetch. Once
+    // that many tasks have joined, every worker is done (the checkpoint
+    // task cannot have joined before a cancel), so cancel the token to
+    // release it. `==` fires exactly once; on the first-Err path the token
+    // is already cancelled and this is a no-op.
+    let supervised_workers = 1 + opts_arc.download_workers;
+    let mut joined_tasks = 0usize;
     while let Some(joined) = join_set.join_next().await {
+        joined_tasks += 1;
+        if checkpoint_enabled && joined_tasks == supervised_workers {
+            token.cancel();
+        }
         match joined {
             Ok(Ok(())) => { /* worker exited clean */ }
             Ok(Err(e)) => {
@@ -905,6 +1035,8 @@ pub async fn run_pipelined(
         exhausted_retries: stats_exhausted_retries.load(Ordering::Relaxed),
         parked_for_cookies: stats_parked_for_cookies.load(Ordering::Relaxed),
         terminal_by_label: terminal_by_label.lock().await.clone(),
+        checkpoints_run: checkpoints_run.load(Ordering::Relaxed),
+        checkpoints_failed: checkpoints_failed.load(Ordering::Relaxed),
     };
 
     if let Some(e) = first_error {

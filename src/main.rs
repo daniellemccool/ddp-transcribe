@@ -81,6 +81,8 @@ async fn main() -> Result<()> {
             max_videos,
             cookies_file,
             retries,
+            checkpoint_cmd,
+            checkpoint_every,
         } => {
             let mut store = state::Store::open(&cfg.state_db).context("opening state DB")?;
             std::fs::create_dir_all(&cfg.transcripts).context("creating transcripts dir")?;
@@ -124,12 +126,24 @@ async fn main() -> Result<()> {
             // run the start-of-batch sweep of parked failures BEFORE the
             // engine loads its model — fail fast on policy before paying
             // that cost.
+            // Epic 5a: the checkpoint hook's configuration rides the
+            // batch_runs params so a census can attribute a run's mid-run
+            // syncing (or lack of it). `null`/`null` when the feature is
+            // off — the path is recorded verbatim; it is an operator script
+            // path, not a credential (unlike --cookies-file, which stays a
+            // boolean presence flag per 0035).
+            let checkpoint = checkpoint_cmd.map(|cmd| pipeline::CheckpointConfig {
+                cmd,
+                every: checkpoint_every,
+            });
             let params_json = serde_json::json!({
                 "retries": retries,
                 "max_videos": max_videos,
                 "cookies_present": cookies_file.is_some(),
                 "download_workers": cfg.download_workers,
                 "worker_host": hostname_or_default(),
+                "checkpoint_cmd": checkpoint.as_ref().map(|c| c.cmd.display().to_string()),
+                "checkpoint_every_secs": checkpoint.as_ref().map(|c| c.every.as_secs()),
             })
             .to_string();
             let run_id = store.open_batch_run(&params_json, classification.source_toml())?;
@@ -184,6 +198,7 @@ async fn main() -> Result<()> {
                 cookies_file,
                 classification: std::sync::Arc::clone(&classification),
                 retries,
+                checkpoint,
             };
 
             // ────────────────────────────────────────────────────────────
@@ -254,6 +269,11 @@ async fn main() -> Result<()> {
                 requeued_for_retry = stats.requeued_for_retry,
                 exhausted_retries = stats.exhausted_retries,
                 parked_for_cookies = stats.parked_for_cookies,
+                // Epic 5a: the operator checkpoint hook's outcome. A
+                // nonzero checkpoints_failed means mid-run syncing did not
+                // happen — an alarm, but never a run failure.
+                checkpoints_run = stats.checkpoints_run,
+                checkpoints_failed = stats.checkpoints_failed,
                 "process complete"
             );
 

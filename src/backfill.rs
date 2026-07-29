@@ -80,7 +80,7 @@ pub async fn backfill_metadata(
             stats.videos_examined += 1;
 
             let envelope = match run(CommandSpec {
-                program: "yt-dlp",
+                program: "yt-dlp".to_string(),
                 args: build_metadata_only_args(&video.source_url),
                 timeout: ytdlp_timeout,
                 stderr_capture_bytes: 8 * 1024,

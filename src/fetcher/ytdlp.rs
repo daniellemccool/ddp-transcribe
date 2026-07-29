@@ -257,7 +257,7 @@ impl VideoFetcher for YtDlpFetcher {
         );
 
         let outcome = match run(CommandSpec {
-            program: "yt-dlp",
+            program: "yt-dlp".to_string(),
             args,
             timeout: self.timeout,
             stderr_capture_bytes: 8 * 1024,
@@ -290,7 +290,7 @@ impl VideoFetcher for YtDlpFetcher {
             return (
                 capture,
                 Err(FetchError::ToolFailed {
-                    tool: "yt-dlp",
+                    tool: "yt-dlp".to_string(),
                     exit_code: outcome.exit_code,
                     signal: outcome.signal,
                     stderr_excerpt,

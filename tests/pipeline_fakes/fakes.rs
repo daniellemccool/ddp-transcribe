@@ -177,6 +177,7 @@ pub(crate) async fn run_single_fetch_worker(store: SharedStore, fetcher: Arc<dyn
                 .expect("default table"),
         ),
         retries: 1,
+        checkpoint: None,
     });
 
     let worker = tokio::spawn(fetch_worker(

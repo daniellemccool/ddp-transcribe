@@ -43,6 +43,14 @@ pub struct RunCensus {
     pub terminal_by_label: BTreeMap<String, usize>,
     pub stale_after_success: usize,
     pub stale_after_failure: usize,
+    /// Epic 5a: operator checkpoint hook firings this run (exit 0) and
+    /// firings that failed. Not attrition — run infrastructure — but they
+    /// belong in the durable per-run record alongside the `checkpoint_cmd`
+    /// / `checkpoint_every_secs` config in `batch_runs.params_json`: "was
+    /// this run's output actually being synced mid-run?" is answerable
+    /// only from the pair.
+    pub checkpoints_run: u64,
+    pub checkpoints_failed: u64,
 }
 
 impl From<&ProcessStats> for RunCensus {
@@ -57,6 +65,8 @@ impl From<&ProcessStats> for RunCensus {
             terminal_by_label: s.terminal_by_label.clone(),
             stale_after_success: s.stale_after_success,
             stale_after_failure: s.stale_after_failure,
+            checkpoints_run: s.checkpoints_run,
+            checkpoints_failed: s.checkpoints_failed,
         }
     }
 }
@@ -130,6 +140,12 @@ impl std::fmt::Display for BatchCensus {
             f,
             "    stale_after_failure {:>5}",
             self.run.stale_after_failure
+        )?;
+        writeln!(f, "    checkpoints_run    {:>6}", self.run.checkpoints_run)?;
+        writeln!(
+            f,
+            "    checkpoints_failed {:>6}",
+            self.run.checkpoints_failed
         )
     }
 }
@@ -525,6 +541,8 @@ mod tests {
                 terminal_by_label: std::collections::BTreeMap::new(),
                 stale_after_success: 0,
                 stale_after_failure: 0,
+                checkpoints_run: 0,
+                checkpoints_failed: 0,
             },
         };
         let json = serde_json::to_string(&census).unwrap();

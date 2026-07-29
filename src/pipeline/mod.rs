@@ -54,6 +54,24 @@ pub use pipelined::{fetch_worker, run_pipelined, transcribe_worker, FetchedItem,
 #[allow(unused_imports)]
 pub use serial::run_serial;
 
+/// Operator checkpoint hook (Epic 5a): run `cmd` every `every` for as long
+/// as the batch is running, so a long uncapped run syncs artifacts mid-run
+/// instead of only at run boundaries.
+///
+/// Deliberately minimal: a program path and a period. The hook takes no
+/// arguments (the operator's script owns its own configuration) and the
+/// pipeline never inspects its output beyond exit status — see
+/// `pipelined::run_pipelined`'s checkpoint task for the
+/// failures-never-abort contract.
+#[derive(Debug, Clone)]
+pub struct CheckpointConfig {
+    pub cmd: PathBuf,
+    /// Doubles as the hook's timeout: a hook that outlives its own period is
+    /// an operator configuration error, surfaced as a timeout warn rather
+    /// than allowed to pile up overlapping invocations.
+    pub every: Duration,
+}
+
 pub struct ProcessOptions {
     pub worker_id: String,
     pub transcripts_root: PathBuf,
@@ -98,6 +116,11 @@ pub struct ProcessOptions {
     /// time). Default 1 — pilot evidence: one retry recovers the dominant
     /// recoverable class (NoDataBlocks re-fetch 10/10 OK).
     pub retries: i64,
+    /// Epic 5a: operator checkpoint hook, `None` when `--checkpoint-cmd` was
+    /// not supplied (feature off — the pre-Epic-5a behavior of syncing only
+    /// at run boundaries). Consumed by `run_pipelined`, which spawns one
+    /// timer task for it; `run_serial` ignores it.
+    pub checkpoint: Option<CheckpointConfig>,
 }
 
 #[derive(Debug, Default)]
@@ -147,6 +170,16 @@ pub struct ProcessStats {
     /// Epic 4a: inline write-offs this run, keyed by label — the census's
     /// run-side terminal-by-label breakdown (attrition documentation).
     pub terminal_by_label: std::collections::BTreeMap<String, usize>,
+    /// Epic 5a: operator checkpoint hook invocations that exited 0 this run.
+    /// Input-side like every other field here (ADR-0007): one count per
+    /// firing of the timer, not per artifact synced — the pipeline has no
+    /// visibility into what the operator's script moved.
+    pub checkpoints_run: u64,
+    /// Epic 5a: checkpoint hook firings that did NOT exit 0 — nonzero exit,
+    /// timeout, or spawn failure. A nonzero value here is an operator alarm
+    /// (mid-run syncing is not happening), never a run failure: the hook
+    /// path deliberately has no error return (see `run_pipelined`).
+    pub checkpoints_failed: u64,
 }
 
 /// Outcome of a single `process_one` call. `StaleAfterSuccess` is the

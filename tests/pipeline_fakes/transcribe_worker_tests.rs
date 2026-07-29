@@ -54,6 +54,7 @@ async fn transcribe_worker_processes_one_item_then_exits_on_channel_close() -> a
                 .expect("default table"),
         ),
         retries: 1,
+        checkpoint: None,
     };
 
     let (tx, rx) = mpsc::channel::<FetchedItem>(2);
@@ -167,6 +168,7 @@ async fn transcribe_worker_exits_on_cancellation() -> anyhow::Result<()> {
                 .expect("default table"),
         ),
         retries: 1,
+        checkpoint: None,
     };
 
     let (_tx, rx) = mpsc::channel::<FetchedItem>(2);
@@ -260,6 +262,7 @@ async fn transcribe_worker_increments_stale_after_failure_on_swept_claim() -> an
                 .expect("default table"),
         ),
         retries: 1,
+        checkpoint: None,
     };
 
     let (tx, rx) = mpsc::channel::<FetchedItem>(2);

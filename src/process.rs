@@ -8,7 +8,12 @@ use crate::errors::FetchError;
 
 #[derive(Debug)]
 pub struct CommandSpec<'a> {
-    pub program: &'static str,
+    /// Program to execute. Owned `String` (was `&'static str` through Epic
+    /// 4c) because the operator checkpoint hook's program is a runtime
+    /// `PathBuf` from `--checkpoint-cmd`, not a compiled-in literal. The
+    /// tool-name fields on [`RunError`] (and the [`crate::errors::FetchError`]
+    /// variants they map to) widened with it.
+    pub program: String,
     pub args: Vec<String>,
     pub timeout: Duration,
     /// Last-N bytes of stderr retained in `CommandOutcome.stderr_excerpt`.
@@ -50,20 +55,17 @@ pub struct CommandOutcome {
 pub enum RunError {
     #[error("failed to spawn `{tool}`: {source}")]
     Spawn {
-        tool: &'static str,
+        tool: String,
         #[source]
         source: std::io::Error,
     },
 
     #[error("subprocess `{tool}` timed out after {duration:?}")]
-    Timeout {
-        tool: &'static str,
-        duration: Duration,
-    },
+    Timeout { tool: String, duration: Duration },
 
     #[error("io error reading subprocess output for `{tool}`: {source}")]
     Io {
-        tool: &'static str,
+        tool: String,
         #[source]
         source: std::io::Error,
     },
@@ -132,7 +134,7 @@ where
     Ok(Some(Vec::from(deque)))
 }
 
-#[tracing::instrument(level = "debug", skip(spec), fields(tool = spec.program))]
+#[tracing::instrument(level = "debug", skip(spec), fields(tool = spec.program.as_str()))]
 pub async fn run(spec: CommandSpec<'_>) -> Result<CommandOutcome, RunError> {
     let started = std::time::Instant::now();
 
@@ -150,7 +152,7 @@ pub async fn run(spec: CommandSpec<'_>) -> Result<CommandOutcome, RunError> {
         .collect();
     tracing::debug!(args = ?logged_args, "spawning subprocess");
 
-    let mut child = Command::new(spec.program)
+    let mut child = Command::new(&spec.program)
         .args(&spec.args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -158,7 +160,7 @@ pub async fn run(spec: CommandSpec<'_>) -> Result<CommandOutcome, RunError> {
         .kill_on_drop(true)
         .spawn()
         .map_err(|source| RunError::Spawn {
-            tool: spec.program,
+            tool: spec.program.clone(),
             source,
         })?;
 
@@ -183,11 +185,11 @@ pub async fn run(spec: CommandSpec<'_>) -> Result<CommandOutcome, RunError> {
 
     let result = timeout(spec.timeout, async {
         let (stdout, stderr_bytes) = read_outputs.await.map_err(|source| RunError::Io {
-            tool: spec.program,
+            tool: spec.program.clone(),
             source,
         })?;
         let status = child.wait().await.map_err(|source| RunError::Io {
-            tool: spec.program,
+            tool: spec.program.clone(),
             source,
         })?;
         Ok::<_, RunError>((stdout, stderr_bytes, status))
@@ -227,7 +229,7 @@ pub async fn run(spec: CommandSpec<'_>) -> Result<CommandOutcome, RunError> {
             // Both mechanisms intentional — do not "clean up" by removing one.
             let _ = child.start_kill();
             Err(RunError::Timeout {
-                tool: spec.program,
+                tool: spec.program.clone(),
                 duration: spec.timeout,
             })
         }
@@ -241,7 +243,7 @@ mod tests {
     #[tokio::test]
     async fn echo_succeeds_with_stdout() {
         let spec = CommandSpec {
-            program: "echo",
+            program: "echo".to_string(),
             args: vec!["hello".into(), "world".into()],
             timeout: Duration::from_secs(5),
             stderr_capture_bytes: 1024,
@@ -257,7 +259,7 @@ mod tests {
     #[tokio::test]
     async fn false_returns_nonzero_exit() {
         let spec = CommandSpec {
-            program: "false",
+            program: "false".to_string(),
             args: vec![],
             timeout: Duration::from_secs(5),
             stderr_capture_bytes: 1024,
@@ -271,7 +273,7 @@ mod tests {
     #[tokio::test]
     async fn timeout_kills_long_running_subprocess() {
         let spec = CommandSpec {
-            program: "sleep",
+            program: "sleep".to_string(),
             args: vec!["10".into()],
             timeout: Duration::from_millis(200),
             stderr_capture_bytes: 1024,
@@ -288,7 +290,7 @@ mod tests {
     #[tokio::test]
     async fn missing_program_returns_spawn_error() {
         let spec = CommandSpec {
-            program: "this-program-does-not-exist-1234567",
+            program: "this-program-does-not-exist-1234567".to_string(),
             args: vec![],
             timeout: Duration::from_secs(5),
             stderr_capture_bytes: 1024,
@@ -305,7 +307,7 @@ mod tests {
     #[test]
     fn run_error_spawn_maps_to_tool_not_found() {
         let e = RunError::Spawn {
-            tool: "yt-dlp",
+            tool: "yt-dlp".to_string(),
             source: std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"),
         };
         match FetchError::from(e) {
@@ -317,7 +319,7 @@ mod tests {
     #[test]
     fn run_error_io_maps_to_system_io() {
         let e = RunError::Io {
-            tool: "yt-dlp",
+            tool: "yt-dlp".to_string(),
             source: std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe"),
         };
         match FetchError::from(e) {
