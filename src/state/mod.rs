@@ -944,6 +944,15 @@ impl Store {
     /// sweep is operator-recovery semantics; application-retry semantics
     /// (and the `attempt_count` ladder) belong to Epic 3's classifier.
     ///
+    /// **Observability:** every recovered row also gets a `swept_stale`
+    /// `video_events` row carrying the stale claim's provenance
+    /// (`was_claimed_by` / `claimed_at` / `threshold_secs`). This is pure
+    /// forensics — it changes no predicate and no status semantics. Its
+    /// purpose is that after this change *every* legitimate
+    /// `in_progress → pending` transition leaves a trace, so a pending-count
+    /// increase WITHOUT matching events is hard evidence for the
+    /// concurrent-writer-loss hypothesis rather than a sweep.
+    ///
     /// **`threshold == 0` semantics:** cutoff == now, so the predicate is
     /// `claimed_at < now` — same-second claims survive the sweep (the
     /// timestamp has second resolution; a claim made in the same second as
@@ -965,8 +974,32 @@ impl Store {
         let threshold_secs = i64::try_from(threshold.as_secs()).unwrap_or(i64::MAX);
         let cutoff = now.saturating_sub(threshold_secs);
 
-        let changed = self
+        let tx = self
             .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("begin immediate for sweep_stale_claims")?;
+
+        // Provenance of the rows the UPDATE below is about to recover. Read
+        // inside the same IMMEDIATE transaction with the same predicate, so
+        // the event set exactly matches the recovered set.
+        let stale: Vec<(String, Option<String>, Option<i64>)> = {
+            let mut stmt = tx
+                .prepare_cached(
+                    "SELECT video_id, claimed_by, claimed_at FROM videos
+                     WHERE status = 'in_progress'
+                       AND claimed_at IS NOT NULL
+                       AND claimed_at < ?1",
+                )
+                .context("prepare stale-claim provenance for sweep_stale_claims")?;
+            let rows = stmt
+                .query_map(params![cutoff], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .context("query stale-claim provenance for sweep_stale_claims")?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .context("collect stale-claim provenance for sweep_stale_claims")?;
+            rows
+        };
+
+        let changed = tx
             .execute(
                 "UPDATE videos
                  SET status = 'pending',
@@ -979,6 +1012,29 @@ impl Store {
                 params![now, cutoff],
             )
             .context("UPDATE videos for sweep_stale_claims")?;
+
+        debug_assert_eq!(stale.len(), changed, "event set must match recovered set");
+
+        {
+            let mut ev = tx
+                .prepare_cached(
+                    "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
+                     VALUES (?1, ?2, 'swept_stale', 'sweep', ?3)",
+                )
+                .context("prepare swept_stale event for sweep_stale_claims")?;
+            for (video_id, claimed_by, claimed_at) in &stale {
+                let detail = serde_json::json!({
+                    "was_claimed_by": claimed_by,
+                    "claimed_at": claimed_at,
+                    "threshold_secs": threshold.as_secs(),
+                })
+                .to_string();
+                ev.execute(params![video_id, now, detail])
+                    .with_context(|| format!("swept_stale event for {video_id}"))?;
+            }
+        }
+
+        tx.commit().context("commit sweep_stale_claims")?;
 
         if changed > 0 {
             tracing::info!(recovered = changed, threshold_secs, "sweep_stale_claims");

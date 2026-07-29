@@ -486,7 +486,17 @@ fn log_resolved_config(cfg: &config::Config, command: &cli::Command) {
     }
 }
 
+/// Real hostname for worker attribution (two-instance deployments):
+/// `/proc/sys/kernel/hostname` → `$HOSTNAME` → `"host"`. Before this, both
+/// SRC instances reported the literal `"host"` and A/B attribution leaned on
+/// pid ranges alone.
 fn hostname_or_default() -> String {
+    if let Ok(h) = std::fs::read_to_string("/proc/sys/kernel/hostname") {
+        let h = h.trim();
+        if !h.is_empty() {
+            return h.to_string();
+        }
+    }
     std::env::var("HOSTNAME").unwrap_or_else(|_| "host".to_string())
 }
 

@@ -525,31 +525,30 @@ fn sweep_stale_claims_recovers_stale_row() -> anyhow::Result<()> {
     // attempt_count is NOT bumped by sweep (0024).
     assert_eq!(row.attempt_count, 1, "attempt_count unchanged by sweep");
 
-    // Carry-forward from T6/T7 review: sweep MUST NOT emit a
-    // video_events row (0024: sweep is operator-recovery, not an
-    // application event; tracing::info! is the only record).
+    // Recovery is observable: the sweep writes exactly one 'swept_stale'
+    // event for the row it recovered (pure forensics — 0024's blind-revert
+    // semantics are untouched; see tests/state_sweep.rs for the provenance
+    // assertions).
     let event_count: i64 = raw.query_row(
         "SELECT COUNT(*) FROM video_events WHERE video_id = 'vid_a'",
         [],
         |r| r.get(0),
     )?;
-    // claim_next emits a 'claimed' event — that's the only event we
-    // expect for this row. The sweep itself must add zero.
     let sweep_event_count: i64 = raw.query_row(
         "SELECT COUNT(*) FROM video_events
-         WHERE video_id = 'vid_a' AND event_type LIKE '%sweep%'",
+         WHERE video_id = 'vid_a' AND event_type = 'swept_stale'",
         [],
         |r| r.get(0),
     )?;
     assert_eq!(
-        sweep_event_count, 0,
-        "sweep must not emit a video_events row"
+        sweep_event_count, 1,
+        "sweep must emit one swept_stale event per recovered row"
     );
-    // Sanity check that the underlying total is reasonable (just the
-    // claim_next 'claimed' event, no more).
+    // Sanity check that the underlying total is reasonable (the claim_next
+    // 'claimed' event plus that one sweep event, no more).
     assert_eq!(
-        event_count, 1,
-        "only the claim_next 'claimed' event should be present"
+        event_count, 2,
+        "only the claim_next 'claimed' and the sweep's 'swept_stale' events should be present"
     );
 
     Ok(())
