@@ -213,6 +213,109 @@ impl Store {
     }
 }
 
+/// One succeeded video missing its raw metadata envelope — input row for
+/// the backfill-metadata cohort walk.
+// 0002: the `backfill-metadata` subcommand (Task 03) is the first bin
+// consumer; lift this allow when that loop lands.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct MissingMetadataVideo {
+    pub video_id: String,
+    pub source_url: String,
+}
+
+impl Store {
+    /// Size of the backfill cohort: succeeded videos with no
+    /// video_metadata_raw row (the rc1-era gap). Read-only.
+    // 0002: consumed by the `backfill-metadata` subcommand (Task 03);
+    // lift this allow when that loop lands.
+    #[allow(dead_code)]
+    pub fn count_succeeded_missing_metadata(&self) -> Result<u64> {
+        let n: i64 = self
+            .conn
+            .prepare_cached(
+                "SELECT COUNT(*) FROM videos v
+                 WHERE v.status = 'succeeded'
+                   AND NOT EXISTS (SELECT 1 FROM video_metadata_raw m
+                                   WHERE m.video_id = v.video_id)",
+            )
+            .context("prepare count_succeeded_missing_metadata")?
+            .query_row([], |r| r.get(0))
+            .context("query count_succeeded_missing_metadata")?;
+        Ok(u64::try_from(n).unwrap_or(0))
+    }
+
+    /// Keyset page over the backfill cohort, ordered by video_id.
+    ///
+    /// Two cached statements chosen by the cursor, not one OR-NULL
+    /// statement — see `metadata_raw_page`'s comment for the O(n²) plan
+    /// the single-statement shape produces. The page seeks on the
+    /// videos PK and filters status per row (the only secondary index
+    /// is pending-only); fine at cohort scale (~10K of ~3M rows).
+    /// Rows leave the cohort as envelopes land, which is safe: the
+    /// cursor only moves forward, and vanished rows are all behind it.
+    /// Videos succeeding behind the cursor during a live run are caught
+    /// by a re-run (rerun-to-convergence semantics).
+    // 0002: consumed by the `backfill-metadata` subcommand (Task 03);
+    // lift this allow when that loop lands.
+    #[allow(dead_code)]
+    pub fn succeeded_missing_metadata_page(
+        &self,
+        after_video_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MissingMetadataVideo>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let map = |r: &rusqlite::Row<'_>| {
+            Ok(MissingMetadataVideo {
+                video_id: r.get(0)?,
+                source_url: r.get(1)?,
+            })
+        };
+        let rows = match after_video_id {
+            None => {
+                let mut stmt = self
+                    .conn
+                    .prepare_cached(
+                        "SELECT v.video_id, v.source_url FROM videos v
+                         WHERE v.status = 'succeeded'
+                           AND NOT EXISTS (SELECT 1 FROM video_metadata_raw m
+                                           WHERE m.video_id = v.video_id)
+                         ORDER BY v.video_id
+                         LIMIT ?1",
+                    )
+                    .context("prepare succeeded_missing_metadata_page (first page)")?;
+                let rows = stmt
+                    .query_map(rusqlite::params![limit], map)
+                    .context("query succeeded_missing_metadata_page (first page)")?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .context("collect succeeded_missing_metadata_page (first page)")?;
+                rows
+            }
+            Some(after) => {
+                let mut stmt = self
+                    .conn
+                    .prepare_cached(
+                        "SELECT v.video_id, v.source_url FROM videos v
+                         WHERE v.status = 'succeeded'
+                           AND v.video_id > ?1
+                           AND NOT EXISTS (SELECT 1 FROM video_metadata_raw m
+                                           WHERE m.video_id = v.video_id)
+                         ORDER BY v.video_id
+                         LIMIT ?2",
+                    )
+                    .context("prepare succeeded_missing_metadata_page (subsequent page)")?;
+                let rows = stmt
+                    .query_map(rusqlite::params![after, limit], map)
+                    .context("query succeeded_missing_metadata_page (subsequent page)")?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .context("collect succeeded_missing_metadata_page (subsequent page)")?;
+                rows
+            }
+        };
+        Ok(rows)
+    }
+}
+
 /// Full videos-row projection for `status --video-id`. Every nullable
 /// column stays Option — the renderer decides what to show.
 #[derive(Debug, Serialize)]
