@@ -216,64 +216,6 @@ with the `VideoId` newtype refactor that 0004 anticipates.
 
 ---
 
-### `--whisper-model` global flag rejected when placed after subcommand (missing `global = true`)
-
-**Found in:** SRC bake (2026-05-06). `UU_TIKTOK_WHISPER_MODEL=... process`
-works, and `--whisper-model X process ...` works, but
-`process ... --whisper-model X` fails with
-`error: unexpected argument '--whisper-model' found`.
-**Disposition:** Clap UX papercut; env-var bypass available; not blocking.
-**Trigger to revisit:** any operator pastes the flag after the subcommand
-and gets the puzzling clap error, or when next touching `src/cli.rs` for
-unrelated reasons.
-
-In `src/cli.rs`, the `whisper_model` field on `GlobalArgs` is declared
-without `global = true`. Clap therefore parses it strictly as a top-level
-argument that must precede the subcommand:
-
-```
-uu-tiktok --whisper-model PATH process     # works
-uu-tiktok process --whisper-model PATH     # rejected
-UU_TIKTOK_WHISPER_MODEL=PATH uu-tiktok process    # works (env var bypass)
-```
-
-The env var sidesteps this entirely and is the production deployment
-pattern, so this is not blocking. But the flag form is the more
-discoverable path for ad-hoc operator use, and clap's `global = true`
-attribute makes the flag work on either side of the subcommand without any
-other code change:
-
-```rust
-#[arg(long, env = "UU_TIKTOK_WHISPER_MODEL", global = true)]
-pub whisper_model: Option<PathBuf>,
-```
-
-Should land alongside any future change touching the same struct.
-
-**Scope extension (2026-05-20, T11 review):** the same papercut affects
-ALL `GlobalArgs` fields except `compute_lang_probs`. As of T11
-(`feat/plan-b-epic-2`), the GlobalArgs surface is:
-
-| Field | `global = true`? |
-|---|---|
-| `profile` | no |
-| `state_db` | no |
-| `inbox` | no |
-| `transcripts` | no |
-| `log_format` | no |
-| `whisper_model` | no (this entry's original scope) |
-| `compute_lang_probs` | **yes** (the lone outlier) |
-| `stale_claim_threshold` | no (added in T11) |
-| `classification` | no (added in Epic 4a) |
-
-The Epic 5 cleanup sweep should add `global = true` to all seven
-non-`compute_lang_probs` flags in one commit. T11's
-`stale_claim_threshold` was deliberately left without `global = true`
-to match the prevailing project convention rather than create
-two-of-nine inconsistency.
-
----
-
 ### `YtDlpFetcher::acquire` tight coupling to yt-dlp's `{video_id}.wav` output filename
 
 **Found in:** T11 code quality review (opus); finding 3 of the original
@@ -602,3 +544,48 @@ subdirectories with same-named files.
    one `Transaction`, `?` before commit), but no test forces a mid-tx failure
    to pin the rollback. Add one alongside the Epic 5 test-hardening bundle.
 
+
+---
+
+### `global = true` both-position CLI test asserts parse acceptance only
+
+**Found in:** metadata-backfill branch review (v0.3.1 `global = true` rider,
+`7dfa771`).
+**Disposition:** Hardening candidate; bundle with the Epic 5 test-hardening
+sweep. The shipped test is not wrong, just shallow.
+**Trigger to revisit:** Epic 5 test-hardening bundle, or the next change to
+`GlobalArgs`.
+
+`tests/cli.rs`'s both-position test proves the parser *accepts* every
+`GlobalArgs` flag after the subcommand — it does not prove the value reaches
+`GlobalArgs`, nor what happens when a flag is given on both sides of the
+subcommand. Clap's `global = true` propagates a value forward and has
+last-occurrence-wins semantics for duplicates, but that is inherited behavior
+this repo has never pinned. A `clap::Parser::try_parse_from` unit test (no
+process spawn, so cheap) asserting (a) the parsed field equals the value given
+after the subcommand, and (b) the documented precedence when the same flag
+appears both before *and* after it, would turn an acceptance check into a
+behavior check.
+
+**Found in:** metadata-backfill branch final whole-branch review. Three more
+test-hardening candidates on the same subcommand, bundled here rather than
+filed separately.
+
+1. `--dry-run` silently ignores `--limit` on `backfill-metadata` (documented
+   behavior — see the runbook's backfill section — but not self-documenting
+   at the `src/cli.rs` `BackfillMetadata` definition). A clap
+   `conflicts_with = "limit"` on `dry_run` would make clap itself reject the
+   combination and print the conflict, instead of relying on the operator
+   having read the docs.
+2. `tests/backfill_metadata.rs`'s dry-run test has no PATH shim, so it
+   doesn't prove dry-run invokes nothing — it only proves the process exits
+   as expected with the real `yt-dlp` (or whatever is on PATH) never
+   actually being called in practice. A sentinel-file shim (writes a marker
+   if invoked; test asserts the marker is absent) would make "invokes
+   nothing" a hermetic, positive assertion rather than an absence-of-evidence
+   inference.
+3. `tests/backfill_metadata.rs`'s `statuses()` snapshot helper covers only
+   `(video_id, status)`. Widen it to also capture `claimed_by`, `claimed_at`,
+   `attempt_count`, and `succeeded_at` so a regression that touches lifecycle
+   columns `backfill-metadata` must never write to (it is metadata-only, per
+   ADR-0042's carve-out) fails a snapshot instead of passing silently.

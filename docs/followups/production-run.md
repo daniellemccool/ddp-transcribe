@@ -46,10 +46,12 @@ Plan B has been sized against that number. The estimate needs at least:
   succeeded do.
 
 **Note on the disk figure:** the Epic 4c plan quoted "6–12 GB" for
-`video_metadata_raw`, and a comment in `src/metadata_loader.rs` still does.
-That number predates the caption descope, which removed the largest projected
-component of the envelope. The corrected estimate is the 3–6 GB above; the
-stale comment is a cosmetic fix for whoever next edits that file.
+`video_metadata_raw`. That number predates the caption descope, which removed
+the largest projected component of the envelope. The corrected estimate is the
+3–6 GB above. ~~The `src/metadata_loader.rs` comment repeating the stale
+figure is a cosmetic fix for whoever next edits that file.~~ **Done** — the
+comment now reads 3–6 GB (v0.3.1 doc pass). The rest of this entry (throughput,
+window narrowing, WAV headroom, rate-limit exposure, coverage) is still open.
 
 ---
 
@@ -95,4 +97,55 @@ verify-after-update check useless; the operator had to fall back to comparing
 `Cargo.toml` `version` to match the tag in the same commit the tag points at,
 per the ADR-0043 promotion sequence. Consider adding the check to ADR-0043's
 Guidance when it is next revised.
+**Resolution in flight:** the v0.3.1 tag commit. The metadata-backfill branch
+deliberately does **not** bump `Cargo.toml` (0.1.0 → 0.3.1 belongs in the
+commit the annotated tag points at, per ADR-0043 step 2, not in a feature
+merge). Archive this entry with that tag commit's SHA in the post-merge doc
+pass — not before, or the record claims a bump that has not happened.
 
+---
+
+### Cookie-gated residue after the first `backfill-metadata` run
+
+**Found in:** the 2026-07-29 `backfill-metadata` design review (codex-advisor
+argv pass) and the branch's review loop.
+**Disposition:** Nothing to do until there is a real number. The subcommand
+ships deliberately cookie-free.
+**Trigger to revisit:** the first full backfill run's stats line — specifically
+the `capture-failed` count and what a hand-probe of a sample of those videos
+says.
+
+**Hypothesis (unverified):** some fraction of the ~10,235-video backfill cohort
+has become login-gated since it was originally fetched (rc1 fetched and
+transcribed these videos successfully, so they were reachable then). Those rows
+would count `capture-failed` on every run and never drain — a permanent residue
+rather than a transient failure. The size of that residue is unmeasured; it is
+equally possible the residue is dominated by outright deletions, which no cookie
+would recover.
+
+If the residue turns out to be material *and* attributable to gating, extending
+`backfill-metadata` to carry cookies would require an **explicit ADR-0035
+revision**, not a quiet argv change: widening the cookie gating-class was
+considered and deliberately rejected in the 2026-07-29 design review, on the
+grounds that a metadata-only sweep is exactly the wrong place to put the
+study's session credential (it touches the whole cohort, not the narrow
+login-gated retry path 0035 scopes cookies to). Measure first; if the answer is
+"yes, and it matters", write the ADR revision before the code.
+
+**Two argv-hardening candidates rejected as out-of-scope for v0.3.1**, both
+gated on the same trigger (the first full run's `capture-failed` stats):
+
+- **`--ignore-no-formats-error`** — would let yt-dlp still print the info dict
+  for videos whose *formats* have expired while the metadata is otherwise
+  extractable. Plausibly a real slice of the rc1 cohort, since these videos are
+  months old and format URLs age out faster than the entries themselves. Held
+  back because it changes what "capture succeeded" means and nobody has
+  measured how many videos it would recover; add it only with a
+  before/after count from a real run.
+- **A `--` separator before the URL positional** — purely defensive, against a
+  `source_url` that begins with `-` and would otherwise be parsed as a flag.
+  Today's cohort URLs are canonical TikTok watch URLs built by the ingest path,
+  so the exposure is theoretical. This mirrors the standing Plan C entry for the
+  same hardening on the fetch argv (`docs/followups/plan-c.md`, "yt-dlp argv
+  `--` separator before `source_url`") — if it lands there, land it in
+  `build_metadata_only_args` at the same time rather than separately.

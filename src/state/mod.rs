@@ -600,6 +600,32 @@ impl Store {
         Ok(changed)
     }
 
+    /// Insert a raw metadata envelope only if the video has none
+    /// (backfill-metadata's write path). Unlike `upsert_metadata_raw`
+    /// (fetch-path, last-write-wins), the backfill must never overwrite
+    /// an envelope the fetch path captured. Returns the row-change
+    /// count per 0006: 1 = inserted, 0 = a row already exists (the
+    /// caller counts it; it is not an error). Best-effort contract as
+    /// for `upsert_metadata_raw`: metadata writes never change a
+    /// video's pipeline outcome.
+    pub fn insert_metadata_raw_if_missing(
+        &mut self,
+        video_id: &str,
+        envelope_json: &str,
+    ) -> Result<usize> {
+        let now = unix_now();
+        let changed = self
+            .conn
+            .execute(
+                "INSERT INTO video_metadata_raw (video_id, fetched_at, raw_json)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(video_id) DO NOTHING",
+                params![video_id, now, envelope_json],
+            )
+            .with_context(|| format!("inserting backfill metadata for {video_id}"))?;
+        Ok(changed)
+    }
+
     /// Apply one loader batch in a single transaction (Epic 4c). Overwrites
     /// unconditionally — last-write-wins replay semantics, so re-running
     /// `load-metadata` after a parser fix needs no re-fetch. Returns the

@@ -18,36 +18,43 @@ pub struct Cli {
 
 #[derive(Parser, Debug, Clone)]
 pub struct GlobalArgs {
-    #[arg(long, value_enum, default_value_t = Profile::Dev, env = "DDP_TRANSCRIBE_PROFILE")]
+    #[arg(long, value_enum, default_value_t = Profile::Dev, env = "DDP_TRANSCRIBE_PROFILE", global = true)]
     pub profile: Profile,
 
     #[arg(
         long,
         default_value = "./state.sqlite",
-        env = "DDP_TRANSCRIBE_STATE_DB"
+        env = "DDP_TRANSCRIBE_STATE_DB",
+        global = true
     )]
     pub state_db: PathBuf,
 
-    #[arg(long, default_value = "./inbox", env = "DDP_TRANSCRIBE_INBOX")]
+    #[arg(
+        long,
+        default_value = "./inbox",
+        env = "DDP_TRANSCRIBE_INBOX",
+        global = true
+    )]
     pub inbox: PathBuf,
 
     #[arg(
         long,
         default_value = "./transcripts",
-        env = "DDP_TRANSCRIBE_TRANSCRIPTS"
+        env = "DDP_TRANSCRIBE_TRANSCRIPTS",
+        global = true
     )]
     pub transcripts: PathBuf,
 
-    #[arg(long, value_enum, default_value_t = LogFormat::Human, env = "DDP_TRANSCRIBE_LOG_FORMAT")]
+    #[arg(long, value_enum, default_value_t = LogFormat::Human, env = "DDP_TRANSCRIBE_LOG_FORMAT", global = true)]
     pub log_format: LogFormat,
 
     /// Path to the whisper.cpp model file. Overrides the profile default.
-    #[arg(long, env = "DDP_TRANSCRIBE_WHISPER_MODEL")]
+    #[arg(long, env = "DDP_TRANSCRIBE_WHISPER_MODEL", global = true)]
     pub whisper_model: Option<PathBuf>,
 
     /// Path to a classification-policy TOML (Epic 4a). Absent → the
     /// evidence-derived compiled default.
-    #[arg(long, env = "DDP_TRANSCRIBE_CLASSIFICATION")]
+    #[arg(long, env = "DDP_TRANSCRIBE_CLASSIFICATION", global = true)]
     pub classification: Option<PathBuf>,
 
     /// Compute per-language probability distribution per video.
@@ -61,7 +68,8 @@ pub struct GlobalArgs {
     #[arg(
         long,
         env = "DDP_TRANSCRIBE_STALE_CLAIM_THRESHOLD",
-        value_parser = humantime::parse_duration
+        value_parser = humantime::parse_duration,
+        global = true
     )]
     pub stale_claim_threshold: Option<std::time::Duration>,
 
@@ -71,7 +79,8 @@ pub struct GlobalArgs {
     #[arg(
         long,
         env = "DDP_TRANSCRIBE_DOWNLOAD_WORKERS",
-        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..),
+        global = true
     )]
     pub download_workers: Option<usize>,
 
@@ -82,7 +91,8 @@ pub struct GlobalArgs {
     #[arg(
         long,
         env = "DDP_TRANSCRIBE_CHANNEL_CAPACITY",
-        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..),
+        global = true
     )]
     pub channel_capacity: Option<usize>,
 }
@@ -199,6 +209,19 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Backfill raw metadata (video_metadata_raw) for succeeded videos
+    /// that predate fetch-time capture. Metadata-only yt-dlp per video —
+    /// no media download, never touches video status. Best-effort and
+    /// re-runnable; run `load-metadata` afterwards to fill the typed
+    /// columns.
+    BackfillMetadata {
+        /// Cap the number of videos attempted (smoke runs).
+        #[arg(long)]
+        limit: Option<u64>,
+        /// Print the cohort size and exit without invoking yt-dlp.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,4 +233,15 @@ pub enum Profile {
 pub enum LogFormat {
     Human,
     Json,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clap_definition_is_internally_consistent() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
 }

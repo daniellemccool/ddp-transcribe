@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::{MetadataColumns, Store};
 
-/// Raw rows pulled per keyset page. The whole table is 6–12 GB at
+/// Raw rows pulled per keyset page. The whole table is 3–6 GB at
 /// production scale, so the loader never materializes more than a page.
 const PAGE_SIZE: usize = 10_000;
 

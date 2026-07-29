@@ -62,7 +62,6 @@ finding 3 → Epic 5, finding 4 → Plan C (see those groups below).
 - T9/T10: `Store::conn`/`conn_mut` accessor hygiene → Epic 5 (delete `conn_mut`; refresh comment)
 - T13: `ingest::walk_recursive` polish → Epic 5 (bundle with sync-IO sweep)
 - T15: `output::shard_dir` unused → Epic 5 (delete)
-- SRC-bake + T11: `--whisper-model` (and 5 other GlobalArgs flags) rejected after subcommand → Epic 5 (one-line `global = true` per flag)
 - T11 (split at Epic 3 close): `YtDlpFetcher::acquire` coupling to `{video_id}.wav` output filename → Epic 5 (fetch hardening)
 - Epic 3 final review: test-hardening bundle (signal-capture spawn+kill test, `classify_message` precedence/case test, `transcribe_worker` kind-string end-to-end assertion) → Epic 5
 - Epic 3 final review: `state/mod.rs` hygiene bundle — sweep mutators post-4a rename (bare `tx.commit()?`, attempt_count==2 assertion, defensive claimed_by/claimed_at clearing, sweep capped-requeue no-event assertion) → Epic 5
@@ -76,12 +75,14 @@ finding 3 → Epic 5, finding 4 → Plan C (see those groups below).
 - Epic 4c T05 review: startup `cleanup_tmp_files` sweep can delete a concurrent live process's in-flight tmp — pre-existing, multi-process deployments only → Epic 5 (bundle with the `cleanup_tmp_files` polish entry)
 - Epic 4c T03 review: `upsert_metadata_raw` is not claim-guarded — a stale worker can overwrite a newer envelope (accepted last-write-wins tradeoff; snapshot staleness only, self-heals) → Epic 5
 - PR #23 review: ingest file-ledger hardening bundle (basename-only key collision risk, 1s-resolution change detector, no mid-tx rollback test) → Epic 5 (ingest/sync-IO sweep)
+- v0.3.1 review: CLI test-hardening bundle — `global = true` both-position test asserts parse acceptance only (no value-propagation or duplicate-precedence assertion); `backfill-metadata` `--dry-run`/`--limit` needs `conflicts_with`; dry-run test needs a PATH shim; `statuses()` snapshot needs claim/attempt columns → Epic 5 (test-hardening bundle)
 - Full Epic 5 entries: [followups/epic-5.md](followups/epic-5.md)
 
 **Production run (operational milestones, not code epics)**
 - Epic 4c close: capacity estimate for the production batch — 2,982,471 uniques, throughput / window narrowing / disk (`video_metadata_raw` ~3–6 GB, transient WAVs) → before the first non-pilot `process` batch
 - Epic 4c close: `video_metadata_raw` prune / VACUUM decision — keep for re-parse, prune for export, or reclaim in place → after the first production batch's `load-metadata` completes
-- v0.3.0 promotion: Cargo package version must track release tags (`-V` printed 0.1.0 on both rc1 and v0.3.0) → next release tag
+- v0.3.0 promotion: Cargo package version must track release tags (`-V` printed 0.1.0 on both rc1 and v0.3.0) → **resolution in flight: the v0.3.1 tag commit** (archive it there, not at branch merge)
+- v0.3.1 backfill: cookie-gated metadata residue — hypothesis (unverified) that part of the cohort is now login-gated; carries two rejected argv-hardening candidates (`--ignore-no-formats-error`, `--` separator) → after the first full `backfill-metadata` run's stats
 - Full production-run entries: [followups/production-run.md](followups/production-run.md)
 
 **Plan C (short-link resolution, multi-engine, storage scale)**

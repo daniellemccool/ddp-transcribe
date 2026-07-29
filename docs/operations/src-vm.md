@@ -115,8 +115,10 @@ mtime)` still matches the ledger before reading them.
 The operator sequence for a batch is **`ingest` → `process` → `load-metadata` →
 `status`**. Canonical invocation is the bare binary with explicit paths
 (CWD-independent). **Every global flag (`--state-db`, `--transcripts`,
-`--inbox`, `--whisper-model`, `--classification`, …) goes BEFORE the
-subcommand** — the parser rejects them after it.
+`--inbox`, `--whisper-model`, `--classification`, …) is accepted on either side
+of the subcommand as of v0.3.1** (all of them are clap `global = true`); the
+examples here keep them before the subcommand, and on a pre-v0.3.1 binary that
+placement is the only one that parses.
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 ddp-transcribe \
@@ -182,6 +184,66 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite load-metadata
   (Research API only). Spoken content reaches the study through whisper
   transcription, not through platform-served caption tracks.
 
+### Metadata backfill for the pre-capture cohort (v0.3.1)
+
+Fetch-time metadata capture landed in v0.3.0, so every video transcribed by the
+rc1-era binary succeeded without an envelope: ~**10,235** succeeded videos had no
+`video_metadata_raw` row at the 2026-07-29 snapshot. `backfill-metadata` walks
+exactly that cohort (status `succeeded`, no envelope) and runs **one
+metadata-only yt-dlp invocation per video** to recover it.
+
+```bash
+ddp-transcribe --state-db ~/ddp-state/state.sqlite backfill-metadata --dry-run
+ddp-transcribe --state-db ~/ddp-state/state.sqlite load-metadata --dry-run   # note rows_skipped_unparseable before the smoke run
+ddp-transcribe --state-db ~/ddp-state/state.sqlite backfill-metadata --limit 5
+ddp-transcribe --state-db ~/ddp-state/state.sqlite load-metadata --dry-run   # rows_examined +5, rows_skipped_unparseable unchanged
+ddp-transcribe --state-db ~/ddp-state/state.sqlite backfill-metadata
+ddp-transcribe --state-db ~/ddp-state/state.sqlite load-metadata
+```
+
+- **Zero-code verification for the `--limit 5` smoke run:** the `load-metadata
+  --dry-run` before and after it is a free check that the 5 backfilled
+  envelopes actually parse, with no code changes needed. Note
+  `rows_skipped_unparseable` from the first `--dry-run` (run before the smoke
+  backfill); after the smoke run's `load-metadata --dry-run`,
+  `rows_examined` should read exactly +5 with `rows_skipped_unparseable`
+  unchanged — that combination proves the 5 backfilled envelopes are
+  schema-identical and parse cleanly, without writing anything or reading a
+  single line of code.
+
+- **What it never does:** no media download, no GPU, no whisper model load, no
+  writes to video status or lifecycle columns, and **no cookies** (the argv is a
+  URL plus print flags — cookies stay scoped to login-gated fetch retries per
+  ADR-0035). Its only write is an insert-if-missing into `video_metadata_raw`, so
+  a fetch-path envelope is never overwritten.
+- **Safe to run alongside a live `process` run.** The DB is WAL with a
+  `busy_timeout`, and the loop is serial — one invocation at a time — so it adds
+  a single-threaded trickle of yt-dlp requests, not a second fetch fleet. That
+  serial shape *is* the rate limiter; do not parallelize it. Budget ~**2–4 h**
+  for the full ~10k cohort.
+- **The printed cohort count is an advisory snapshot**, taken once before the
+  pass starts. If a `process` run is working concurrently it can drift from the
+  run's own `examined` count — that divergence is expected, not a miscount.
+- **`--dry-run` reports the FULL cohort and ignores `--limit`**: it prints the
+  cohort size and exits without invoking yt-dlp at all. Use `--limit N` (without
+  `--dry-run`) for the smoke run.
+- **The stats line** is `examined / captured / capture-failed / already-filled /
+  insert-failed`. Every examined video increments exactly one of the four
+  outcomes. `capture-failed` is *expected*, not an error signal: the cohort is
+  months old and dead, deleted, or region/login-blocked videos can no longer be
+  extracted. `already-filled` means the fetch path landed an envelope
+  concurrently (theirs wins). `insert-failed` should be ~0; a non-trivial count
+  means look at the DB, not the network.
+- **Best-effort and re-runnable.** Rows leave the cohort as envelopes land, so a
+  re-run only retries what is still missing and converges on the permanently
+  unreachable residue. Timeouts and spawn failures lose the captured stdout —
+  same behavior as the fetch path — and simply count as `capture-failed`; a
+  re-run retries them.
+- **Finish with `load-metadata`** at a convenient boundary: backfilled envelopes
+  are schema-identical to fetch-time ones, so the loader fills the same typed
+  columns with no special handling. Running it early and again later costs
+  nothing (it is replayable by design).
+
 ### Status quickstart (Epic 4b)
 
 ```bash
@@ -222,11 +284,12 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite --transcripts ~/ddp-work/tran
   `migrate`/`status`/`recompute-window`/`load-metadata` no longer log
   `whisper_model_path` (resolved; was a cosmetic false-alarm risk in Epic 3/4a
   logs).
-- Global flags are **not** `global = true` in clap (except `--compute-lang-probs`),
-  so `ddp-transcribe process --state-db …` is a parse error. Always put
-  `--state-db` / `--transcripts` / `--whisper-model` / `--inbox` /
-  `--classification` before the subcommand, as every example here does. (Filed
-  for Epic 5: make them true globals.)
+- Global flags became true clap globals in v0.3.1, so
+  `ddp-transcribe process --state-db …` now parses. On any binary older than
+  that (rc1, v0.3.0) only the before-the-subcommand placement every example here
+  uses works — `process --state-db …` fails with
+  `error: unexpected argument '--state-db' found`, which is a version signal,
+  not a typo.
 - Bulk file transfer off the volume: iRODS/Yoda per-file overhead dominates below
   ~1 MB/file; parallelize disjoint shard ranges or use a bundle transfer. 120k
   files single-stream ≈ 24 h (measured 2026-07-07).
