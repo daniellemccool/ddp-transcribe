@@ -75,11 +75,13 @@ finding 3 → Epic 5, finding 4 → Plan C (see those groups below).
 - Epic 4c operator review: `main.rs` re-declares the library's entire module tree (double compilation, broadened `pub` surface, a driver of the accumulated `dead_code` allows) → Epic 5 hygiene bundle (cites ADR-0002's deferred bin/lib reassessment)
 - Epic 4c T05 review: startup `cleanup_tmp_files` sweep can delete a concurrent live process's in-flight tmp — pre-existing, multi-process deployments only → Epic 5 (bundle with the `cleanup_tmp_files` polish entry)
 - Epic 4c T03 review: `upsert_metadata_raw` is not claim-guarded — a stale worker can overwrite a newer envelope (accepted last-write-wins tradeoff; snapshot staleness only, self-heals) → Epic 5
+- PR #23 review: ingest file-ledger hardening bundle (basename-only key collision risk, 1s-resolution change detector, no mid-tx rollback test) → Epic 5 (ingest/sync-IO sweep)
 - Full Epic 5 entries: [followups/epic-5.md](followups/epic-5.md)
 
 **Production run (operational milestones, not code epics)**
 - Epic 4c close: capacity estimate for the production batch — 2,982,471 uniques, throughput / window narrowing / disk (`video_metadata_raw` ~3–6 GB, transient WAVs) → before the first non-pilot `process` batch
 - Epic 4c close: `video_metadata_raw` prune / VACUUM decision — keep for re-parse, prune for export, or reclaim in place → after the first production batch's `load-metadata` completes
+- v0.3.0 promotion: Cargo package version must track release tags (`-V` printed 0.1.0 on both rc1 and v0.3.0) → next release tag
 - Full production-run entries: [followups/production-run.md](followups/production-run.md)
 
 **Plan C (short-link resolution, multi-engine, storage scale)**

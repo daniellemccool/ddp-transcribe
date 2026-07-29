@@ -38,3 +38,10 @@ indexed comments are anchored). Workaround for T2: manually restored
 comment-1's anchor in 0009 before commit so the rendered body matches
 `index.yaml`'s comment list. If this pattern recurs in T3-T12, propose an
 upstream `adg` fix.
+
+## `data-input.md` embedded `src/ingest.rs` line references drift
+
+Found in PR #23 review: the architecture deepdive cites `src/ingest.rs`
+line ranges that shifted as the file grew across Epic 4b/4c and the ingest
+hardening (~150 inserted lines). Convert to anchor-comment or function-name
+references when the doc is next edited for content reasons.

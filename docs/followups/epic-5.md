@@ -574,3 +574,31 @@ that honestly reports when that snapshot was taken. It self-heals on the next
 successful fetch of the same video. Adding the guard would mean threading
 `worker_id` into a call site whose whole point is that it runs unconditionally
 on both the success and failure paths — which is why it was not done.
+
+---
+
+### Ingest file-ledger hardening bundle
+
+**Found in:** PR #23 review (production ingest hardening, 2026-07-29) — three
+Minors carried out of the review by agreement.
+**Disposition:** None blocks the campaign; bundle for Epic 5's ingest/sync-IO
+sweep.
+**Trigger to revisit:** Epic 5, or immediately if the inbox ever gains
+subdirectories with same-named files.
+
+1. **Basename-only ledger key.** `ingested_files.file_name` is the basename by
+   design (the inbox directory may move between hosts), but `walk_json_files`
+   recurses — two same-named files in different subdirectories would collide in
+   the ledger and the second could be wrongly skipped. Today's inbox is flat
+   and filenames embed participant+key (collision-proof in practice); the risk
+   is structural, not live.
+2. **(size, mtime) is a one-second-resolution change detector.** A same-size
+   rewrite within one mtime tick is invisible to the ledger (row-level upserts
+   remain the correctness backstop, so the miss costs freshness of that file's
+   rows, not corruption). Tests deliberately use size deltas to avoid the
+   flake; the limitation is real and now documented here.
+3. **No mid-transaction rollback regression test.** The ledger upsert rides the
+   same per-file transaction as the row upserts (atomicity by construction —
+   one `Transaction`, `?` before commit), but no test forces a mid-tx failure
+   to pin the rollback. Add one alongside the Epic 5 test-hardening bundle.
+
