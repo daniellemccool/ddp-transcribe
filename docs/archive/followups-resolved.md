@@ -815,3 +815,38 @@ is now an exhaustive match scoped per subcommand — `init`/`ingest`/`migrate`/
 and [ADR-0040](../decisions/0040-analysis-window-is-computed-at-ingest-recompute-window-is-the-only-flag-mutator.md).
 The durable record of the standing premise remains the 0032 ADR comment —
 this entry closes only the Epic 4b instance of honoring it.
+
+## Resolved by the metadata-backfill branch / v0.3.1 (2026-07-29)
+
+One long-standing Epic 5 CLI entry, resolved as a rider on the
+`backfill-metadata` branch rather than waiting for the Epic 5 sweep.
+
+### `--whisper-model` global flag rejected when placed after subcommand (missing `global = true`)
+
+**Found in:** SRC bake (2026-05-06). `UU_TIKTOK_WHISPER_MODEL=... process`
+works, and `--whisper-model X process ...` works, but
+`process ... --whisper-model X` fails with
+`error: unexpected argument '--whisper-model' found`. Scope-extended
+2026-05-20 (T11 review) to every `GlobalArgs` field except
+`compute_lang_probs`, which was the lone outlier already carrying the
+attribute.
+**Resolution:** `7dfa771` (`fix(cli): global = true on all 10 GlobalArgs
+flags — accepted on either side of the subcommand (SRC-bake + T11
+followup)`), shipped in v0.3.1 as a rider on the metadata-backfill branch.
+Every `GlobalArgs` field now carries `global = true`, so each flag parses
+on either side of the subcommand; a clap-definition consistency unit test
+and a `tests/cli.rs` both-position acceptance test guard it.
+
+**Final scope was 10 flags, not the seven this entry's table projected.**
+The 2026-05-20 table predates Epic 4a's `classification` and Epic 4c's
+`download_workers` / `channel_capacity`; the kickoff prompt's "six" was
+staler still. The 10: `profile`, `state_db`, `inbox`, `transcripts`,
+`log_format`, `whisper_model`, `classification`, `stale_claim_threshold`,
+`download_workers`, `channel_capacity` (`compute_lang_probs` was already
+global, for 11 total). `stale_claim_threshold`'s deliberate T11 omission —
+taken to avoid a two-of-nine inconsistency — is moot now that the sweep is
+uniform.
+
+`docs/operations/src-vm.md` was corrected in the same branch: its two
+"flags must go BEFORE the subcommand" claims now read as a pre-v0.3.1
+version signal rather than a standing rule.
