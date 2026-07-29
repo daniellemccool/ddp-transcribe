@@ -149,3 +149,61 @@ gated on the same trigger (the first full run's `capture-failed` stats):
   same hardening on the fetch argv (`docs/followups/plan-c.md`, "yt-dlp argv
   `--` separator before `source_url`") — if it lands there, land it in
   `build_metadata_only_args` at the same time rather than separately.
+
+---
+
+### Concurrent-writer state updates lost, then idempotently re-done
+
+**Found in:** first 2×A10 production shakedown (2026-07-28), the R11
+two-writer scenario's first real test.
+**Hypothesis (unverified):** one of two concurrent `process` runs (its own
+summary: `claimed=13 succeeded=13`, `stale_after_*=0`) had its DB updates
+absent minutes later — its videos read `pending` again while their transcript
+artifacts existed on disk; a later uncapped sweep re-claimed and re-did them
+(ADR 0008 idempotency absorbed the loss as duplicate GPU work). The
+alternative — that the observing query itself misread — was not excluded:
+both spot-checked IDs read `succeeded` after the sweep, so the direct
+evidence window closed.
+**Disposition:** verify/instrument the two-writer commit path before any code
+change; do not fix blind.
+**Trigger to revisit:** any observed increase in the `pending` count during
+the campaign (operators watch the 5-minute tally; a bump = recurrence, note
+the timestamp), or the next epic touching claiming/state commits.
+
+---
+
+### `process` claims more than `--max-videos`
+
+**Found in:** the same shakedown — runs invoked with `--max-videos 5`
+reported `claimed=13` and `claimed=10`.
+**Disposition:** cap accounting appears per-worker rather than per-run.
+Harmless for uncapped campaign use; misleading for smoke tests and capped
+batches.
+**Trigger to revisit:** next epic touching the claim loop / fetch workers.
+
+---
+
+### Ingest should name skipped inbox files
+
+**Found in:** production ingest 2026-07-28 — `files=141` of 142 inbox
+entries consumed; the summary line gives no hint which file was skipped or
+why. If the odd one out is a valid donor DDP that failed to parse, this is a
+data-loss bug rather than a logging nit — identifying it is the first step.
+**Disposition:** log skipped files by name + reason at ingest.
+**Trigger to revisit:** next ingest-touching epic; sooner if donor counts
+ever look short.
+
+---
+
+### Periodic in-run checkpoint for uncapped campaign runs
+
+**Found in:** campaign ops 2026-07-29 — the batch-end auto-sync (hop 1)
+only fires when a `process` invocation exits, so an uncapped campaign run
+staled the volume (and the Yoda-pushed resume snapshot) for hours until a
+manual `sync-to-storage.sh`. Documented as an operator ritual in the
+researchcloud repo (`yoda-operations.md`, "Campaign checkpoint ritual"), but
+the pipeline could emit a periodic checkpoint (or invoke a configurable hook)
+every N videos/minutes and remove the human dependency.
+**Disposition:** ops-robustness feature, small.
+**Trigger to revisit:** the ritual getting missed in practice, or the next
+ops-focused epic.
