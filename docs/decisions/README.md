@@ -71,3 +71,7 @@ Load the ADR(s) whose filename matches the area you are touching.
 ### Ingest
 
 - [0039 — DDP watch-history timestamps are treated as UTC, documentary-only and empirically unresolved](./0039-ddp-watch-history-timestamps-are-treated-as-utc-documentary-only-and-empirically-unresolved.md)
+
+### Operations
+
+- [0043 — Production deployments build pinned release tags; promotion is an explicit tag-and-bump](./0043-production-deployments-build-pinned-release-tags-promotion-is-an-explicit-tag-and-bump.md)

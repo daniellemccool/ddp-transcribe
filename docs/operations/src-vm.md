@@ -6,8 +6,10 @@ live against the running workspace that day. Supersedes the untracked
 which describe a storage-hop git topology that does not exist on the VM — treat
 those as historical. Epic 4a amended the *operate* section (triage retired,
 retry moved in-pipeline, classification became an operator TOML); Epic 4c added
-the post-run `load-metadata` step and the v4 → v5 migration; the topology and
-update procedure are stable.
+the post-run `load-metadata` step and the v4 → v5 migration; the topology is
+stable. **2026-07-29:** the update procedure changed from pull-main to
+tag-and-relaunch (ADR-0043), after an incident where the workspace's pinned
+`pipeline_git_ref` had drifted four epics stale — see below.
 
 ## Topology (what actually exists)
 
@@ -34,7 +36,43 @@ update procedure are stable.
   pair are **non-normative conveniences / SRC integration glue** (ADR-0032 comment,
   2026-07-07). The operator interface is the binary itself.
 
-## Update procedure (three steps, all required)
+## Update procedure — tag-and-relaunch (production, per ADR-0043)
+
+The SRC catalog item provisions the campaign machine by `git checkout
+<pipeline_git_ref>`, where the ref is a pinned annotated release tag
+(currently the `v0.x` series) — it never tracks `main`. A rebuild mid-run
+(crash, restore-from-storage, workspace relaunch) must reproduce
+byte-equivalent behavior, which only a fixed tag guarantees. Shipping code
+to a campaign machine is therefore a **promotion**, done from the
+workstation/dev repo, not a `git pull` on the VM:
+
+1. Merge the change to `main` on `daniellemccool/ddp-transcribe`.
+2. Cut an annotated release tag with release notes:
+   `git tag -a vX.Y.Z -m "<release notes>"`.
+3. Push the tag: `git push origin vX.Y.Z`.
+4. Bump the SRC catalog item's `pipeline_git_ref` to `vX.Y.Z`.
+5. Delete and relaunch the workspace so it provisions fresh at the new tag.
+
+Every epic close-out checklist must ask "does this need a release tag?" —
+2026-07-29 incident: the campaign workstation faithfully rebuilt
+`pipeline_git_ref = v0.2.0-rc1` (pre-Epic-3 code) while `main` was four
+epics ahead, because no tag had been cut past `v0.2.0-rc1` since. The
+provisioning was not broken; the promotion habit was.
+
+Verify after every relaunch:
+
+```bash
+ddp-transcribe -V && ddp-transcribe -h | head -12   # subcommand list matches expectations
+```
+
+### Dev / emergency escape hatch (diverges from the pinned tag — NOT the production procedure)
+
+For local iteration or an emergency hotfix on a live workspace only, the
+three-step manual path below rebuilds in place. This intentionally leaves the
+VM's binary **off** the pinned `pipeline_git_ref` — the workspace will not
+reproduce this state on a rebuild, and the divergence must be resolved by
+cutting a real tag and bumping `pipeline_git_ref` (steps above) at the first
+opportunity, not left standing:
 
 ```bash
 git -C ~/src/ddp-transcribe checkout main && git -C ~/src/ddp-transcribe pull
@@ -44,27 +82,33 @@ sudo cp ~/src/ddp-transcribe/target/release/ddp-transcribe /usr/local/bin/ddp-tr
 
 Step 3 is load-bearing: `/usr/local/bin/ddp-transcribe` is what PATH (and any
 script) resolves — a skipped `cp` means old code runs while you believe you
-deployed. Verify after every update:
+deployed. Verify after this path too:
 
 ```bash
 ddp-transcribe -V && ddp-transcribe -h | head -12   # subcommand list matches expectations
 ```
 
-After deploying an Epic 4c (v5-schema) binary, migrate the state DB before
-running anything else against it:
+After deploying an ingest-production-hardening (v6-schema) binary, migrate
+the state DB before running anything else against it:
 
 ```bash
-ddp-transcribe --state-db ~/ddp-state/state.sqlite migrate   # -> v5, idempotent
+ddp-transcribe --state-db ~/ddp-state/state.sqlite migrate   # -> v6, idempotent
 ```
 
 The ladder is sequential, so one `migrate` call takes a v3 DB all the way to
-v5. v3 → v4 adds `watch_history.watched_at_raw` (the timezone-verdict hedge,
+v6. v3 → v4 adds `watch_history.watched_at_raw` (the timezone-verdict hedge,
 ADR-0039); v4 → v5 adds the `video_metadata_raw` table and eight nullable
-metadata columns on `videos` (ADR-0042). `migrate` is a no-op if the DB is
-already at v5. The binary refuses to
-open an un-migrated DB for any other subcommand — `Store::open` hard-fails
-with a typed `SchemaVersionMismatch` error naming the expected/found
-versions and instructing `migrate` (ADR-0022).
+metadata columns on `videos` (ADR-0042); v5 → v6 adds the `ingested_files`
+ledger, created deliberately empty (the migration cannot know which files
+produced a pre-v6 DB's rows). `migrate` is a no-op if the DB is already at
+v6. The binary refuses to open an un-migrated DB for any other subcommand —
+`Store::open` hard-fails with a typed `SchemaVersionMismatch` error naming
+the expected/found versions and instructing `migrate` (ADR-0022).
+
+Because the ledger migrates in empty, the first `ingest` run after migrating
+pays one full walk (stat + read + parse every file, same cost as pre-ledger
+behavior) to populate it; every later run skips files whose `(name, size,
+mtime)` still matches the ledger before reading them.
 
 ## Operating (current, Epic 4c)
 

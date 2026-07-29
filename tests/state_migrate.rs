@@ -2,8 +2,9 @@
 
 //! Migration test: synthesize a v1 DB (no new Epic 2 columns; meta.schema_version='1'),
 //! run the migrate function, confirm v2 columns are present and meta.schema_version
-//! lands on the current SCHEMA_VERSION (v5 as of Epic 4c — the ladder walks
-//! v1→v2→v3→v4→v5 in one call). Then run Store::open and confirm it succeeds (round-trip
+//! lands on the current SCHEMA_VERSION (v6 as of the ingest production
+//! hardening — the ladder walks v1→v2→v3→v4→v5→v6 in one call). Then run
+//! Store::open and confirm it succeeds (round-trip
 //! with T2's check). Also covers the v2→v3 leg directly: a hand-built v2-shaped DB
 //! migrating to v3's `batch_runs` table + attempt-aware pending index.
 
@@ -748,4 +749,137 @@ fn migrate_upgrades_v4_to_v5_idempotently() {
         )
         .unwrap();
     assert!(desc.is_none() && fetched.is_none());
+}
+
+/// Synthesize a v5-shaped schema (Epic 4c metadata columns and
+/// `video_metadata_raw` present, no `ingested_files` ledger) at `path` — the
+/// shape the production DB is on today. Same hand-built-SQL style as
+/// `synthesize_v4_db`, recording `meta.schema_version = '5'`.
+fn synthesize_v5_db(path: &std::path::Path) -> Result<()> {
+    let conn = Connection::open(path)?;
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA foreign_keys = ON;
+
+         CREATE TABLE IF NOT EXISTS videos (
+             video_id            TEXT PRIMARY KEY NOT NULL,
+             source_url          TEXT NOT NULL,
+             canonical           INTEGER NOT NULL,
+             status              TEXT NOT NULL CHECK (status IN
+                                   ('pending','in_progress','succeeded','failed_terminal','failed_retryable')),
+             claimed_by          TEXT,
+             claimed_at          INTEGER,
+             attempt_count       INTEGER NOT NULL DEFAULT 0,
+             succeeded_at        INTEGER,
+             duration_s          REAL,
+             language_detected   TEXT,
+             fetcher             TEXT,
+             transcript_source   TEXT,
+             last_retryable_kind     TEXT,
+             last_retryable_message  TEXT,
+             terminal_reason         TEXT,
+             terminal_message        TEXT,
+             video_description   TEXT,
+             uploader            TEXT,
+             uploader_id         TEXT,
+             video_created_at    INTEGER,
+             view_count          INTEGER,
+             like_count          INTEGER,
+             comment_count       INTEGER,
+             metadata_fetched_at INTEGER,
+             first_seen_at       INTEGER NOT NULL,
+             updated_at          INTEGER NOT NULL
+         );
+
+         CREATE INDEX IF NOT EXISTS idx_videos_pending_v3
+             ON videos (status, attempt_count, first_seen_at, video_id)
+             WHERE status = 'pending';
+
+         CREATE TABLE IF NOT EXISTS watch_history (
+             respondent_id  TEXT NOT NULL,
+             video_id       TEXT NOT NULL,
+             watched_at     INTEGER NOT NULL,
+             in_window      INTEGER NOT NULL,
+             watched_at_raw TEXT,
+             PRIMARY KEY (respondent_id, video_id, watched_at),
+             FOREIGN KEY (video_id) REFERENCES videos(video_id)
+         );
+
+         CREATE TABLE IF NOT EXISTS batch_runs (
+             run_id       INTEGER PRIMARY KEY,
+             started_at   INTEGER NOT NULL,
+             finished_at  INTEGER,
+             params_json  TEXT NOT NULL,
+             policy_toml  TEXT NOT NULL,
+             census_json  TEXT
+         );
+
+         CREATE TABLE IF NOT EXISTS video_metadata_raw (
+             video_id   TEXT PRIMARY KEY NOT NULL,
+             fetched_at INTEGER NOT NULL,
+             raw_json   TEXT NOT NULL,
+             FOREIGN KEY (video_id) REFERENCES videos(video_id)
+         );
+
+         CREATE TABLE IF NOT EXISTS meta (
+             key   TEXT PRIMARY KEY NOT NULL,
+             value TEXT NOT NULL
+         );
+
+         INSERT INTO meta (key, value) VALUES ('schema_version', '5');
+        ",
+    )?;
+    conn.execute(
+        "INSERT INTO videos (video_id, source_url, canonical, status, first_seen_at, updated_at)
+         VALUES ('vid_a', 'https://example/vid_a', 1, 'pending', 1, 1)",
+        [],
+    )?;
+    conn.execute(
+        "INSERT INTO watch_history (respondent_id, video_id, watched_at, in_window, watched_at_raw)
+         VALUES ('w1', 'vid_a', 1000, 1, '2024-05-20 12:00:00')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Ingest production hardening: the v5→v6 leg in isolation. A v5-shaped DB
+/// (no `ingested_files` table) migrates to v6: the ledger table exists and
+/// is deliberately EMPTY — the migration cannot know which files produced
+/// the existing rows, so the first post-migration run pays one full walk —
+/// pre-existing rows are untouched, and a second `run_migrate` is idempotent.
+#[test]
+fn migrate_upgrades_v5_to_v6_idempotently() {
+    let tmp = TempDir::new().unwrap();
+    let db = tmp.path().join("state.sqlite");
+    synthesize_v5_db(&db).unwrap();
+
+    run_migrate(&db).expect("v5→v6");
+    run_migrate(&db).expect("idempotent second run");
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let version: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, SCHEMA_VERSION);
+
+    let ledger_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM ingested_files", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        ledger_count, 0,
+        "migration must not invent ledger rows for pre-v6 data"
+    );
+
+    // Pre-existing donor data survives the bump untouched.
+    let rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM watch_history", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 1);
+
+    // Round-trip: Store::open accepts the migrated DB (0022's both-directions rule).
+    let _store = Store::open(&db).expect("migrated DB opens at the current version");
 }

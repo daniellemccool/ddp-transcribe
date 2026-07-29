@@ -16,7 +16,7 @@ Respondent identity is derived from the filename, not from the file contents. Th
 assignment={N}_task={N}_participant={ID}_source=tiktok_key={N}-tiktok.json
 ```
 
-The `participant=` segment is extracted and used as the `respondent_id` for every row produced from that file (`src/ingest.rs:143–159`). If the segment is absent the file-level parse aborts with an error.
+The `participant=` segment is extracted and used as the `respondent_id` for every row produced from that file. If the segment is absent the file is skipped and counted (see *Parsing strategy* below).
 
 Each JSON file is an array of section objects. The parser deserialises eagerly (not streaming) via serde_json into `Vec<Section>` (`src/ingest.rs:39`). Only sections whose key is `tiktok_watch_history` are consumed; unknown keys are ignored by serde's default field matching. Each entry in that array has two string fields, capitalised as TikTok exports them:
 
@@ -29,7 +29,9 @@ Each JSON file is an array of section objects. The parser deserialises eagerly (
 
 ### Parsing strategy
 
-**File-level failures abort.** If a file's JSON is malformed or the filename lacks a `participant=` segment, ingest propagates the error and stops (`src/ingest.rs:36–40, 155`).
+**File-level failures skip and count; they never abort the run.** A filename with no `participant=` segment, a file that cannot be stat'd or read, and JSON that is not a `Vec<Section>` all produce one `warn!` carrying the underlying cause, one `files_skipped_unparseable` increment, and a move to the next file. This was a July-2026 production fix: the donation platform writes decline stubs (`{"status":"data_submission declined"}` — a top-level object) into the same inbox, and one of them used to veto a 142-file run at `serde_json::from_slice`. A file that parses but carries no watch history is *processed* (zero rows), not skipped — the three file-level counters are parallel per [ADR 0007](../../decisions/0007-stats-structs-count-the-input-side-with-verb-named-parallel-counters.md), so each walked file increments exactly one of `files_processed`, `files_skipped_unparseable`, `files_skipped_already_ingested`.
+
+**The ingest ledger (`ingested_files`, schema v6) skips unchanged files before they are read.** Before opening a file, ingest stats it and looks up its basename in the ledger; an exact `(file_name, size_bytes, mtime)` match logs at *debug* (this is the normal fast path, not a problem), increments `files_skipped_already_ingested`, and moves on. The ledger row is written inside the same transaction that commits that file's rows, so a row exists iff that file's data is committed — a crash mid-file leaves no ledger row and the next run reprocesses it. Changed files reprocess, with the row-level `INSERT OR IGNORE` upserts as the correctness backstop. A file with no representable unix mtime (or a non-UTF-8 basename) is treated as unmatchable: processed every run, no ledger row — redundant work, never skipped data. The migration deliberately leaves the ledger empty on an existing DB, so the first post-migration run pays one full walk.
 
 **Entry-level problems skip with a structured warn log and a counter increment.** There are three skip categories:
 

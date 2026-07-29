@@ -63,6 +63,8 @@ async fn main() -> Result<()> {
             let stats = ingest::ingest(&cfg.inbox, &mut store, window).context("ingest failed")?;
             tracing::info!(
                 files = stats.files_processed,
+                files_skipped_unparseable = stats.files_skipped_unparseable,
+                files_skipped_already_ingested = stats.files_skipped_already_ingested,
                 videos = stats.unique_videos_seen,
                 history = stats.watch_history_rows_processed,
                 duplicates = stats.watch_history_duplicates,

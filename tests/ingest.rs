@@ -56,10 +56,23 @@ fn ingest_news_orgs_fixture_writes_videos_and_watch_history() {
     assert!(row.canonical);
 }
 
+/// Clear the schema-v6 ingest ledger so the next `ingest` call actually
+/// re-walks the rows. The row-level INSERT-OR-IGNORE idempotence below is a
+/// correctness backstop independent of the file-level fast path, and stays
+/// under test; the fast path itself is covered by
+/// `unchanged_files_are_skipped_via_the_ledger_on_re_ingest`.
+fn forget_ingested_files(db: &std::path::Path) {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .execute("DELETE FROM ingested_files", [])
+        .unwrap();
+}
+
 #[test]
 fn ingest_news_orgs_is_idempotent() {
     let tmp = TempDir::new().unwrap();
-    let mut store = Store::open(&tmp.path().join("state.sqlite")).unwrap();
+    let db = tmp.path().join("state.sqlite");
+    let mut store = Store::open(&db).unwrap();
 
     let first = ingest(
         &news_orgs_fixture(),
@@ -67,6 +80,7 @@ fn ingest_news_orgs_is_idempotent() {
         ddp_transcribe::ingest::WindowBounds::default(),
     )
     .unwrap();
+    forget_ingested_files(&db);
     let second = ingest(
         &news_orgs_fixture(),
         &mut store,
@@ -142,7 +156,8 @@ fn ingest_local_real_fixture_is_idempotent() {
     }
 
     let tmp = TempDir::new().unwrap();
-    let mut store = Store::open(&tmp.path().join("state.sqlite")).unwrap();
+    let db = tmp.path().join("state.sqlite");
+    let mut store = Store::open(&db).unwrap();
 
     let first = ingest(
         &fixture,
@@ -150,6 +165,7 @@ fn ingest_local_real_fixture_is_idempotent() {
         ddp_transcribe::ingest::WindowBounds::default(),
     )
     .unwrap();
+    forget_ingested_files(&db);
     let second = ingest(
         &fixture,
         &mut store,
@@ -179,6 +195,247 @@ fn write_ddp(inbox: &std::path::Path, filename: &str, entries: &[(&str, &str)]) 
     );
     std::fs::create_dir_all(inbox).unwrap();
     std::fs::write(inbox.join(filename), body).unwrap();
+}
+
+fn watch_history_count(db: &std::path::Path) -> i64 {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    conn.query_row("SELECT COUNT(*) FROM watch_history", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// Production incident (July 2026): the donation platform writes a decline
+/// stub — a top-level JSON object, not the `Vec<Section>` array ingest
+/// expects — into the same inbox as the real exports. It used to abort the
+/// whole run at `serde_json::from_slice`. It must now be a counted skip.
+#[test]
+fn decline_stub_is_skipped_and_counted_without_aborting_the_run() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let inbox = tmp.path().join("inbox");
+    write_ddp(
+        &inbox,
+        "participant=good1_source=tiktok.json",
+        &[(
+            "2026-02-10 12:00:00",
+            "https://www.tiktokv.com/share/video/7000000000000000111/",
+        )],
+    );
+    write_ddp(
+        &inbox,
+        "participant=good2_source=tiktok.json",
+        &[(
+            "2026-02-11 12:00:00",
+            "https://www.tiktokv.com/share/video/7000000000000000222/",
+        )],
+    );
+    std::fs::write(
+        inbox.join("participant=declined_source=tiktok.json"),
+        r#"{"status":"data_submission declined"}"#,
+    )
+    .unwrap();
+
+    let db = tmp.path().join("state.sqlite");
+    let mut store = Store::open(&db).unwrap();
+    let stats = ingest(
+        &inbox,
+        &mut store,
+        ddp_transcribe::ingest::WindowBounds::default(),
+    )
+    .expect("one bad file must not veto the run");
+
+    assert_eq!(stats.files_skipped_unparseable, 1);
+    assert_eq!(stats.files_processed, 2);
+    assert_eq!(stats.watch_history_rows_processed, 2);
+    for id in ["7000000000000000111", "7000000000000000222"] {
+        assert!(
+            store.get_video_for_test(id).unwrap().is_some(),
+            "good file's rows must survive the bad file: {id}"
+        );
+    }
+}
+
+/// A file whose name carries no `participant=` segment (and unreadable /
+/// unstattable files, same arm) is a counted skip, not a fatal error.
+#[test]
+fn junk_filename_is_skipped_and_counted() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let inbox = tmp.path().join("inbox");
+    write_ddp(
+        &inbox,
+        "participant=good1_source=tiktok.json",
+        &[(
+            "2026-02-10 12:00:00",
+            "https://www.tiktokv.com/share/video/7000000000000000111/",
+        )],
+    );
+    // No `participant=` segment: parse_respondent_id_from_filename errors.
+    write_ddp(
+        &inbox,
+        "some-unrelated-export.json",
+        &[(
+            "2026-02-10 12:00:00",
+            "https://www.tiktokv.com/share/video/7000000000000000999/",
+        )],
+    );
+
+    let db = tmp.path().join("state.sqlite");
+    let mut store = Store::open(&db).unwrap();
+    let stats = ingest(
+        &inbox,
+        &mut store,
+        ddp_transcribe::ingest::WindowBounds::default(),
+    )
+    .expect("junk filename must not veto the run");
+
+    assert_eq!(stats.files_skipped_unparseable, 1);
+    assert_eq!(stats.files_processed, 1);
+    assert!(store
+        .get_video_for_test("7000000000000000999")
+        .unwrap()
+        .is_none());
+}
+
+/// Ledger fast path: a second ingest over an unchanged inbox touches no
+/// rows at all — it stats each file, matches the (name, size, mtime)
+/// triple, and skips. This is the fix for the 4.85M-no-op-upsert re-run.
+#[test]
+fn unchanged_files_are_skipped_via_the_ledger_on_re_ingest() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let inbox = tmp.path().join("inbox");
+    write_ddp(
+        &inbox,
+        "participant=w1_source=tiktok.json",
+        &[(
+            "2026-02-10 12:00:00",
+            "https://www.tiktokv.com/share/video/7000000000000000111/",
+        )],
+    );
+    write_ddp(
+        &inbox,
+        "participant=w2_source=tiktok.json",
+        &[(
+            "2026-02-11 12:00:00",
+            "https://www.tiktokv.com/share/video/7000000000000000222/",
+        )],
+    );
+
+    let db = tmp.path().join("state.sqlite");
+    let mut store = Store::open(&db).unwrap();
+    let first = ingest(
+        &inbox,
+        &mut store,
+        ddp_transcribe::ingest::WindowBounds::default(),
+    )
+    .unwrap();
+    assert_eq!(first.files_processed, 2);
+    assert_eq!(first.files_skipped_already_ingested, 0);
+    let rows_after_first = watch_history_count(&db);
+
+    let second = ingest(
+        &inbox,
+        &mut store,
+        ddp_transcribe::ingest::WindowBounds::default(),
+    )
+    .unwrap();
+    assert_eq!(second.files_skipped_already_ingested, 2);
+    assert_eq!(second.files_processed, 0);
+    assert_eq!(
+        second.watch_history_rows_processed, 0,
+        "no file was opened, so no row was even considered"
+    );
+    assert_eq!(watch_history_count(&db), rows_after_first);
+}
+
+/// A file whose content changed since the last ingest reprocesses: the
+/// ledger match is on the whole (name, size, mtime) triple, and the row
+/// upserts stay the correctness backstop for the entries that repeat.
+#[test]
+fn changed_file_is_reprocessed_and_its_ledger_row_updated() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let inbox = tmp.path().join("inbox");
+    let changing = "participant=w1_source=tiktok.json";
+    write_ddp(
+        &inbox,
+        changing,
+        &[(
+            "2026-02-10 12:00:00",
+            "https://www.tiktokv.com/share/video/7000000000000000111/",
+        )],
+    );
+    write_ddp(
+        &inbox,
+        "participant=w2_source=tiktok.json",
+        &[(
+            "2026-02-11 12:00:00",
+            "https://www.tiktokv.com/share/video/7000000000000000222/",
+        )],
+    );
+
+    let db = tmp.path().join("state.sqlite");
+    let mut store = Store::open(&db).unwrap();
+    ingest(
+        &inbox,
+        &mut store,
+        ddp_transcribe::ingest::WindowBounds::default(),
+    )
+    .unwrap();
+
+    let size_before: i64 = {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.query_row(
+            "SELECT size_bytes FROM ingested_files WHERE file_name = ?1",
+            rusqlite::params![changing],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+
+    // Rewrite with one extra entry: strictly larger, so the fingerprint
+    // differs even if the filesystem's mtime granularity is coarse.
+    write_ddp(
+        &inbox,
+        changing,
+        &[
+            (
+                "2026-02-10 12:00:00",
+                "https://www.tiktokv.com/share/video/7000000000000000111/",
+            ),
+            (
+                "2026-02-12 12:00:00",
+                "https://www.tiktokv.com/share/video/7000000000000000333/",
+            ),
+        ],
+    );
+
+    let second = ingest(
+        &inbox,
+        &mut store,
+        ddp_transcribe::ingest::WindowBounds::default(),
+    )
+    .unwrap();
+    assert_eq!(second.files_processed, 1, "only the changed file");
+    assert_eq!(
+        second.files_skipped_already_ingested, 1,
+        "the unchanged one"
+    );
+    assert_eq!(second.watch_history_rows_processed, 2);
+    assert!(store
+        .get_video_for_test("7000000000000000333")
+        .unwrap()
+        .is_some());
+
+    let size_after: i64 = {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.query_row(
+            "SELECT size_bytes FROM ingested_files WHERE file_name = ?1",
+            rusqlite::params![changing],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert!(
+        size_after > size_before,
+        "ledger row refreshed to the new fingerprint ({size_before} -> {size_after})"
+    );
 }
 
 #[test]
