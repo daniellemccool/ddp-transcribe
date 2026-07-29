@@ -143,10 +143,15 @@ Pending at this snapshot: full 2,933,940 · ≥Apr 1,651,243 · ≥May 1,177,930
 | Both at 4 | ~5,100 | 24 d | 13 d | 9.6 d | 5.8 d |
 | Both at 5 (if linear) | ~6,400 | 19 d | 11 d | 7.7 d | 4.6 d |
 
-Overnight running remains the other multiplier: the 22:00→05:00 idle gap
-costs ~30% of calendar time at any config (checkpoint hook, Epic 5a,
-removes its blocker — pending the sync-to-storage.sh fix tracked in the
-deploy repo's FOLLOWUPS).
+Overnight running starts tonight (2026-07-29) — the 7/28 gap was a
+tmux-setup gap, not a policy choice, so the ~85%-uptime column is the
+realistic one from here. The Epic 5a checkpoint hook's role is narrower
+than "unblocking overnight": it keeps the volume's RESUME SNAPSHOT fresh
+during long unattended runs (the DB itself is boot-disk-durable; snapshot
+staleness only bites a restore-after-VM-loss). Until the
+sync-to-storage.sh fix lands (deploy-repo FOLLOWUPS), the bedtime ritual
+is the flock'd `.backup` one-liner — the full script dies on rsync exit
+24 BEFORE refreshing the snapshot.
 
 **Headline for the PI conversation:** at both-at-4 + overnight running, the
 FULL corpus completes in ~4 weeks; a 3-month window in ~11 days; yield ≈
