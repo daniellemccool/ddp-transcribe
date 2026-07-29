@@ -38,6 +38,12 @@ impl YtDlpFetcher {
 /// `automatic_captions` would be permanently empty were they listed.
 pub(crate) const METADATA_PRINT_TEMPLATE: &str = "%(.{id,title,description,uploader,uploader_id,channel_id,timestamp,duration,view_count,like_count,comment_count,repost_count})j";
 
+/// Stdout capture cap for yt-dlp invocations that print the metadata
+/// line (~615 B/video measured live 2026-07-28; at-cap means the head
+/// was dropped, so the envelope builder treats a full buffer as
+/// unparseable). Shared by `acquire` and the backfill-metadata path.
+pub(crate) const STDOUT_CAP: usize = 64 * 1024;
+
 /// Build the yt-dlp argv and the expected output WAV path for a single video.
 ///
 /// Pure function: no I/O, no global state. Unit-testable.
@@ -156,6 +162,28 @@ fn build_yt_dlp_args(
     (args, wav_path, redact)
 }
 
+/// Argv for a metadata-only invocation (backfill-metadata): print the
+/// metadata line, transfer no media. `--skip-download` suppresses the
+/// transfer; `--no-simulate` keeps `--print` from downgrading the run
+/// to simulation (same as the fetch argv). Deliberately takes no
+/// cookies parameter — the backfill cohort is succeeded videos, and
+/// cookies ride only SensitiveLoginGated retries (ADR-0035).
+// 0002: consumed by the `backfill-metadata` subcommand (Task 03); lift
+// this allow when that loop lands.
+#[allow(dead_code)]
+pub(crate) fn build_metadata_only_args(source_url: &str) -> Vec<String> {
+    vec![
+        "--no-playlist".to_string(),
+        "--no-warnings".to_string(),
+        "--quiet".to_string(),
+        "--skip-download".to_string(),
+        "--no-simulate".to_string(),
+        "--print".to_string(),
+        METADATA_PRINT_TEMPLATE.to_string(),
+        source_url.to_string(),
+    ]
+}
+
 /// Redact the cookie file path from a stderr excerpt so it never lands in
 /// error messages or the state DB (ADR 0035). Pure function, factored out
 /// of `acquire` for unit-testability.
@@ -174,7 +202,7 @@ fn scrub_cookie_path(excerpt: String, cookies: Option<&Path>) -> String {
 ///
 /// Shape: `{"schema":1,"printed":"<unparsed line>"}`. `schema` is the
 /// loader's compatibility gate.
-fn build_metadata_envelope(stdout: Option<&[u8]>, capture_cap: usize) -> Option<String> {
+pub(crate) fn build_metadata_envelope(stdout: Option<&[u8]>, capture_cap: usize) -> Option<String> {
     let bytes = stdout?;
     if bytes.is_empty() || bytes.len() >= capture_cap {
         return None;
@@ -224,7 +252,6 @@ impl VideoFetcher for YtDlpFetcher {
             opts.cookies_file.as_deref(),
         );
 
-        const STDOUT_CAP: usize = 64 * 1024;
         let outcome = match run(CommandSpec {
             program: "yt-dlp",
             args,
@@ -541,5 +568,46 @@ mod tests {
         assert!(build_metadata_envelope(Some(&at_cap), 64).is_none());
         // No capture at all → no envelope.
         assert!(build_metadata_envelope(None, 64).is_none());
+    }
+
+    #[test]
+    fn metadata_only_args_exact_shape() {
+        let args = build_metadata_only_args("https://www.tiktok.com/@u/video/123");
+        assert_eq!(
+            args,
+            vec![
+                "--no-playlist".to_string(),
+                "--no-warnings".to_string(),
+                "--quiet".to_string(),
+                "--skip-download".to_string(),
+                "--no-simulate".to_string(),
+                "--print".to_string(),
+                METADATA_PRINT_TEMPLATE.to_string(),
+                "https://www.tiktok.com/@u/video/123".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn metadata_only_args_never_download_subtitle_or_cookie_flags() {
+        let args = build_metadata_only_args("https://example/v");
+        for forbidden in [
+            "-x",
+            "-f",
+            "-S",
+            "-o",
+            "--postprocessor-args",
+            "--audio-format",
+            "--cookies",
+            "--write-subs",
+            "--write-auto-subs",
+            "--sub-langs",
+            "--list-subs",
+        ] {
+            assert!(
+                !args.iter().any(|a| a == forbidden),
+                "metadata-only argv must not contain {forbidden}"
+            );
+        }
     }
 }
