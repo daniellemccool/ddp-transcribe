@@ -81,7 +81,6 @@ finding 3 → Epic 5, finding 4 → Plan C (see those groups below).
 **Production run (operational milestones, not code epics)**
 - Epic 4c close: capacity estimate for the production batch — 2,982,471 uniques, throughput / window narrowing / disk (`video_metadata_raw` ~3–6 GB, transient WAVs) → before the first non-pilot `process` batch
 - Epic 4c close: `video_metadata_raw` prune / VACUUM decision — keep for re-parse, prune for export, or reclaim in place → after the first production batch's `load-metadata` completes
-- v0.3.0 promotion: Cargo package version must track release tags (`-V` printed 0.1.0 on both rc1 and v0.3.0) → **resolution in flight: the v0.3.1 tag commit** (archive it there, not at branch merge)
 - v0.3.1 backfill: cookie-gated metadata residue — hypothesis (unverified) that part of the cohort is now login-gated; carries two rejected argv-hardening candidates (`--ignore-no-formats-error`, `--` separator) → after the first full `backfill-metadata` run's stats
 - Campaign shakedown 2026-07-28: **Hypothesis (unverified):** concurrent-writer lost updates (one run's 13 successes reverted to pending, idempotently re-done) → verify/instrument before concurrency work; operators watch for `pending` increases
 - Campaign shakedown 2026-07-28: `process` claims beyond `--max-videos` (per-worker cap accounting) → next claim-loop epic

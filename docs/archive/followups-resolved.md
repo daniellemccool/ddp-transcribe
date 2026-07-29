@@ -850,3 +850,25 @@ uniform.
 `docs/operations/src-vm.md` was corrected in the same branch: its two
 "flags must go BEFORE the subcommand" claims now read as a pre-v0.3.1
 version signal rather than a standing rule.
+
+---
+
+### Cargo package version must track release tags
+
+**Found in:** v0.3.0 promotion (2026-07-29) — `ddp-transcribe -V` printed
+`0.1.0` on both the rc1 and v0.3.0 binaries, making the runbook's
+verify-after-update check useless; the operator had to fall back to comparing
+`-h` subcommand lists.
+**Disposition:** One-line release-checklist addition, not a code epic.
+**Trigger to revisit:** the next release tag (v0.3.1 or later) — bump
+`Cargo.toml` `version` to match the tag in the same commit the tag points at,
+per the ADR-0043 promotion sequence. Consider adding the check to ADR-0043's
+Guidance when it is next revised.
+**Resolution:** `4746531` (`release: bump version to 0.3.1 in the tag
+commit (ADR-0043 step 2; -V finally means something)`) — the commit the
+annotated `v0.3.1` tag points at bumps `Cargo.toml` and `Cargo.lock`
+0.1.0 → 0.3.1, so `ddp-transcribe -V` now reports the release it was built
+from. The feature branch deliberately did not carry the bump (ADR-0043
+step 2 puts it in the tag commit). Standing consideration preserved: add
+the version-matches-tag check to ADR-0043's Guidance when that record is
+next revised.
