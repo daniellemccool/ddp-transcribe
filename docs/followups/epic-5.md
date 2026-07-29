@@ -566,3 +566,26 @@ process spawn, so cheap) asserting (a) the parsed field equals the value given
 after the subcommand, and (b) the documented precedence when the same flag
 appears both before *and* after it, would turn an acceptance check into a
 behavior check.
+
+**Found in:** metadata-backfill branch final whole-branch review. Three more
+test-hardening candidates on the same subcommand, bundled here rather than
+filed separately.
+
+1. `--dry-run` silently ignores `--limit` on `backfill-metadata` (documented
+   behavior — see the runbook's backfill section — but not self-documenting
+   at the `src/cli.rs` `BackfillMetadata` definition). A clap
+   `conflicts_with = "limit"` on `dry_run` would make clap itself reject the
+   combination and print the conflict, instead of relying on the operator
+   having read the docs.
+2. `tests/backfill_metadata.rs`'s dry-run test has no PATH shim, so it
+   doesn't prove dry-run invokes nothing — it only proves the process exits
+   as expected with the real `yt-dlp` (or whatever is on PATH) never
+   actually being called in practice. A sentinel-file shim (writes a marker
+   if invoked; test asserts the marker is absent) would make "invokes
+   nothing" a hermetic, positive assertion rather than an absence-of-evidence
+   inference.
+3. `tests/backfill_metadata.rs`'s `statuses()` snapshot helper covers only
+   `(video_id, status)`. Widen it to also capture `claimed_by`, `claimed_at`,
+   `attempt_count`, and `succeeded_at` so a regression that touches lifecycle
+   columns `backfill-metadata` must never write to (it is metadata-only, per
+   ADR-0042's carve-out) fails a snapshot instead of passing silently.

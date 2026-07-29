@@ -75,7 +75,7 @@ finding 3 → Epic 5, finding 4 → Plan C (see those groups below).
 - Epic 4c T05 review: startup `cleanup_tmp_files` sweep can delete a concurrent live process's in-flight tmp — pre-existing, multi-process deployments only → Epic 5 (bundle with the `cleanup_tmp_files` polish entry)
 - Epic 4c T03 review: `upsert_metadata_raw` is not claim-guarded — a stale worker can overwrite a newer envelope (accepted last-write-wins tradeoff; snapshot staleness only, self-heals) → Epic 5
 - PR #23 review: ingest file-ledger hardening bundle (basename-only key collision risk, 1s-resolution change detector, no mid-tx rollback test) → Epic 5 (ingest/sync-IO sweep)
-- v0.3.1 review: `global = true` both-position CLI test asserts parse acceptance only — no value-propagation or duplicate-precedence assertion → Epic 5 (test-hardening bundle)
+- v0.3.1 review: CLI test-hardening bundle — `global = true` both-position test asserts parse acceptance only (no value-propagation or duplicate-precedence assertion); `backfill-metadata` `--dry-run`/`--limit` needs `conflicts_with`; dry-run test needs a PATH shim; `statuses()` snapshot needs claim/attempt columns → Epic 5 (test-hardening bundle)
 - Full Epic 5 entries: [followups/epic-5.md](followups/epic-5.md)
 
 **Production run (operational milestones, not code epics)**

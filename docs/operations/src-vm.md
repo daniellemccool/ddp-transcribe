@@ -194,11 +194,22 @@ metadata-only yt-dlp invocation per video** to recover it.
 
 ```bash
 ddp-transcribe --state-db ~/ddp-state/state.sqlite backfill-metadata --dry-run
+ddp-transcribe --state-db ~/ddp-state/state.sqlite load-metadata --dry-run   # note rows_skipped_unparseable before the smoke run
 ddp-transcribe --state-db ~/ddp-state/state.sqlite backfill-metadata --limit 5
-ddp-transcribe --state-db ~/ddp-state/state.sqlite load-metadata --dry-run
+ddp-transcribe --state-db ~/ddp-state/state.sqlite load-metadata --dry-run   # rows_examined +5, rows_skipped_unparseable unchanged
 ddp-transcribe --state-db ~/ddp-state/state.sqlite backfill-metadata
 ddp-transcribe --state-db ~/ddp-state/state.sqlite load-metadata
 ```
+
+- **Zero-code verification for the `--limit 5` smoke run:** the `load-metadata
+  --dry-run` before and after it is a free check that the 5 backfilled
+  envelopes actually parse, with no code changes needed. Note
+  `rows_skipped_unparseable` from the first `--dry-run` (run before the smoke
+  backfill); after the smoke run's `load-metadata --dry-run`,
+  `rows_examined` should read exactly +5 with `rows_skipped_unparseable`
+  unchanged — that combination proves the 5 backfilled envelopes are
+  schema-identical and parse cleanly, without writing anything or reading a
+  single line of code.
 
 - **What it never does:** no media download, no GPU, no whisper model load, no
   writes to video status or lifecycle columns, and **no cookies** (the argv is a

@@ -39,8 +39,8 @@ check); catalog pipeline_git_ref → v0.3.1.
 commits `d182c45`, `f310604`, `83443e1`, `f962432`, `7dfa771`, plus this
 doc commit): `cargo fmt` + `cargo clippy --all-targets -- -D warnings` +
 `cargo test --features test-helpers -- --test-threads=1` — 330 passed / 0
-failed / 10 ignored (the ignored set is the model- and network-gated
-tests, unchanged from v0.3.0).
+failed / 10 ignored (9 model/network-gated ignored from v0.3.0 plus this
+branch's live backfill smoke = 10).
 
 **Post-tag doc pass:** archive the "Cargo package version must track
 release tags" FOLLOWUPS entry with the tag commit's SHA (it is annotated
