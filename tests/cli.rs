@@ -196,3 +196,31 @@ fn config_echo_includes_model_path_for_process() {
     );
     assert!(all.contains("whisper_model_path"));
 }
+
+#[test]
+fn global_flags_accepted_after_subcommand() {
+    // Parse-only checks: anything but clap's usage-error exit (2)
+    // proves the flag was accepted in the post-subcommand position
+    // (the run itself may then fail for other reasons, e.g. missing
+    // DB — that's fine here).
+    let cases: &[&[&str]] = &[
+        &["status", "--profile", "dev"],
+        &["status", "--state-db", "x.sqlite"],
+        &["status", "--inbox", "in"],
+        &["status", "--transcripts", "out"],
+        &["status", "--log-format", "human"],
+        &["status", "--whisper-model", "m.bin"],
+        &["status", "--classification", "c.toml"],
+        &["status", "--stale-claim-threshold", "30m"],
+        &["status", "--download-workers", "2"],
+        &["status", "--channel-capacity", "2"],
+    ];
+    for args in cases {
+        let assert = Command::cargo_bin("ddp-transcribe")
+            .unwrap()
+            .args(*args)
+            .assert();
+        let code = assert.get_output().status.code();
+        assert_ne!(code, Some(2), "clap rejected {args:?}");
+    }
+}
