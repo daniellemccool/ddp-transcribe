@@ -64,13 +64,21 @@ Two small inconsistencies in `src/output/artifacts.rs::cleanup_tmp_files`:
    On a permission-denied inside one shard dir, the operator gets a path-less
    error.
 
-2. `let _ = std::fs::remove_file(&p); removed += 1;` increments
-   unconditionally. If `remove_file` fails (permission, EBUSY), the returned
-   count overstates the cleanup. Best-effort semantics are fine; the count
-   just shouldn't claim success it didn't achieve.
+2. ~~`let _ = std::fs::remove_file(&p); removed += 1;` increments
+   unconditionally.~~ **Resolved by `964e9c2`** — `remove_file` is now
+   matched; `removed` increments only on `Ok(())`, and a failure logs
+   `tracing::warn!` without counting it. Test:
+   `cleanup_tmp_files_counts_only_real_deletions`
+   (`src/output/artifacts.rs`).
 
-Neither is a behavioural bug for Plan A's happy-path single-process loop.
-Worth fixing when this function next gets touched.
+The uncontextualized inner `read_dir(&path)?` half (item 1) still stands —
+worth fixing when this function next gets touched.
+
+**2026-07-29 triage:** carried from archived T17 (`../archive/followups-resolved.md`,
+"Resolved by pre-production hardening — artifact write path"):
+`mark_after_artifacts` (`src/pipeline/mod.rs`) is sync rusqlite called from
+an async fn — include it when this function's sync-IO sweep is next
+touched.
 
 ---
 
@@ -187,15 +195,17 @@ Two small inconsistencies in `src/ingest.rs`:
    call when the root doesn't exist. Deeper subdirectories disappearing
    mid-walk is a different story (race; acceptable to ignore).
 
-2. The outer `read_dir(transcripts_root)` is contextualized via
+2. ~~The outer `read_dir(transcripts_root)` is contextualized via
    `with_context`; the inner `entry?` and recursive `walk_recursive(&path,
-   out)?` calls bubble up raw `io::Error` without path context. Same minor
-   pattern as `output::cleanup_tmp_files` already in FOLLOWUPS. On a
-   permission-denied inside one shard subdirectory, the operator gets a
-   path-less error.
+   out)?` calls bubble up raw `io::Error` without path context.~~ **Partially
+   resolved:** the outer `read_dir` (`src/ingest.rs:318`) now carries
+   `with_context`. The inner `entry?` (line 320) still bubbles up raw
+   `io::Error` without path context — same minor pattern as
+   `output::cleanup_tmp_files` above. On a permission-denied inside one shard
+   subdirectory, the operator gets a path-less error.
 
-Both fine for Plan A's happy-path single-process loop; worth fixing when
-this code next gets touched.
+Item 1 (missing-inbox `Ok(())`) and the inner `entry?` half of item 2 still
+stand; worth fixing when this code next gets touched.
 
 ---
 
@@ -343,33 +353,6 @@ observed in the wild.
 replacement between every character of `excerpt`, corrupting the stderr
 excerpt beyond readability. A one-line guard (`if path.as_os_str().is_empty()
 { return excerpt; }`) closes it.
-
----
-
-### Pipelined transcribe worker holds the Store mutex across artifact writes, not just `mark_succeeded`
-
-**Found in:** transcript-storage assessment (Epic 4a close-out, format-selector
-worktree). Related to, but narrower than, the T17 entry above (that entry is
-about stall risk under `TOKIO_WORKER_THREADS=1`; this one is about lock-scope
-minimization specifically).
-**Disposition:** Deferred; today's per-video artifact-write cost (~5-20ms, 4
-fsyncs, ~10-25KB) is small next to the ~1-2s transcription call it follows, so
-the extra mutex hold time is not currently a measured bottleneck.
-**Trigger to revisit:** Epic 5 perf sweep, or if a future bake shows fetch
-workers starved on `claim_next` during the write+mark phase.
-
-`src/pipeline/pipelined.rs` (`transcribe_worker`, ~lines 562-574) acquires the
-shared `Store` mutex once and holds it across the whole
-`write_artifacts_and_mark` call — both the artifact writes/fsyncs (which need
-no `Store` access) and the `mark_succeeded` DB write (which does). Per 0008,
-the ordering (artifacts durable before `mark_succeeded`) is load-bearing and
-must not change; only the *lock scope* is the finding. A future perf pass
-could split `write_artifacts_and_mark` into a lock-free artifact-write phase
-followed by a narrowly-scoped `store.lock().await` around just
-`mark_succeeded`, preserving the 0008 ordering while shrinking the window
-other fetch workers are blocked from `claim_next`. Any such change is
-0008-ordering-sensitive and should land as its own reviewed change, not
-bundled into an unrelated task.
 
 ---
 
@@ -589,3 +572,21 @@ filed separately.
    `attempt_count`, and `succeeded_at` so a regression that touches lifecycle
    columns `backfill-metadata` must never write to (it is metadata-only, per
    ADR-0042's carve-out) fails a snapshot instead of passing silently.
+
+---
+
+### Worker-side closed-reply path silently swallows the error
+
+**Found in:** T5 (engine shell) — codex-advisor code-quality review.
+Re-routed from `docs/followups/epic-2.md` (2026-07-29 triage): Epic 2 closed
+before this fix was picked up.
+**Disposition:** Operational logging improvement; ~1h fix.
+**Trigger to revisit:** Epic 5 hygiene bundle.
+
+The worker loop uses `let _ = req.reply.send(...)` at `src/transcribe.rs`
+~508/527/701/722/725/765, ignoring the case where the caller dropped the
+receiver before the worker replied. This is expected during caller-side
+cancellation (`CancelOnDrop` fires, future is dropped) but suspicious
+otherwise. Replace the swallow with a `tracing::warn!` that includes the
+video_id / request_id and the elapsed wallclock — so an unexplained dropped
+caller is visible in logs.

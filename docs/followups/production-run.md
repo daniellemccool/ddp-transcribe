@@ -53,6 +53,11 @@ figure is a cosmetic fix for whoever next edits that file.~~ **Done** — the
 comment now reads 3–6 GB (v0.3.1 doc pass). The rest of this entry (throughput,
 window narrowing, WAV headroom, rate-limit exposure, coverage) is still open.
 
+**2026-07-29 triage — measured; HOLD:** throughput and window-narrowing were
+measured in `docs/operations/capacity-estimate-2026-07-29.md` (commit
+`e73e2f0`). Status: **HOLD** pending the 4-download-worker A/B and the PI's
+window decision. Archive this entry once the PI summary ships.
+
 ---
 
 ### `video_metadata_raw` prune / VACUUM decision
@@ -163,17 +168,16 @@ Harmless for uncapped campaign use; misleading for smoke tests and capped
 batches.
 **Trigger to revisit:** next epic touching the claim loop / fetch workers.
 
----
-
-### Ingest should name skipped inbox files
-
-**Found in:** production ingest 2026-07-28 — `files=141` of 142 inbox
-entries consumed; the summary line gives no hint which file was skipped or
-why. If the odd one out is a valid donor DDP that failed to parse, this is a
-data-loss bug rather than a logging nit — identifying it is the first step.
-**Disposition:** log skipped files by name + reason at ingest.
-**Trigger to revisit:** next ingest-touching epic; sooner if donor counts
-ever look short.
+**2026-07-29 triage correction:** the "per-worker cap accounting" diagnosis
+above is **falsified**. The claim cap is a run-shared
+`Arc<AtomicUsize>` checked, incremented, and claimed inside the same
+`store.lock().await` guard (`src/pipeline/pipelined.rs:266-289`) — race-free
+by construction across N concurrent fetch workers. That fix landed in
+`9228c89` on 2026-05-21, *before* the 2026-07-28 shakedown observation, so
+per-worker accounting cannot explain `claimed=13`/`claimed=10` under
+`--max-videos 5`. The overshoot is therefore **unexplained** and belongs
+with the concurrent-writer instrumentation work below — treat the two
+entries as one two-writer anomaly cluster rather than two separate bugs.
 
 ---
 

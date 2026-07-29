@@ -872,3 +872,103 @@ from. The feature branch deliberately did not carry the bump (ADR-0043
 step 2 puts it in the tag commit). Standing consideration preserved: add
 the version-matches-tag check to ADR-0043's Guidance when that record is
 next revised.
+
+## Resolved by pre-production hardening — artifact write path (2026-07-28)
+
+Two entries resolved together by commit `964e9c2` (`fix(output,pipeline):
+pre-production hardening — unique atomic-write tmp names, artifact fsyncs
+outside the store lock, honest tmp-cleanup count`), one carried as an
+active-scope entry in `docs/followups/epic-2.md` and one in
+`docs/followups/epic-5.md`.
+
+### sync `write_artifacts_and_mark` inside `tokio::sync::Mutex` guard inside async fn can stall under `TOKIO_WORKER_THREADS=1`
+
+**Found in:** T17 codex review.
+**Disposition:** Phase 2 close scope or Epic 5 ops-hygiene work.
+**Trigger to revisit:** If T20 bake or production logs show single-worker tokio stalling during write+mark phase.
+**Resolved by:** `964e9c2`. The fsyncs now run OUTSIDE the store lock:
+`write_artifacts_and_mark` split into `write_artifacts_durable` (no store
+access) + `mark_after_artifacts` (the DB acknowledgement and wav cleanup);
+`src/pipeline/pipelined.rs` ~600-624 locks the store only around
+`mark_after_artifacts`. Residual: `mark_after_artifacts`
+(`src/pipeline/mod.rs`) is still sync rusqlite called inside an async fn —
+folded into the Epic 5 sync-IO sweep (see the `cleanup_tmp_files` entry in
+`docs/followups/epic-5.md`).
+
+`transcribe_worker` calls the sync `write_artifacts_and_mark` helper
+inside a `store.lock().await` guard scope, inside an async fn. The
+helper does `atomic_write` (filesystem) + rusqlite commit — both
+blocking syscalls. On the operator's dev workstation under
+`TOKIO_WORKER_THREADS=1`, this can stall ALL other tokio tasks during
+the I/O (typically <50ms but variable).
+
+Correct shape would be:
+
+- Write artifacts OUTSIDE the store mutex (`atomic_write` is independent
+  — no `Store` interaction needed).
+- Use `tokio::task::spawn_blocking` for genuine blocking I/O (rusqlite
+  `mark_succeeded` call).
+- OR: split into `transcribe_outside_lock`, then brief `store.lock().await`
+  for just `mark_succeeded`.
+
+On the A10 bake (default multi-worker tokio), this is not visible. Phase 2
+ships with the current shape; if T20 bake numbers don't show degradation,
+revisit at Epic 5.
+
+---
+
+### Pipelined transcribe worker holds the Store mutex across artifact writes, not just `mark_succeeded`
+
+**Found in:** transcript-storage assessment (Epic 4a close-out, format-selector
+worktree). Related to, but narrower than, the T17 entry above (that entry is
+about stall risk under `TOKIO_WORKER_THREADS=1`; this one is about lock-scope
+minimization specifically).
+**Disposition:** Deferred; today's per-video artifact-write cost (~5-20ms, 4
+fsyncs, ~10-25KB) is small next to the ~1-2s transcription call it follows, so
+the extra mutex hold time is not currently a measured bottleneck.
+**Trigger to revisit:** Epic 5 perf sweep, or if a future bake shows fetch
+workers starved on `claim_next` during the write+mark phase.
+**Resolved by:** `964e9c2` (same commit as the T17 entry above). The fsyncs
+now run OUTSIDE the store lock — see that entry's Resolved-by note for the
+mechanism (`write_artifacts_durable` / `mark_after_artifacts` split).
+
+`src/pipeline/pipelined.rs` (`transcribe_worker`, ~lines 562-574) acquires the
+shared `Store` mutex once and holds it across the whole
+`write_artifacts_and_mark` call — both the artifact writes/fsyncs (which need
+no `Store` access) and the `mark_succeeded` DB write (which does). Per 0008,
+the ordering (artifacts durable before `mark_succeeded`) is load-bearing and
+must not change; only the *lock scope* is the finding. A future perf pass
+could split `write_artifacts_and_mark` into a lock-free artifact-write phase
+followed by a narrowly-scoped `store.lock().await` around just
+`mark_succeeded`, preserving the 0008 ordering while shrinking the window
+other fetch workers are blocked from `claim_next`. Any such change is
+0008-ordering-sensitive and should land as its own reviewed change, not
+bundled into an unrelated task.
+
+---
+
+## Resolved by ingest per-file hardening (2026-07-28)
+
+One entry resolved by commit `022da45` (`fix(ingest)!: per-file skip-and-count
++ file-level ledger`), carried as an active-scope entry in
+`docs/followups/production-run.md`.
+
+### Ingest should name skipped inbox files
+
+**Found in:** production ingest 2026-07-28 — `files=141` of 142 inbox
+entries consumed; the summary line gives no hint which file was skipped or
+why. If the odd one out is a valid donor DDP that failed to parse, this is a
+data-loss bug rather than a logging nit — identifying it is the first step.
+**Disposition:** log skipped files by name + reason at ingest.
+**Trigger to revisit:** next ingest-touching epic; sooner if donor counts
+ever look short.
+**Resolution:** `022da45`. `skip_unparseable` (`src/ingest.rs:189-196`)
+WARN-logs `file=<path>` plus the full `{e:#}` context chain, and increments
+parallel `files_skipped_*` counters (`files_skipped_unparseable`,
+`files_skipped_already_ingested`); shipped in v0.3.0. `022da45`'s own doc
+comment cites this exact 142-file incident as the motivating case.
+
+**Verification pointer:** to identify the specific 2026-07-28 file, grep
+that run's log for `file skipped`. If no matching WARN exists there, the
+file was filtered by a path that doesn't log (a walker filter) — reopen as
+a new entry with that evidence.
