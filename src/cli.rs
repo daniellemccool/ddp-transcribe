@@ -199,6 +199,19 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Backfill raw metadata (video_metadata_raw) for succeeded videos
+    /// that predate fetch-time capture. Metadata-only yt-dlp per video —
+    /// no media download, never touches video status. Best-effort and
+    /// re-runnable; run `load-metadata` afterwards to fill the typed
+    /// columns.
+    BackfillMetadata {
+        /// Cap the number of videos attempted (smoke runs).
+        #[arg(long)]
+        limit: Option<u64>,
+        /// Print the cohort size and exit without invoking yt-dlp.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]

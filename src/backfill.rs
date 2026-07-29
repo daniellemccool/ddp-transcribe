@@ -60,10 +60,6 @@ impl std::fmt::Display for BackfillStats {
 /// Deliberately serial — one yt-dlp invocation at a time is the rate
 /// limit toward TikTok for a ~10K-row cohort; a worker pool here would
 /// buy nothing but a block.
-// 0002: consumed by the `backfill-metadata` CLI arm (Task 04); lift this
-// allow when that arm lands. Seeding this as a live root also keeps the
-// Store methods it calls off the bin's dead-code list.
-#[allow(dead_code)]
 pub async fn backfill_metadata(
     store: &mut Store,
     ytdlp_timeout: Duration,

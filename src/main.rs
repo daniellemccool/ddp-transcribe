@@ -415,6 +415,31 @@ async fn main() -> Result<()> {
                 if dry_run { " (dry-run)" } else { "" }
             );
         }
+        cli::Command::BackfillMetadata { limit, dry_run } => {
+            let path = &cfg.state_db;
+            if !path.exists() {
+                anyhow::bail!(
+                    "backfill-metadata: state.sqlite not found at {}. Run `ddp-transcribe init` first.",
+                    path.display()
+                );
+            }
+            let mut store = state::Store::open(path).context("opening state DB")?;
+            // Cohort size prints in both modes: the operator's orientation
+            // for a run whose per-video cost is a network round trip.
+            let cohort = store.count_succeeded_missing_metadata()?;
+            if dry_run {
+                tracing::info!(cohort, "backfill-metadata dry-run");
+                println!(
+                    "backfill-metadata: cohort {cohort} succeeded videos missing metadata (dry-run)"
+                );
+            } else {
+                println!("backfill-metadata: cohort {cohort} succeeded videos missing metadata");
+                let stats =
+                    backfill::backfill_metadata(&mut store, cfg.ytdlp_timeout, limit).await?;
+                tracing::info!(%stats, "backfill-metadata complete");
+                println!("backfill-metadata: {stats}");
+            }
+        }
     }
 
     Ok(())
@@ -451,7 +476,8 @@ fn log_resolved_config(cfg: &config::Config, command: &cli::Command) {
         | cli::Command::Migrate
         | cli::Command::Status { .. }
         | cli::Command::RecomputeWindow { .. }
-        | cli::Command::LoadMetadata { .. } => tracing::info!(
+        | cli::Command::LoadMetadata { .. }
+        | cli::Command::BackfillMetadata { .. } => tracing::info!(
             profile = ?cfg.profile,
             state_db = ?cfg.state_db,
             "config resolved"
