@@ -179,11 +179,12 @@ impl Store {
     ///
     /// T18 (pipelined orchestrator's `compute_process_stats`) was the first
     /// in-bin consumer; the Epic 4a T06 review fix retired that fn
-    /// (`ProcessStats` is assembled from input-side counters per 0007), so
-    /// no bin caller remains. In-module `#[cfg(test)]` schema tests still
-    /// call it — suppressed per 0002; lift when the next raw-connection
-    /// consumer lands.
-    #[allow(dead_code)]
+    /// (`ProcessStats` is assembled from input-side counters per 0007),
+    /// leaving only in-module `#[cfg(test)]` schema tests and a `dead_code`
+    /// suppression per 0002. Epic 5a's dry-run ingest is the raw-connection
+    /// consumer that suppression was waiting for — `ingest` reads the
+    /// ledger through this connection on a real run and through its open
+    /// transaction on a dry-run — so the suppression is lifted.
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
     }
@@ -258,20 +259,26 @@ impl Store {
     pub(crate) fn transaction(&mut self) -> Result<rusqlite::Transaction<'_>> {
         self.conn.transaction().context("begin ingest transaction")
     }
+}
 
-    /// The `ingested_files` fingerprint recorded for `file_name` (basename),
-    /// as `(size_bytes, mtime)`; `None` = never fully ingested. Read on the
-    /// connection rather than inside the per-file transaction because it
-    /// decides whether that transaction is opened at all. `prepare_cached`
-    /// keeps it to one prepare across the whole walk.
-    pub(crate) fn ingested_file_fingerprint(&self, file_name: &str) -> Result<Option<(i64, i64)>> {
-        self.conn
-            .prepare_cached(SELECT_INGESTED_FILE_SQL)
-            .context("preparing ingested_file_fingerprint")?
-            .query_row(params![file_name], |r| Ok((r.get(0)?, r.get(1)?)))
-            .optional()
-            .with_context(|| format!("reading ingest ledger row for {file_name}"))
-    }
+/// The `ingested_files` fingerprint recorded for `file_name` (basename), as
+/// `(size_bytes, mtime)`; `None` = never fully ingested. Connection-scoped
+/// rather than a `Store` method because the ingest pass reads it two ways:
+/// a real run reads it on the bare connection (it decides whether that
+/// file's transaction is opened at all), while a dry-run reads it through
+/// its one open transaction — where `&Transaction` derefs to `&Connection`
+/// — so an earlier file's uncommitted ledger row is visible, exactly as a
+/// committed one would be to a real run. `prepare_cached` keeps it to one
+/// prepare across the whole walk either way.
+pub(crate) fn ingested_file_fingerprint(
+    conn: &Connection,
+    file_name: &str,
+) -> Result<Option<(i64, i64)>> {
+    conn.prepare_cached(SELECT_INGESTED_FILE_SQL)
+        .context("preparing ingested_file_fingerprint")?
+        .query_row(params![file_name], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()
+        .with_context(|| format!("reading ingest ledger row for {file_name}"))
 }
 
 /// Shared INSERT-OR-IGNORE SQL so the `&mut self` convenience methods and the

@@ -97,11 +97,18 @@ Walks `--inbox`, parses each DDP watch-history JSON, canonicalizes each
 `watch_history`. Summary counts (files processed, unique videos, duplicate
 watch rows, short-links skipped, invalid URLs skipped) are logged.
 
-`--dry-run` does the full pass — every file read, parsed and upserted — and
-then rolls each file's transaction back instead of committing it, so the
-reported counts are the real ones and nothing (not even the ingest ledger)
-persists. It still takes the same brief per-file write locks a real ingest
-takes; it is safe alongside a running `process`, not lock-free.
+`--dry-run` does the full pass — every file read, parsed and upserted — inside
+a single transaction spanning the whole inbox, then rolls that transaction
+back. Nothing persists (not even the ingest ledger), and because every file
+sees the earlier files' uncommitted rows, the reported counts are exactly a
+real run's — including duplicates and raw-date backfills that only show up
+across files.
+
+The cost: a dry-run holds **one** write transaction (`BEGIN IMMEDIATE` …
+rollback) for the whole inbox scan, file reads and JSON parsing included,
+where a real ingest takes only brief per-file write locks. It is safe under
+WAL + `busy_timeout` alongside a running `process`, but it holds the write
+lock much longer.
 
 ### `process [--max-videos N]`
 

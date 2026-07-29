@@ -595,6 +595,130 @@ fn table_count(db: &std::path::Path, table: &str) -> i64 {
         .unwrap()
 }
 
+const DUP_LINK: &str = "https://www.tiktokv.com/share/video/7000000000000000222/";
+const SEEDED_LINK: &str = "https://www.tiktokv.com/share/video/7000000000000000111/";
+
+/// Two inbox files for the SAME respondent that share one watch entry, plus
+/// a pre-seeded pre-v4 row (NULL `watched_at_raw`) for a third video. The
+/// two row-change-derived counters — `watch_history_duplicates` (the shared
+/// entry, only visible to the second file if it can see the first file's
+/// rows) and `backfilled_raw_dates` (the seeded NULL) — are exactly the
+/// stats a per-file-rollback dry-run would under-report.
+fn cross_file_duplicate_inbox(tmp: &tempfile::TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
+    let inbox = tmp.path().join("inbox");
+    write_ddp(
+        &inbox,
+        "assignment=1_participant=w1_source=tiktok.json",
+        &[
+            ("2026-02-10 12:00:00", SEEDED_LINK),
+            ("2026-02-11 12:00:00", DUP_LINK),
+        ],
+    );
+    write_ddp(
+        &inbox,
+        "assignment=2_participant=w1_source=tiktok.json",
+        &[
+            // The cross-file duplicate: same respondent, video and instant.
+            ("2026-02-11 12:00:00", DUP_LINK),
+            (
+                "2026-02-12 12:00:00",
+                "https://www.tiktokv.com/share/video/7000000000000000333/",
+            ),
+        ],
+    );
+    let db = tmp.path().join("state.sqlite");
+    {
+        let store = ddp_transcribe::state::Store::open(&db).unwrap();
+        drop(store);
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO videos (video_id, source_url, canonical, status, first_seen_at, updated_at)
+             VALUES ('7000000000000000111', ?1, 1, 'pending', 1, 1)",
+            rusqlite::params![SEEDED_LINK],
+        )
+        .unwrap();
+        let ts = chrono::NaiveDate::from_ymd_opt(2026, 2, 10)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        // Pre-v4 shape: NULL watched_at_raw, waiting to be backfilled.
+        conn.execute(
+            "INSERT INTO watch_history (respondent_id, video_id, watched_at, in_window)
+             VALUES ('w1', '7000000000000000111', ?1, 1)",
+            rusqlite::params![ts],
+        )
+        .unwrap();
+    }
+    (inbox, db)
+}
+
+/// Operator ruling 2026-07-29: dry-run wraps the WHOLE inbox scan in one
+/// transaction, so a later file sees an earlier file's (uncommitted) rows.
+/// Without that, a duplicate split across two files is invisible to dry-run
+/// but real in a live run — the stats would diverge exactly where the
+/// operator is relying on them.
+#[test]
+fn dry_run_counts_cross_file_duplicates_like_a_real_run() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (inbox, db) = cross_file_duplicate_inbox(&tmp);
+    let mut store = Store::open(&db).unwrap();
+
+    let dry = ingest(
+        &inbox,
+        &mut store,
+        ddp_transcribe::ingest::WindowBounds::default(),
+        true,
+    )
+    .unwrap();
+
+    // Nothing beyond the seeded rows persisted, and the seeded NULL raw is
+    // still NULL: the dry-run's backfill was rolled back too.
+    assert_eq!(
+        table_count(&db, "videos"),
+        1,
+        "dry-run must persist nothing"
+    );
+    assert_eq!(table_count(&db, "watch_history"), 1);
+    assert_eq!(table_count(&db, "ingested_files"), 0);
+    let raw_after_dry: Option<String> = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT watched_at_raw FROM watch_history WHERE video_id='7000000000000000111'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        raw_after_dry.is_none(),
+        "dry-run must not backfill for real"
+    );
+
+    let real = ingest(
+        &inbox,
+        &mut store,
+        ddp_transcribe::ingest::WindowBounds::default(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(
+        real.watch_history_duplicates, 2,
+        "the seeded row plus the cross-file duplicate"
+    );
+    assert_eq!(real.backfilled_raw_dates, 1, "the seeded NULL raw");
+    assert_eq!(
+        dry.watch_history_duplicates, real.watch_history_duplicates,
+        "a cross-file duplicate must count identically in both modes"
+    );
+    assert_eq!(dry.backfilled_raw_dates, real.backfilled_raw_dates);
+    assert_eq!(
+        dry.watch_history_rows_processed,
+        real.watch_history_rows_processed
+    );
+}
+
 /// `--dry-run` runs the full per-file transaction — every upsert, so every
 /// row-change-derived counter is real — and then rolls it back. Nothing
 /// persists, not even the ingest ledger.
