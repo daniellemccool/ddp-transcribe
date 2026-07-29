@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 mod audio;
+mod backfill;
 mod batch;
 mod canonical;
 mod classification;

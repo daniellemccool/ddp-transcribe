@@ -608,9 +608,6 @@ impl Store {
     /// caller counts it; it is not an error). Best-effort contract as
     /// for `upsert_metadata_raw`: metadata writes never change a
     /// video's pipeline outcome.
-    // 0002: consumed by the `backfill-metadata` subcommand (Task 03);
-    // lift this allow when that loop lands.
-    #[allow(dead_code)]
     pub fn insert_metadata_raw_if_missing(
         &mut self,
         video_id: &str,

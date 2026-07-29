@@ -215,9 +215,6 @@ impl Store {
 
 /// One succeeded video missing its raw metadata envelope — input row for
 /// the backfill-metadata cohort walk.
-// 0002: the `backfill-metadata` subcommand (Task 03) is the first bin
-// consumer; lift this allow when that loop lands.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct MissingMetadataVideo {
     pub video_id: String,
@@ -227,8 +224,8 @@ pub struct MissingMetadataVideo {
 impl Store {
     /// Size of the backfill cohort: succeeded videos with no
     /// video_metadata_raw row (the rc1-era gap). Read-only.
-    // 0002: consumed by the `backfill-metadata` subcommand (Task 03);
-    // lift this allow when that loop lands.
+    // 0002: consumed by the `backfill-metadata` CLI arm (Task 04),
+    // which reports cohort size; lift this allow when that arm lands.
     #[allow(dead_code)]
     pub fn count_succeeded_missing_metadata(&self) -> Result<u64> {
         let n: i64 = self
@@ -256,9 +253,6 @@ impl Store {
     /// cursor only moves forward, and vanished rows are all behind it.
     /// Videos succeeding behind the cursor during a live run are caught
     /// by a re-run (rerun-to-convergence semantics).
-    // 0002: consumed by the `backfill-metadata` subcommand (Task 03);
-    // lift this allow when that loop lands.
-    #[allow(dead_code)]
     pub fn succeeded_missing_metadata_page(
         &self,
         after_video_id: Option<&str>,
