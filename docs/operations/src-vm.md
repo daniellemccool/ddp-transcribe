@@ -82,23 +82,33 @@ sudo cp ~/src/ddp-transcribe/target/release/ddp-transcribe /usr/local/bin/ddp-tr
 
 Step 3 is load-bearing: `/usr/local/bin/ddp-transcribe` is what PATH (and any
 script) resolves — a skipped `cp` means old code runs while you believe you
-deployed.
-
-After deploying an Epic 4c (v5-schema) binary, migrate the state DB before
-running anything else against it:
+deployed. Verify after this path too:
 
 ```bash
-ddp-transcribe --state-db ~/ddp-state/state.sqlite migrate   # -> v5, idempotent
+ddp-transcribe -V && ddp-transcribe -h | head -12   # subcommand list matches expectations
+```
+
+After deploying an ingest-production-hardening (v6-schema) binary, migrate
+the state DB before running anything else against it:
+
+```bash
+ddp-transcribe --state-db ~/ddp-state/state.sqlite migrate   # -> v6, idempotent
 ```
 
 The ladder is sequential, so one `migrate` call takes a v3 DB all the way to
-v5. v3 → v4 adds `watch_history.watched_at_raw` (the timezone-verdict hedge,
+v6. v3 → v4 adds `watch_history.watched_at_raw` (the timezone-verdict hedge,
 ADR-0039); v4 → v5 adds the `video_metadata_raw` table and eight nullable
-metadata columns on `videos` (ADR-0042). `migrate` is a no-op if the DB is
-already at v5. The binary refuses to
-open an un-migrated DB for any other subcommand — `Store::open` hard-fails
-with a typed `SchemaVersionMismatch` error naming the expected/found
-versions and instructing `migrate` (ADR-0022).
+metadata columns on `videos` (ADR-0042); v5 → v6 adds the `ingested_files`
+ledger, created deliberately empty (the migration cannot know which files
+produced a pre-v6 DB's rows). `migrate` is a no-op if the DB is already at
+v6. The binary refuses to open an un-migrated DB for any other subcommand —
+`Store::open` hard-fails with a typed `SchemaVersionMismatch` error naming
+the expected/found versions and instructing `migrate` (ADR-0022).
+
+Because the ledger migrates in empty, the first `ingest` run after migrating
+pays one full walk (stat + read + parse every file, same cost as pre-ledger
+behavior) to populate it; every later run skips files whose `(name, size,
+mtime)` still matches the ledger before reading them.
 
 ## Operating (current, Epic 4c)
 
