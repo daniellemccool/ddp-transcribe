@@ -32,11 +32,13 @@ pub struct IngestStats {
     pub computed_out_of_window: usize,
     /// Existing rows whose NULL watched_at_raw this pass backfilled.
     pub backfilled_raw_dates: usize,
-    /// Files this pass could not turn into rows at all — bad filename, stat
-    /// failure, unreadable bytes, or JSON that is not a `Vec<Section>` (the
-    /// platform writes `{"status":"data_submission declined"}` stubs into
-    /// the same inbox). Parallel to `files_processed` per 0007: a skipped
-    /// file is counted here and nowhere else, and never aborts the run.
+    /// Files this pass could not turn into rows at all — bad filename,
+    /// unreadable bytes, or JSON that is not a `Vec<Section>` (the platform
+    /// writes `{"status":"data_submission declined"}` stubs into the same
+    /// inbox). A ledger-stat failure alone does NOT land here: it falls
+    /// through to the read, which is the true readability test. Parallel to
+    /// `files_processed` per 0007: a skipped file is counted here and
+    /// nowhere else, and never aborts the run.
     pub files_skipped_unparseable: usize,
     /// Files skipped because the `ingested_files` ledger already records
     /// this exact (name, size, mtime) triple. Parallel to `files_processed`
@@ -79,11 +81,15 @@ impl WindowBounds {
 /// store. Plan A skips short links with a WARN log; Plan C writes them to a
 /// pending_resolutions table.
 ///
-/// A file the pass cannot turn into rows — bad filename, stat/read failure,
-/// or JSON that is not a `Vec<Section>` — is logged, counted in
+/// A file the pass cannot turn into rows — bad filename, read failure, or
+/// JSON that is not a `Vec<Section>` — is logged, counted in
 /// `files_skipped_unparseable`, and stepped over; it never aborts the run.
-/// A file that parses but carries no watch history is processed normally
-/// (zero rows), not skipped. Files whose `ingested_files` fingerprint still
+/// A ledger-stat failure is NOT one of these: never skip on uncertainty —
+/// it is logged and falls through to the read with no fingerprint, so a
+/// transient stat hiccup on a perfectly readable file costs no ledger row
+/// (re-examined next run) rather than a mislabeled content skip. A file
+/// that parses but carries no watch history is processed normally (zero
+/// rows), not skipped. Files whose `ingested_files` fingerprint still
 /// matches are skipped before they are even read.
 ///
 /// Counters are input-side: `unique_videos_seen` and
@@ -115,13 +121,7 @@ pub fn ingest(inbox: &Path, store: &mut Store, window: WindowBounds) -> Result<I
         // this is the only I/O the file costs — one stat plus one indexed
         // SELECT, instead of parsing megabytes of JSON to discover that
         // every row is a no-op upsert.
-        let fingerprint = match std::fs::metadata(&path) {
-            Ok(meta) => file_fingerprint(&path, &meta),
-            Err(e) => {
-                skip_unparseable(&path, &anyhow::Error::new(e), &mut stats);
-                continue;
-            }
-        };
+        let fingerprint = resolve_fingerprint(&path, std::fs::metadata(&path));
         if let Some((name, size, mtime)) = &fingerprint {
             // A ledger read failure is a broken store, not a broken file:
             // propagate rather than silently re-ingesting everything.
@@ -193,6 +193,31 @@ fn skip_unparseable(path: &Path, e: &anyhow::Error, stats: &mut IngestStats) {
         "file skipped (unparseable)"
     );
     stats.files_skipped_unparseable += 1;
+}
+
+/// Resolve the ledger fingerprint from a `std::fs::metadata` result, without
+/// deciding the file is unreadable. A stat failure (NFS hiccup, TOCTOU
+/// between the walk and the stat) is not evidence the file cannot be read —
+/// only `std::fs::read` failing is that evidence (`skip_unparseable`'s named
+/// precondition). So `Err` here is logged and treated the same as an
+/// unfingerprintable file: `None` falls through to the read, and — per
+/// `file_fingerprint`'s doc — no ledger row is written for it this pass, so
+/// it is simply re-examined next run rather than mislabeled as unparseable.
+fn resolve_fingerprint(
+    path: &Path,
+    meta: std::io::Result<std::fs::Metadata>,
+) -> Option<(String, i64, i64)> {
+    match meta {
+        Ok(meta) => file_fingerprint(path, &meta),
+        Err(e) => {
+            tracing::warn!(
+                file = %path.display(),
+                error = %e,
+                "ledger stat failed; processing file without fingerprint"
+            );
+            None
+        }
+    }
 }
 
 /// The ledger fingerprint for a walked file: `(basename, size, mtime-secs)`.
@@ -396,6 +421,19 @@ mod tests {
     fn parse_watched_at_returns_none_on_garbage_with_partial_utc() {
         assert!(parse_watched_at("not a date UTC").is_none());
         assert!(parse_watched_at("UTC").is_none());
+    }
+
+    #[test]
+    fn resolve_fingerprint_falls_through_to_none_on_stat_error() {
+        // Review finding: a ledger-stat failure must never be treated as an
+        // unreadable file (that verdict belongs to `std::fs::read` alone).
+        // `resolve_fingerprint` is the extracted decision point; this pins
+        // Err ⇒ None (falls through to the read, no ledger row this pass)
+        // without needing a portable way to make `std::fs::metadata`
+        // actually fail on a real path.
+        let path = PathBuf::from("/nonexistent/does-not-matter.json");
+        let err = std::io::Error::new(std::io::ErrorKind::NotFound, "stat failed");
+        assert_eq!(resolve_fingerprint(&path, Err(err)), None);
     }
 
     #[test]
