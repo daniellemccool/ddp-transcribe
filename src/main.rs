@@ -57,12 +57,11 @@ async fn main() -> Result<()> {
         } => {
             cli::validate_window_order("ingest", window_start, window_end)?;
             let mut store = state::Store::open(&cfg.state_db).context("opening state DB")?;
-            if dry_run {
-                tracing::info!("dry-run: not yet implemented; running real ingest");
-            }
             let window = ingest::WindowBounds::from_dates(window_start, window_end);
-            let stats = ingest::ingest(&cfg.inbox, &mut store, window).context("ingest failed")?;
+            let stats =
+                ingest::ingest(&cfg.inbox, &mut store, window, dry_run).context("ingest failed")?;
             tracing::info!(
+                dry_run,
                 files = stats.files_processed,
                 files_skipped_unparseable = stats.files_skipped_unparseable,
                 files_skipped_already_ingested = stats.files_skipped_already_ingested,
@@ -76,6 +75,7 @@ async fn main() -> Result<()> {
                 backfilled_raw_dates = stats.backfilled_raw_dates,
                 "ingest complete"
             );
+            println!("ingest: {stats}{}", if dry_run { " (dry-run)" } else { "" });
         }
         cli::Command::Process {
             max_videos,

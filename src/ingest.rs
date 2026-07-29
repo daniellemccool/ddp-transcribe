@@ -46,6 +46,29 @@ pub struct IngestStats {
     pub files_skipped_already_ingested: usize,
 }
 
+/// One-line operator summary, same field order as the structured
+/// `ingest complete` log. Mirrors `LoadStats`' Display so the human line of
+/// every subcommand reads the same way.
+impl std::fmt::Display for IngestStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "files {} / skipped-unparseable {} / already-ingested {} / videos {} / history {} / duplicates {} / short-links {} / invalid-urls {} / date-parse-failures {} / out-of-window {} / backfilled-raw {}",
+            self.files_processed,
+            self.files_skipped_unparseable,
+            self.files_skipped_already_ingested,
+            self.unique_videos_seen,
+            self.watch_history_rows_processed,
+            self.watch_history_duplicates,
+            self.short_links_skipped,
+            self.invalid_urls_skipped,
+            self.date_parse_failures,
+            self.computed_out_of_window,
+            self.backfilled_raw_dates
+        )
+    }
+}
+
 /// Analysis-window bounds in unix seconds, derived from inclusive UTC
 /// calendar dates (Epic 4b window ADR). `Default` = no filter (everything
 /// in-window) — matches pre-4b behavior.
@@ -98,7 +121,20 @@ impl WindowBounds {
 /// the subset of processed rows where the upsert was a no-op (existing PK).
 /// The three file-level counters are parallel per 0007: each walked file
 /// increments exactly one of them.
-pub fn ingest(inbox: &Path, store: &mut Store, window: WindowBounds) -> Result<IngestStats> {
+///
+/// `dry_run` does the same work and reports the same stats as a real pass —
+/// the per-file transaction is executed in full and then rolled back
+/// instead of committed. The ledger *read* stays active (so
+/// `files_skipped_already_ingested` reports what a real run would skip),
+/// while the ledger *write* rides the discarded transaction, leaving the
+/// store exactly as it was found. A dry-run still takes the same brief
+/// per-file write locks a real ingest takes.
+pub fn ingest(
+    inbox: &Path,
+    store: &mut Store,
+    window: WindowBounds,
+    dry_run: bool,
+) -> Result<IngestStats> {
     let mut stats = IngestStats::default();
     let mut unique_videos: HashSet<String> = HashSet::new();
 
@@ -172,8 +208,23 @@ pub fn ingest(inbox: &Path, store: &mut Store, window: WindowBounds) -> Result<I
         if let Some((name, size, mtime)) = &fingerprint {
             upsert_ingested_file_tx(&tx, name, *size, *mtime)?;
         }
-        tx.commit()
-            .with_context(|| format!("committing ingest transaction for {}", path.display()))?;
+        if dry_run {
+            // Full-fidelity dry-run: every upsert above already ran — so
+            // every row-change-derived counter (`watch_history_duplicates`,
+            // `backfilled_raw_dates`) is as real as a live run's — and the
+            // whole transaction, ledger row included, is then discarded.
+            // Dropping the Transaction would roll back too; rolling back
+            // explicitly says so.
+            tx.rollback().with_context(|| {
+                format!(
+                    "rolling back dry-run ingest transaction for {}",
+                    path.display()
+                )
+            })?;
+        } else {
+            tx.commit()
+                .with_context(|| format!("committing ingest transaction for {}", path.display()))?;
+        }
 
         stats.files_processed += 1;
     }

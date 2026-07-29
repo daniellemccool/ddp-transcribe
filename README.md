@@ -12,7 +12,6 @@ TikTok is the currently supported source.
 
 > **Plan A — walking skeleton.** Only the `Dev` profile is wired. Known
 > Plan-A quirks when you test:
-> - `ingest --dry-run` is not yet implemented — it logs a note and runs a real ingest anyway.
 > - `process` exits with code **3** when it claimed zero videos — this is intentional, not a failure.
 
 ## Quickstart
@@ -98,8 +97,11 @@ Walks `--inbox`, parses each DDP watch-history JSON, canonicalizes each
 `watch_history`. Summary counts (files processed, unique videos, duplicate
 watch rows, short-links skipped, invalid URLs skipped) are logged.
 
-`--dry-run` is accepted but not yet implemented — the command runs a real
-ingest and logs a note.
+`--dry-run` does the full pass — every file read, parsed and upserted — and
+then rolls each file's transaction back instead of committing it, so the
+reported counts are the real ones and nothing (not even the ingest ledger)
+persists. It still takes the same brief per-file write locks a real ingest
+takes; it is safe alongside a running `process`, not lock-free.
 
 ### `process [--max-videos N]`
 
