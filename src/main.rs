@@ -85,7 +85,8 @@ async fn main() -> Result<()> {
             let mut store = state::Store::open(&cfg.state_db).context("opening state DB")?;
             std::fs::create_dir_all(&cfg.transcripts).context("creating transcripts dir")?;
             // Tmp cleanup at startup
-            let removed = output::artifacts::cleanup_tmp_files(&cfg.transcripts)?;
+            let removed =
+                output::artifacts::cleanup_tmp_files(&cfg.transcripts, cfg.stale_claim_threshold)?;
             if removed > 0 {
                 tracing::info!(removed, "cleaned up leftover .tmp files");
             }
