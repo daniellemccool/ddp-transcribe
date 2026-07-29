@@ -58,10 +58,19 @@ later is valid.
 
 ## Re-run recipe (next snapshot)
 
-Verify `SELECT * FROM meta;` says `schema_version|6` first (stale-relay
-lesson — the repo-root `ddp-run-export.sqlite` is a stale v3 pilot export;
-the good snapshots land under
-`~/data/d3i/uu_tiktok/research-tiktok-crime-policing/state-snapshot.sqlite`).
+Verify TWO things first (stale-relay lesson, extended 2026-07-29 after a
+fresh-dated file carried morning-old content):
+
+1. `SELECT * FROM meta;` says `schema_version|6` (the repo-root
+   `ddp-run-export.sqlite` is a stale v3 pilot export; good snapshots land
+   under `~/data/d3i/uu_tiktok/research-tiktok-crime-policing/state-snapshot.sqlite`).
+2. **Content freshness:** `SELECT datetime(MAX(at),'unixepoch') FROM video_events;`
+   must be within minutes of when the snapshot was taken. File mtime proves
+   nothing: `sync-to-storage.sh` (mount branch) runs `set -e` → rsync before
+   the `.backup`, so a vanished-file exit 24 aborts BEFORE the backup and hop 2
+   then relays the previously staged snapshot with a fresh timestamp. Template
+   fix (backup-first + `--exclude='.work/'` + tolerate exit 24) tracked in the
+   Epic 5a plan's deploy-repo handoff list.
 
 ```sql
 -- per-hour throughput + mix
