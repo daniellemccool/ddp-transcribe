@@ -122,8 +122,17 @@ One instance restarted 11:24:56 UTC with `--download-workers 4` (run 3,
 | 3 workers (control) | 1,930 | 81.8% | 12.6% | 1.2% |
 
 - **Scaling is linear: 1.32× observed vs 1.33× predicted (4/3).** No
-  saturation at 4 workers; GPU ≈ 58% busy ⇒ headroom to ~5 per instance
-  before the transcribe lane binds.
+  saturation at 4 workers.
+- **Correction (operator disclosure, 2026-07-29 evening): both instances
+  were running on the SAME GPU during this window** — the second A10 sat
+  idle. The A/B stands (same GPU + same IP on both sides makes worker
+  count the only variable, and linearity says the shared GPU still had
+  headroom), but the "58% busy, room for 5 workers per instance" ceiling
+  math assumed a GPU each — the real transcribe ceiling in this window was
+  one A10 shared. Action: pin one instance per GPU at the next restart
+  (`CUDA_VISIBLE_DEVICES`, verify with `nvidia-smi` — the in-app banner
+  always reads CUDA0 under a mask). With the split, the 5/5 step has ~2×
+  the transcribe ceiling and the projections below are conservative.
 - **No throttle signature**: failure mixes are statistically identical
   across instances; the hour-14 terminal bump and the day's
   SensitiveLoginGated growth (+496, now 608 parked + 239 legacy) hit both
