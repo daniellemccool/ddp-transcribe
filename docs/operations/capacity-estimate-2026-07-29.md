@@ -1,11 +1,9 @@
-# Capacity estimate — 2026-07-29 snapshot (WORKNOTE — hold)
+# Capacity estimate — 2026-07-29 snapshot (WORKNOTE)
 
-**Status: HOLD.** Not PI-facing yet. Operator decision 2026-07-29: re-measure
-after one GPU instance has run `--download-workers 4` for a while (A/B
-against the other instance at the default 3), then update the numbers and
-write the PI summary. Everything below is measured from the verified
-run-boundary snapshot (`schema_version = 6`, events through 07:53 UTC
-2026-07-29) plus live counts the operator read mid-morning.
+**Status: A/B MEASURED (see the evening update at the bottom) — PI write-up
+unblocked on the operator's go.** Sections below the update line are the
+morning baseline, kept for provenance. Everything is measured from verified
+snapshots (`schema_version = 6`, content-freshness checked via `MAX(at)`).
 
 ## Measured throughput (2×A10, 3 download-workers each)
 
@@ -109,3 +107,48 @@ GROUP BY w.label ORDER BY uniq_videos DESC;
 `worker_id` pid clusters (both instances report `worker_host: "host"`);
 compare the two `batch_runs` rows' event rates over the same wall-clock
 window, or simpler, restart boundaries partition the tally.
+
+---
+
+## UPDATE — evening snapshot (events through 15:20 UTC): the 4-worker A/B
+
+One instance restarted 11:24:56 UTC with `--download-workers 4` (run 3,
+`host-1295187`); the sibling stayed at 3 (`host-648770`). Comparison window
+11:25→15:20 UTC (~3.9 h, both live, same corpus region, same IP):
+
+| Instance | claims/h | success | terminal | cookie-parked |
+|---|---|---|---|---|
+| 4 workers | 2,550 | 81.6% | 12.6% | 1.4% |
+| 3 workers (control) | 1,930 | 81.8% | 12.6% | 1.2% |
+
+- **Scaling is linear: 1.32× observed vs 1.33× predicted (4/3).** No
+  saturation at 4 workers; GPU ≈ 58% busy ⇒ headroom to ~5 per instance
+  before the transcribe lane binds.
+- **No throttle signature**: failure mixes are statistically identical
+  across instances; the hour-14 terminal bump and the day's
+  SensitiveLoginGated growth (+496, now 608 parked + 239 legacy) hit both
+  instances proportionally ⇒ corpus composition, not rate response. Combined
+  ~4,500 claims/h from one IP drew no visible pushback.
+- Recommendation: promote the control instance to 4 workers; step to 5/5
+  after the next clean readout.
+
+### Revised projections (claims drain pending; ×1.18 for ~85% uptime)
+
+Pending at this snapshot: full 2,933,940 · ≥Apr 1,651,243 · ≥May 1,177,930
+· ≥Jun 707,965.
+
+| Config | claims/h | Full corpus | 4-mo window | 3-mo window | 2-mo window |
+|---|---|---|---|---|---|
+| Today (4+3) | 4,480 | 27 d | 15 d | 11 d | 6.6 d |
+| Both at 4 | ~5,100 | 24 d | 13 d | 9.6 d | 5.8 d |
+| Both at 5 (if linear) | ~6,400 | 19 d | 11 d | 7.7 d | 4.6 d |
+
+Overnight running remains the other multiplier: the 22:00→05:00 idle gap
+costs ~30% of calendar time at any config (checkpoint hook, Epic 5a,
+removes its blocker — pending the sync-to-storage.sh fix tracked in the
+deploy repo's FOLLOWUPS).
+
+**Headline for the PI conversation:** at both-at-4 + overnight running, the
+FULL corpus completes in ~4 weeks; a 3-month window in ~11 days; yield ≈
+80–82% of window videos (the rest no longer exist on the platform —
+platform attrition, not pipeline shortfall).
