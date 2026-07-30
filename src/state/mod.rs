@@ -791,9 +791,13 @@ impl Store {
     /// records the snapshot moment). Returns the row-change count per 0006.
     ///
     /// **Claim-guarded** (Epic 5b, 0023 symmetry): the envelope is written
-    /// only while `videos.claimed_by = worker_id`, so a worker whose claim was
-    /// swept out from under it cannot overwrite a newer envelope captured by
-    /// whoever re-claimed the row. Last-write-wins still holds *among writers
+    /// only while the row is `status = 'in_progress' AND claimed_by = ?` —
+    /// the same pair every other guarded mutator in this family carries — so a
+    /// worker whose claim was swept out from under it cannot overwrite a newer
+    /// envelope captured by whoever re-claimed the row. Both halves are
+    /// checked locally rather than leaning on the "claimed_by is non-NULL iff
+    /// in_progress" invariant maintained elsewhere in this file: a malformed
+    /// row fails closed. Last-write-wins still holds *among writers
     /// that hold the claim* — that is what makes a retry refresh the envelope.
     /// The guard rides the INSERT's source SELECT rather than the call site:
     /// this mutator runs BEFORE outcome dispatch and must stay unconditional
@@ -822,7 +826,9 @@ impl Store {
             .execute(
                 "INSERT INTO video_metadata_raw (video_id, fetched_at, raw_json)
                  SELECT ?1, ?2, ?3 FROM videos
-                 WHERE video_id = ?1 AND claimed_by = ?4
+                 WHERE video_id = ?1
+                   AND status = 'in_progress'
+                   AND claimed_by = ?4
                  ON CONFLICT(video_id) DO UPDATE SET
                      fetched_at = excluded.fetched_at,
                      raw_json   = excluded.raw_json",

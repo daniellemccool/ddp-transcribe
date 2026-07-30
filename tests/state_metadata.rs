@@ -121,6 +121,36 @@ fn upsert_metadata_raw_rejects_a_stale_claim() {
     );
 }
 
+/// Fail-closed on a malformed row. The guard checks `status = 'in_progress'`
+/// AND `claimed_by = ?` locally, matching every sibling mutator (0023),
+/// instead of leaning on the "claimed_by is non-NULL iff in_progress"
+/// invariant that half a dozen other functions maintain. A row carrying a
+/// claimant while parked in some other status is not an active claim, and the
+/// write must be refused. Seeded through a raw connection because no public
+/// mutator produces that shape — which is the point of the test.
+#[test]
+fn upsert_metadata_raw_rejects_a_claimant_on_a_non_in_progress_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut store, db) = store_with_claimed_video(&dir);
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute(
+        "UPDATE videos SET status = 'failed_retryable' WHERE video_id = 'vid_a'",
+        [],
+    )
+    .unwrap();
+
+    let n = store
+        .upsert_metadata_raw("vid_a", "worker-1", r#"{"schema":1,"printed":"{}"}"#)
+        .unwrap();
+    assert_eq!(n, 0, "a claimant on a parked row is not an active claim");
+
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM video_metadata_raw", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
 /// An unclaimed row has no in-flight worker at all, so no envelope write is
 /// legitimate through this (fetch-path) mutator. `backfill-metadata` writes
 /// unclaimed rows through `insert_metadata_raw_if_missing` instead (0042).
