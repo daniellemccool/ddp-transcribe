@@ -55,8 +55,16 @@ window narrowing, WAV headroom, rate-limit exposure, coverage) is still open.
 
 **2026-07-29 triage — measured; HOLD:** throughput and window-narrowing were
 measured in `docs/operations/capacity-estimate-2026-07-29.md` (commit
-`e73e2f0`). Status: **HOLD** pending the 4-download-worker A/B and the PI's
-window decision. Archive this entry once the PI summary ships.
+`e73e2f0`). The 4-download-worker A/B has since been **measured** too
+(commit `9e43211`): scaling is linear at 1.32× observed vs 1.33× predicted,
+with no throttle signature — failure mixes statistically identical across
+instances, and ~4,500 claims/h from one IP drew no visible pushback. An
+operator disclosure that both instances shared one A10 during the A/B window
+(commit `a839ac7`) leaves the A/B itself standing — same GPU and same IP on
+both sides makes worker count the only variable — but corrected the ceiling
+math, which had assumed a GPU each; the action is to pin one instance per GPU
+at the next restart. The PI write-up is unblocked. Status: **HOLD** pending
+only the PI's window decision. Archive this entry once the PI summary ships.
 
 ---
 

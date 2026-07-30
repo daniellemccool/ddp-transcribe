@@ -10,9 +10,14 @@ TikTok is the currently supported source.
 > `docs/`) use the old name and the old `UU_TIKTOK_*` env prefix; they are
 > dated records and have deliberately not been rewritten.
 
-> **Plan A — walking skeleton.** Only the `Dev` profile is wired. Known
-> Plan-A quirks when you test:
-> - `process` exits with code **3** when it claimed zero videos — this is intentional, not a failure.
+> **Status: live-campaign codebase.** Plan B epics through 5a (campaign
+> safety) have landed: embedded whisper.cpp via `whisper-rs`, the durable
+> state machine, the pipelined orchestrator with failure classification and
+> in-batch retry, the analysis window, metadata capture, the read-only
+> `status` surface, and the in-run checkpoint hook. This is what runs the
+> production batch, not a skeleton. Two things still surprise newcomers:
+> - Only the `Dev` profile is wired — `--profile` exists but has one value.
+> - `process` exits with code **3** when it claimed zero videos — intentional (nothing to do), not a failure.
 
 ## Quickstart
 
@@ -22,7 +27,9 @@ External tools on `PATH`:
 
 - `yt-dlp` (fetches audio)
 - `ffmpeg` (invoked by yt-dlp's postprocessor to resample to 16 kHz mono)
-- `whisper-cli` (the whisper.cpp binary; transcribes)
+
+whisper.cpp is **embedded** (`whisper-rs`), not shelled out to — there is no
+`whisper-cli` on the runtime path. You still supply a model file.
 
 Plus a Rust toolchain (stable; edition 2021).
 
@@ -82,6 +89,11 @@ All subcommands accept the global flags below (or their env equivalents).
 | `--transcripts`   | `DDP_TRANSCRIBE_TRANSCRIPTS`    | `./transcripts`               | Artifacts written here.                                              |
 | `--log-format`    | `DDP_TRANSCRIBE_LOG_FORMAT`     | `human`                       | `human` or `json`.                                                   |
 | `--whisper-model` | `DDP_TRANSCRIBE_WHISPER_MODEL`  | `./models/ggml-tiny.en.bin`   | Path to whisper.cpp model file. `tiny.en` is English-only; for non-English audio use a multilingual model (e.g. `ggml-small.bin`). |
+| `--classification` | `DDP_TRANSCRIBE_CLASSIFICATION` | compiled default            | TOML failure-classification policy. Validated hard-fail before the model loads; the active table is snapshotted into `batch_runs`. |
+| `--compute-lang-probs` | `DDP_TRANSCRIBE_COMPUTE_LANG_PROBS` | off                | Emit a per-language probability distribution per video. Costs one extra encoder pass. |
+| `--stale-claim-threshold` | `DDP_TRANSCRIBE_STALE_CLAIM_THRESHOLD` | `30m`         | Age after which a crashed run's `in_progress` claim is swept back to `pending`. Humantime (`45s`, `1h`). Also guards the startup temp-file cleanup. |
+| `--download-workers` | `DDP_TRANSCRIBE_DOWNLOAD_WORKERS` | `3`                    | Parallel fetch workers feeding the single transcribe worker. Must be ≥ 1. |
+| `--channel-capacity` | `DDP_TRANSCRIBE_CHANNEL_CAPACITY` | `2`                    | Bounded fetch→transcribe queue depth (backpressure). Must be ≥ 1. |
 
 Log verbosity is controlled by `RUST_LOG` (e.g. `RUST_LOG=debug`).
 
@@ -90,12 +102,26 @@ Log verbosity is controlled by `RUST_LOG` (e.g. `RUST_LOG=debug`).
 Creates `state.sqlite` and applies the schema. Idempotent — if the DB
 already carries a `schema_version`, it logs and exits 0.
 
-### `ingest [--dry-run]`
+### `migrate`
+
+Upgrades an older `state.sqlite` to the current schema version, in one
+transaction, then bumps `meta.schema_version`. Every other subcommand
+*refuses to open* a DB whose version doesn't match the binary's, so this is
+the only way forward after an upgrade. Idempotent — a no-op when already
+current.
+
+### `ingest [--dry-run] [--window-start D] [--window-end D]`
 
 Walks `--inbox`, parses each DDP watch-history JSON, canonicalizes each
 `Link` to a video id, and upserts into `videos` (new rows `pending`) and
 `watch_history`. Summary counts (files processed, unique videos, duplicate
-watch rows, short-links skipped, invalid URLs skipped) are logged.
+watch rows, short-links skipped, invalid URLs skipped) are logged. A file
+already ingested unchanged (same name, size and mtime) is skipped without
+being read.
+
+`--window-start` / `--window-end` (`YYYY-MM-DD`, UTC, both inclusive; either
+may be omitted) set the analysis window. Each watch row's `in_window` flag is
+computed once, here, and stored; nothing re-derives it at query time.
 
 `--dry-run` does the full pass — every file read, parsed and upserted — inside
 a single transaction spanning the whole inbox, then rolls that transaction
@@ -112,19 +138,70 @@ dry-run alongside a running `process` can hold that lock past
 `SQLITE_BUSY` and its batch aborts. Run a dry-run only at a pause — no
 `process` running — not alongside one.
 
-### `process [--max-videos N]`
+### `process`
 
-Claims pending videos one at a time, fetches audio via `yt-dlp`, hands the
-WAV to `whisper-cli`, writes the transcript `.txt` + `.json` + metadata
-under `<transcripts>/<shard>/`, then marks the row succeeded or failed.
-`--max-videos` caps the batch.
+The batch. On startup it clears leftover partial-write temp files older than
+`--stale-claim-threshold`, opens a `batch_runs` row snapshotting the run's
+params and the active classification policy, and re-adjudicates previously
+parked retryable failures through that policy. Then it drains: claims
+abandoned by a crashed run are swept back to `pending`, and
+`--download-workers` fetch workers claim pending videos and pull audio via
+`yt-dlp`, feeding one transcribe worker over a bounded channel. Each success writes the transcript `.txt` + `.json` under
+`<transcripts>/<shard>/` *before* the row is marked succeeded. Failures are
+classified — retryable ones requeue in-batch under the retry budget, terminal
+ones are written off. The run ends by drain (no pending work left), stamping
+a census onto the `batch_runs` row and printing it.
+
+| Flag | Default | Notes |
+|------|---------|-------|
+| `--max-videos N` | unlimited | Cap the batch. |
+| `--retries N` | `1` | In-batch retry budget per video; lifetime attempts = `retries + 1`. |
+| `--cookies-file PATH` | none | Netscape-format cookie jar, passed to `yt-dlp` **only** when retrying a video previously classified sensitive/login-gated. Never sent on a first attempt; the path is redacted from logs. Env: `DDP_TRANSCRIBE_COOKIES_FILE`. |
+| `--checkpoint-cmd PATH` | none | Operator hook run periodically during the batch (e.g. a sync-to-storage script). Invoked with no arguments; a failure or timeout warns and increments a counter — it can never abort the run. |
+| `--checkpoint-every DUR` | `15m` | Interval between hook runs *and* the hook's own timeout, so a slow hook reports itself instead of stacking copies. Requires `--checkpoint-cmd`. |
 
 Exit codes:
 
 - `0` — at least one video was claimed (regardless of per-video outcome).
 - `3` — zero videos were claimed (inbox empty, everything already done, or
   all pending rows are currently claimed by another worker).
-- non-zero other — unrecoverable error (DB open, artifact dir creation, etc.).
+- non-zero other — unrecoverable error (DB open, artifact dir creation, a
+  Bug-class worker failure, etc.).
+
+### `status`
+
+The read-only operator surface; never mutates the DB. Bare, it prints counts
+by status, `failed_retryable` broken down by failure kind, ages of current
+claims, and `batch_runs` history. Narrowing flags: `--video-id` (one video's
+full event history), `--respondent-id` (per-respondent counts), `--errors`
+(terminal failures with reasons), `--retryable` (parked retryables).
+`--verify` runs the done-contract checks — artifacts present at their sharded
+paths, `raw_signals.schema_version` parses, batch is pause-safe — and exits 1
+when it isn't. `--json` emits machine-readable output instead of text.
+
+### `recompute-window`
+
+The only thing that changes `in_window` after ingest. One-shot; does not
+re-read DDP files. Takes the same `--window-start` / `--window-end` bounds,
+or `--clear` to explicitly opt into "no filter" (every row `in_window = 1`).
+It refuses to run bare — silently wiping a study's window filter must be
+impossible. `--dry-run` reports how many rows would change, without writing.
+
+### `load-metadata [--dry-run]`
+
+Post-run step: parses the raw metadata envelopes captured at fetch time into
+the typed `videos` columns. Idempotent and replayable — it re-parses from the
+stored blobs, so fixing the parser needs no re-fetch. `--dry-run` parses
+everything and reports counts without writing.
+
+### `backfill-metadata [--limit N] [--dry-run]`
+
+Fills in raw metadata for already-succeeded videos that predate fetch-time
+capture. Metadata-only `yt-dlp` per video — no media download, and it never
+touches a video's status. Best-effort and re-runnable; run `load-metadata`
+afterwards to populate the typed columns. `--limit` caps the attempt count
+for smoke runs; `--dry-run` prints the cohort size and exits without invoking
+`yt-dlp`.
 
 ## Repo layout
 
@@ -137,7 +214,7 @@ src/
   ingest.rs           # DDP JSON → videos + watch_history upserts
   state/              # rusqlite Store + schema (WAL, claim_next, mark_succeeded, ...)
   fetcher/            # VideoFetcher trait + YtDlpFetcher
-  transcribe.rs       # whisper-cli wrapper
+  transcribe.rs       # embedded whisper.cpp engine (whisper-rs)
   pipeline.rs         # per-video orchestration (fetch → transcribe → artifacts)
   process.rs          # batch loop used by the `process` subcommand
   output/artifacts.rs # atomic transcript/metadata writes + tmp cleanup
@@ -145,7 +222,7 @@ src/
 
 tests/                # integration tests; most gated by feature `test-helpers`
   fixtures/ddp/       # sample donation-extractor JSON(s)
-  e2e_real_tools.rs   # ignored by default; real yt-dlp/ffmpeg/whisper-cli + network
+  e2e_real_tools.rs   # ignored by default; real yt-dlp/ffmpeg + model + network
 
 scripts/              # one-off dev scripts (model fetch)
 

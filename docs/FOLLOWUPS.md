@@ -77,7 +77,7 @@ finding 3 → Epic 5, finding 4 → Plan C (see those groups below).
 - Full Epic 5 entries: [followups/epic-5.md](followups/epic-5.md)
 
 **Production run (operational milestones, not code epics)**
-- Epic 4c close: capacity estimate for the production batch — 2,982,471 uniques, throughput / window narrowing / disk (`video_metadata_raw` ~3–6 GB, transient WAVs) → measured 2026-07-29 (`docs/operations/capacity-estimate-2026-07-29.md`, commit e73e2f0); HOLD pending 4-download-worker A/B + PI window decision
+- Epic 4c close: capacity estimate for the production batch — 2,982,471 uniques, throughput / window narrowing / disk (`video_metadata_raw` ~3–6 GB, transient WAVs) → measured 2026-07-29, 4-worker A/B included (`docs/operations/capacity-estimate-2026-07-29.md`, commits 9e43211 + a839ac7); HOLD pending only the PI window decision
 - Epic 4c close: `video_metadata_raw` prune / VACUUM decision — keep for re-parse, prune for export, or reclaim in place → after the first production batch's `load-metadata` completes
 - v0.3.1 backfill: cookie-gated metadata residue — hypothesis (unverified) that part of the cohort is now login-gated; carries two rejected argv-hardening candidates (`--ignore-no-formats-error`, `--` separator) → after the first full `backfill-metadata` run's stats
 - Campaign shakedown 2026-07-28: **Hypothesis (unverified):** concurrent-writer lost updates (one run's 13 successes reverted to pending, idempotently re-done) → instrumented in v0.3.2 (`31c18df`); adjudicate at the next `pending` bump via `swept_stale` events, then graduate to a fix task

@@ -99,6 +99,8 @@ The orchestrator turns worker outcomes into state-machine mutations via **three-
 
 Since Epic 4a, `main`'s `Process` arm wraps the orchestrator in a durable batch lifecycle ([ADR 0036](../../decisions/0036-retry-is-in-pipeline-capped-failure-time-requeue-the-re-fetch-is-the-liveness-oracle.md)):
 
+Before the batch opens, the `Process` arm runs a startup tmp sweep — `output::artifacts::cleanup_tmp_files(&cfg.transcripts, cfg.stale_claim_threshold)` (`src/main.rs:91`) deletes leftover partial-write temp files under the transcripts tree, but only those older than the stale-claim threshold; the age guard is what makes it safe beside a second live instance, whose in-flight temp file is younger than the threshold and is spared.
+
 1. **Open** — build the active classification table (operator `--classification` TOML or the compiled default; validated hard-fail *before* the model loads), then `open_batch_run` inserts a `batch_runs` row snapshotting the params JSON and the full policy TOML, returning a `run_id`.
 2. **Sweep** — `batch::run_sweep` (`src/batch.rs`) adjudicates every parked `failed_retryable` row through the table before the drain begins: terminal classes write off (`sweep_mark_terminal`), retryables and the cookie pool requeue under the lifetime cap (`sweep_requeue`), and requires-cookie rows with no cookies stay parked. This is where historical write-off pools and cross-batch stragglers die or re-enter on the first post-upgrade run — no operator subcommand needed.
 3. **Drain** — the pipelined orchestrator runs (fresh work first, then requeued retries per the `attempt_count ASC` claim ordering), dispatching failures through `record_fetch_failure` as above.
@@ -126,3 +128,4 @@ What exists on current `main` is **partial**: the orchestrator *ends* a batch vi
 | 0035 | Cookies scoped to SensitiveLoginGated retries | `cookie_opts_for` kind-gated fetch opts + redaction. |
 | 0036 | In-batch capped retry + end-of-queue claim ordering | `record_fetch_failure` dispatch, shared outcome helper, batch lifecycle (open→sweep→drain→close). |
 | 0037 | Operator-editable TOML classification table | Classifier dispatch reads the active table; policy snapshot in `batch_runs`. |
+| 0044 | In-run checkpoint hook that can never abort the run | `--checkpoint-cmd`/`--checkpoint-every` periodic task in the same `JoinSet`; drives 0025's count-based cancel once every real worker has joined. |

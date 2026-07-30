@@ -122,6 +122,7 @@ Every ADR currently in `docs/decisions/`, grouped by the subsystem it governs. C
 | 0033 | Evidence-derived failure taxonomy with inline write-off | Three-arm classifier dispatch in the workers. Cross-cuts state machine (kinds/reasons written to failure columns). |
 | 0035 | Cookies scoped to SensitiveLoginGated retries with argv redaction | Kind-gated `cookie_opts_for` fetch opts. Cross-cuts data input (yt-dlp invocation). |
 | 0041 | `status` is the read-only operator surface; the 0017 done-contract lives behind `--verify` | Counts/kinds/claim-ages/batch history; `--verify` pause-safe verdict, exit 1 on violation. Lean successor to archived 0017. |
+| 0044 | In-run checkpointing is an operator-supplied hook that can never abort the run | `process --checkpoint-cmd/--checkpoint-every`; supervised periodic task, failures warn and count. Cross-cuts 0025 (its cancel-on-clean-drain). |
 
 ### Operations (out of architecture-doc scope)
 
@@ -160,5 +161,5 @@ The architecture doc itself is **not** subject to the codex-advisor / Sonnet rev
 
 - **ADR-redirect-first.** Where an ADR captures rationale, point at the ADR rather than restating it. The architecture doc owns the *what* (noun layer) and the *narrative* (donor's journey); ADRs own the *why*.
 - **Citation style.** Inline `src/path/file.rs:N` for any specific behavioral claim. Line numbers drift; the file path stays valid.
-- **In-flight stamp.** While an epic is actively reshaping the `state-machine.md` or `orchestration.md` subsystem, that file carries an "as of commit `<sha>`" stamp pointing at the active plan; the stamp is removed at epic close. Neither file carries one currently — Plan B Epic 4c (which last reshaped them: schema v5 metadata columns + `video_metadata_raw`, the `write_artifacts_durable` / `mark_after_artifacts` split) has closed.
+- **In-flight stamp.** While an epic is actively reshaping the `state-machine.md` or `orchestration.md` subsystem, that file carries an "as of commit `<sha>`" stamp pointing at the active plan; the stamp is removed at epic close. No file carries one currently — Plan B Epic 5a (campaign safety), which last reshaped all three, has closed: `orchestration.md` (the startup tmp sweep and the checkpoint-hook task with its count-based clean-drain cancel), `state-machine.md` (`swept_stale` audit rows and real-hostname `{hostname}-{pid}` claim attribution), and `data-input.md` (the single-transaction, rolled-back `ingest --dry-run`). Epic 4c was the prior reshaper of the first two (schema v5 metadata columns + `video_metadata_raw`, the `write_artifacts_durable` / `mark_after_artifacts` split).
 - **Diagrams.** ASCII only. Currently two: a topology diagram in `orchestration.md`, a state-transition diagram in `state-machine.md`.

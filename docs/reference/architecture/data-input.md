@@ -4,7 +4,7 @@ The data-input subsystem covers two stages of the donor's journey: ingest (parsi
 
 ## Ingest
 
-The ingest stage reads a donor's TikTok DDP export from a local inbox directory, parses the JSON, and upserts each identifiable watched-video entry into the state machine's `videos` and `watch_history` tables. The entry point is `pub fn ingest(inbox: &Path, store: &mut Store)` in `src/ingest.rs:30`.
+The ingest stage reads a donor's TikTok DDP export from a local inbox directory, parses the JSON, and upserts each identifiable watched-video entry into the state machine's `videos` and `watch_history` tables. The entry point is `pub fn ingest(inbox: &Path, store: &mut Store, window: WindowBounds, dry_run: bool) -> Result<IngestStats>` in `src/ingest.rs:145`. `window` carries the analysis-window bounds each `watch_history` row's `in_window` flag is computed against (see [ADR 0040](../../decisions/0040-analysis-window-is-computed-at-ingest-recompute-window-is-the-only-flag-mutator.md)); `dry_run` selects the transaction shape described below.
 
 ### DDP export shape
 
@@ -52,6 +52,18 @@ A successfully processed entry produces one row in each of two tables:
 **`watch_history`** — one row per `(respondent_id, video_id, watched_at)`, written by `store.upsert_watch_history(...)` (`src/ingest.rs:109`). Stores the respondent identity alongside the watch timestamp (as a Unix epoch i64), the verbatim raw date string (`watched_at_raw`), and the `in_window` flag.
 
 Both tables use `INSERT OR IGNORE` (`src/state/mod.rs:169, 189`), so re-running ingest against the same export is safe. For the full lifecycle of a `videos` row after ingest, see [state-machine.md](state-machine.md).
+
+### Transaction shape and `--dry-run`
+
+A **real run** batches writes per file: the read and JSON parse happen *outside* any write transaction (`prepare_file`), then one deferred transaction wraps that file's row upserts plus its ledger row and commits before the next file starts. This keeps SQLite's write-lock window off filesystem I/O, lets partial progress survive a later malformed file, and still amortizes the per-row commit cost.
+
+A **dry-run** (`ingest --dry-run`) inverts that: it opens a single `Store::transaction_immediate()` (`BEGIN IMMEDIATE`) spanning the *whole* inbox scan, does every file's real work inside it — read, parse, ledger check, upserts, ledger write — and rolls that one transaction back at the end (explicitly, so a rollback failure surfaces rather than being swallowed by `Drop`). Nothing persists, not even the ingest ledger.
+
+The point of one transaction rather than per-file rollbacks is **stat fidelity**: every file sees the earlier files' uncommitted rows, so row-change-derived counters (`watch_history_duplicates`, `backfilled_raw_dates`) come out exactly as a real run's — including duplicates and raw-date backfills that only appear *across* files. The ledger read stays active and reads through that same transaction (`&Transaction` derefs to `&Connection`, so `prepare_file` is mode-agnostic), so `files_skipped_already_ingested` reports what a real run would skip.
+
+`IMMEDIATE` rather than the deferred default is load-bearing at this duration: a deferred transaction that reads first and writes later can fail its read-to-write upgrade *immediately* with `SQLITE_BUSY` under WAL snapshot isolation, which `busy_timeout` does not retry. Taking the write lock up front makes any contention a bounded `busy_timeout` wait instead, exactly like `claim_next`.
+
+**Lock honesty — the operator cost.** A dry-run holds one write transaction for the entire scan, file reads and JSON parsing included, where a real ingest takes only brief per-file locks. Beside a live `process`, a full-inbox dry-run can hold that lock past the 5s `busy_timeout`, in which case `claim_next` gets `SQLITE_BUSY` and that run's batch aborts. Run a dry-run only at a pause — no `process` running — never alongside one.
 
 ### Analysis window (`--window-start` / `--window-end`)
 
