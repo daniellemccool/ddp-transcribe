@@ -9,7 +9,15 @@ retry moved in-pipeline, classification became an operator TOML); Epic 4c added
 the post-run `load-metadata` step and the v4 → v5 migration; the topology is
 stable. **2026-07-29:** the update procedure changed from pull-main to
 tag-and-relaunch (ADR-0043), after an incident where the workspace's pinned
-`pipeline_git_ref` had drifted four epics stale — see below.
+`pipeline_git_ref` had drifted four epics stale — see below. **2026-07-30
+(v0.3.2, campaign-safety slice):** in-run checkpointing (`--checkpoint-cmd` /
+`--checkpoint-every`), an actually-dry `ingest --dry-run`, an age-guarded
+startup tmp sweep, and `swept_stale` forensic events — all covered below.
+
+**Version state:** the workspace still runs **v0.3.0**. v0.3.1 was tagged but
+never deployed, so the next upgrade jumps **0.3.0 → 0.3.2** in one step and
+both tags' release notes apply; `-V` must print `0.3.2` afterwards. Anything
+below marked "as of v0.3.1" therefore arrives with that same upgrade.
 
 ## Topology (what actually exists)
 
@@ -65,6 +73,9 @@ Verify after every relaunch:
 ddp-transcribe -V && ddp-transcribe -h | head -12   # subcommand list matches expectations
 ```
 
+After the pending 0.3.0 → 0.3.2 upgrade, `-V` must print **0.3.2**, `-h` must
+list `backfill-metadata`, and `process -h` must show `--checkpoint-cmd`.
+
 ### Dev / emergency escape hatch (diverges from the pinned tag — NOT the production procedure)
 
 For local iteration or an emergency hotfix on a live workspace only, the
@@ -116,9 +127,11 @@ The operator sequence for a batch is **`ingest` → `process` → `load-metadata
 `status`**. Canonical invocation is the bare binary with explicit paths
 (CWD-independent). **Every global flag (`--state-db`, `--transcripts`,
 `--inbox`, `--whisper-model`, `--classification`, …) is accepted on either side
-of the subcommand as of v0.3.1** (all of them are clap `global = true`); the
-examples here keep them before the subcommand, and on a pre-v0.3.1 binary that
-placement is the only one that parses.
+of the subcommand as of v0.3.1** (all of them are clap `global = true`;
+inherited unchanged by v0.3.2, which is the tag that actually delivers it to
+this workspace); the examples here keep them before the subcommand, and on a
+pre-v0.3.1 binary — which is what the VM runs today — that placement is the
+only one that parses.
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 ddp-transcribe \
@@ -126,7 +139,8 @@ CUDA_VISIBLE_DEVICES=0 ddp-transcribe \
     --transcripts ~/ddp-work/transcripts \
     --whisper-model ~/ddp-work/models/ggml-large-v3-turbo-q5_0.bin \
     [--classification ~/ddp-classification.toml] \
-    process [--max-videos N] [--cookies-file ~/tiktok-cookies.txt] [--retries N]
+    process [--max-videos N] [--cookies-file ~/tiktok-cookies.txt] [--retries N] \
+            [--checkpoint-cmd ~/sync-to-storage.sh --checkpoint-every 15m]
 ```
 
 - Second GPU instance: same command with `CUDA_VISIBLE_DEVICES=1`. Concurrent
@@ -134,6 +148,21 @@ CUDA_VISIBLE_DEVICES=0 ddp-transcribe \
   start-of-batch sweep; the mutator predicates make this safe, but the
   second instance's sweep census will report the first's wins as
   `kept_capped` (with warns) — expected, not a bug.
+- **Restarting one instance while its sibling runs is safe as of v0.3.2.**
+  `process` startup sweeps stale `.tmp-{pid}-{seq}` files under the
+  transcripts root, and that sweep now only collects tmps **older than the
+  stale-claim threshold** (`--stale-claim-threshold`, default 30 min) — far
+  older than any in-flight write. Before v0.3.2 the sweep matched on the name
+  alone, so a restart could unlink the live sibling's in-flight tmp, fail its
+  `rename`, and abort *that whole batch run*. A tmp whose mtime cannot be read
+  is skipped and warned, never deleted.
+- Sweep-recovered rows are explainable as of v0.3.2: every row the stale-claim
+  sweep flips `in_progress → pending` writes a `swept_stale` event carrying the
+  stale claim's `was_claimed_by` / `claimed_at` / `threshold_secs`, and each
+  instance now reports its real hostname in `worker_id` instead of the literal
+  `host`. If the `pending` count rises mid-campaign, check the snapshot for
+  matching `swept_stale` events before suspecting anything else (see the
+  two-writer entry in `docs/followups/production-run.md`).
 - `--retries` (default 1) is the automatic in-batch retry budget per video:
   it caps **lifetime** attempts at `retries + 1` (compared against the row's
   `attempt_count`, which is bumped at claim time). Retries drain at the end of
@@ -145,12 +174,95 @@ CUDA_VISIBLE_DEVICES=0 ddp-transcribe \
   backend`); its absence means CPU fallback — abort and investigate.
 - `process` exit code 3 = zero videos claimed (queue drained) — not an error.
 - After a `process` batch: run `~/sync-to-storage.sh` (do NOT run it while an
-  export/transfer is reading the volume's transcript tree).
+  export/transfer is reading the volume's transcript tree). For uncapped
+  campaign runs, prefer the in-run checkpoint hook below — a batch that runs
+  for hours would otherwise leave the volume (and the Yoda-pushed resume
+  snapshot) stale until it exits.
 - Long runs belong in `tmux`.
 - The pilot's parked `failed_retryable` rows are adjudicated automatically by
   the start-of-batch sweep on the first 4a run; expect the census to report
   ~3,915 swept_terminal + ~2,871 requeued + 301 parked_for_cookies (no cookies)
   on that first run.
+
+### In-run checkpointing (v0.3.2) — replaces the manual checkpoint ritual
+
+The batch-end auto-sync (hop 1) only fires when a `process` invocation *exits*,
+so an uncapped campaign run leaves the storage volume and the resume snapshot
+stale for as long as it runs. As of v0.3.2 `process` can do it itself:
+
+```bash
+… process --checkpoint-cmd ~/sync-to-storage.sh --checkpoint-every 15m
+```
+
+- **This is the default for uncapped campaign runs.** It supersedes the manual
+  "Campaign checkpoint ritual" in the researchcloud repo's `yoda-operations.md`
+  — that doc needs a pointer note saying so; hand it to the deploy-repo owner
+  (do not edit that repo from here).
+- **Overlap with a manual `~/sync-to-storage.sh` is safe**: the script
+  `flock`-serializes itself, so a hand-run sync and a checkpoint firing simply
+  queue behind one another.
+- **The first firing is one full interval after start** (sleep-then-run, never
+  at t=0), and the interval doubles as the hook's **timeout** — a hook that
+  cannot finish within its own interval reports itself as failed rather than
+  stacking overlapping copies.
+- **A failed or timed-out hook never stops the batch.** It warns and increments
+  `checkpoints_failed`; `checkpoints_run` counts the clean firings. Both land in
+  the end-of-run "process complete" summary and the batch census, and the
+  configured `checkpoint_cmd` / `checkpoint_every_secs` are recorded in
+  `batch_runs.params_json`, so a past run's checkpoint behavior is
+  reconstructible from the state DB alone.
+- **Run completion can wait on an in-flight hook**, bounded by one interval
+  (the timeout): if the last video finishes while a sync is mid-copy, the run
+  exits after that sync completes rather than killing it. At `15m` that is a
+  worst-case 15-minute tail on exit — expected, not a hang.
+- `--checkpoint-every` alone is rejected by clap (`requires =
+  checkpoint_cmd`); its default is `15m` when `--checkpoint-cmd` is given.
+
+**Mid-run rsync reality — exit 24 (observed live 2026-07-29).** A manual sync
+run while `process` was working printed:
+
+```
+file has vanished: ".../.work/ytdlp-<id>/<id>.wav"
+```
+
+Those warnings are **expected and benign** — `.work/` holds per-fetch
+transients that yt-dlp and the pipeline delete as they go, so rsync races them
+by design. But rsync **exits 24** ("some files vanished before they could be
+transferred"), which has two operational consequences:
+
+1. Manually, exit 24 breaks any `&&` chain after the sync — the sync itself
+   succeeded for everything that still existed.
+2. Once the checkpoint hook drives that script, **every** checkpoint cycle
+   during an active run counts as `checkpoints_failed`, because the hook keys
+   on the exit code.
+
+Fixes to hand the deploy-repo owner (`sync-to-storage.sh` lives there, not
+here): add `--exclude='.work/'` to the hop-1 rsync, keep the already-queued
+`--exclude='*.tmp-*'`, and treat **rsync exit 24 as success** inside the
+script. Until that lands, a non-zero `checkpoints_failed` composed entirely of
+exit-24 runs is **noise, not signal** — check the warn lines' `exit_code`
+before treating it as a sync outage.
+
+### `ingest --dry-run` (v0.3.2) — actually dry
+
+Before v0.3.2, `ingest --dry-run` logged "not yet implemented" and then ran a
+**real** ingest. As of v0.3.2 it is genuinely dry: the full pass runs — every
+file read, parsed and upserted — inside a single transaction spanning the whole
+inbox scan, which is then rolled back. Nothing persists, the `ingested_files`
+ledger included, and because each file sees the earlier files' uncommitted
+rows, the reported counts are exactly what a real run would report (duplicates
+and cross-file raw-date backfills included).
+
+- **Lock honesty:** a dry-run holds **one** write transaction (`BEGIN
+  IMMEDIATE` … rollback) for the entire inbox scan — file reads and JSON
+  parsing included — where a real ingest takes only brief per-file write locks.
+  It is safe under WAL + `busy_timeout` alongside a running `process`, but it
+  holds the write lock considerably longer; prefer a natural pause for a
+  full-inbox dry run.
+- **It is not a no-op on a fresh path:** pointing `--state-db` at a
+  non-existent file still creates an empty `state.sqlite` (plus WAL/SHM files)
+  with the schema applied — pre-existing `Store::open` behavior, unrelated to
+  the dry-run change. No donor data is written.
 
 ### Post-run metadata load (Epic 4c)
 
@@ -284,12 +396,14 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite --transcripts ~/ddp-work/tran
   `migrate`/`status`/`recompute-window`/`load-metadata` no longer log
   `whisper_model_path` (resolved; was a cosmetic false-alarm risk in Epic 3/4a
   logs).
-- Global flags became true clap globals in v0.3.1, so
+- Global flags became true clap globals in v0.3.1 (and stay so in v0.3.2), so
   `ddp-transcribe process --state-db …` now parses. On any binary older than
-  that (rc1, v0.3.0) only the before-the-subcommand placement every example here
-  uses works — `process --state-db …` fails with
+  that (rc1, v0.3.0 — including the workspace's current binary) only the
+  before-the-subcommand placement every example here uses works —
+  `process --state-db …` fails with
   `error: unexpected argument '--state-db' found`, which is a version signal,
-  not a typo.
+  not a typo. Likewise `--checkpoint-cmd` is a v0.3.2 flag: an
+  `unexpected argument` error for it means the upgrade did not land.
 - Bulk file transfer off the volume: iRODS/Yoda per-file overhead dominates below
   ~1 MB/file; parallelize disjoint shard ranges or use a bundle transfer. 120k
   files single-stream ≈ 24 h (measured 2026-07-07).

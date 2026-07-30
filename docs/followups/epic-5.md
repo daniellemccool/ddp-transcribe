@@ -390,28 +390,6 @@ Five gaps on the `status`/`--verify` surface, none blocking:
 
 ---
 
-### `ingest --dry-run` is not dry
-
-**Found in:** Epic 4b final whole-branch review. Pre-existing wart (the
-`tracing::info!` warning predates 4b); raised stakes because Epic 4b gave
-`ingest` window flags to preview.
-**Disposition:** Not blocking 4b — `recompute-window --dry-run` (Task 06)
-mitigates for rows already ingested — but the gap widens with each flag
-`ingest` grows.
-**Trigger to revisit:** Epic 5, or sooner if an operator is burned by it.
-
-`cli::Command::Ingest`'s `dry_run` arm (`src/main.rs`, ~line 58) logs
-`"dry-run: not yet implemented; running real ingest"` and then runs the real
-ingest unconditionally — `--dry-run` has never actually been dry. Now that
-`ingest` takes `--window-start`/`--window-end` (Epic 4b Task 05), an operator
-who reaches for `--dry-run` to preview a window's effect before committing to
-it instead mutates state for real. `recompute-window --dry-run` covers
-re-deriving `in_window` for rows already in the DB, but not the first
-ingest of a new export, where the mutation is `watch_history` inserts plus
-`videos` upserts, not just the `in_window` recompute.
-
----
-
 ### `main.rs` re-declares the library's entire module tree
 
 **Found in:** operator review, 2026-07-28 (during Epic 4c).
@@ -445,33 +423,21 @@ the suppression cleanup as a follow-on, not interleaved.
 
 ---
 
-### Startup `cleanup_tmp_files` sweep can delete a concurrent process's in-flight tmp
+### Tmp sweep's age guard has an inherent TOCTOU window
 
-**Found in:** Epic 4c Task 05 review (restated by codex-advisor while reviewing
-the unique-tmp-name change). Pre-existing behavior, not introduced by 4c.
-**Disposition:** Blast radius is limited to multi-process deployments, which is
-exactly the SRC two-GPU setup — but the failure is self-healing (the losing
-write fails, the row stays `in_progress`, the stale sweep reclaims it and the
-next attempt re-writes the artifact idempotently per ADR-0008). Not worth a
-rushed fix inside 4c. The real blast radius is bigger than "one video loses its
-write": a concurrent instance's startup sweep unlinking an in-flight tmp makes
-`atomic_write`'s rename fail, `write_artifacts_durable` propagates that as an
-error, and the transcribe worker's error cancels the orchestrator — so the
-*whole batch run* aborts, not just the one video. It is recoverable (restart
-picks the DB state back up, nothing is corrupted) but it is a run abort under
-the two-instance SRC deployment, not a one-video loss.
-**Trigger to revisit:** Epic 5, bundled with the other
-`output::cleanup_tmp_files` polish entry above.
-
-`cleanup_tmp_files` (`src/output/artifacts.rs`) sweeps every file whose name
-contains `.tmp` under the transcripts root at startup. Epic 4c made each
-in-flight tmp name unique per writing process (`{name}.tmp-{pid}-{seq}`), which
-removed the *collision* — two processes can no longer write the same tmp path —
-but the startup sweep still matches on the substring, so a second instance
-starting up while the first is mid-write will happily unlink the first's
-in-flight tmp file. The fix is to make the sweep skip tmp files belonging to a
-live pid (or to any pid other than its own), not to narrow the glob — a crashed
-run's leftovers must still be reclaimable.
+**Found in:** Epic 5a Task 01 review (2026-07-30), as an observation on the
+shipped age guard (`fd54fea`; the entry it closes is archived under "Resolved
+by Epic 5a").
+**Disposition:** Accepted plan-level tradeoff — recorded for completeness, not
+scheduled. The mtime read and the `remove_file` are separate syscalls, so a
+writer that stalled past the stale-claim threshold and then resumed could still
+have its tmp unlinked between the two. That window is only reachable by a
+writer whose *claim* would already have been swept out from under it, which is
+the case the sweep exists to clean up; closing it properly means an advisory
+lock or a liveness probe, both heavier than the exposure.
+**Trigger to revisit:** only if a run abort is ever traced to a swept tmp
+whose writer was live — i.e. evidence that the window is reachable in
+practice.
 
 ---
 

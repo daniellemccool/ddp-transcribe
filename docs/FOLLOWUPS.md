@@ -69,9 +69,8 @@ finding 3 → Epic 5, finding 4 → Plan C (see those groups below).
 - Epic 3 final review: `scrub_cookie_path` empty-path guard → Epic 5
 - T5-Epic1: Worker-side closed-reply path silently swallows error → Epic 5 (tracing/logging hygiene; re-routed from Epic 2, ~1h fix)
 - Epic 4b final review: status polish + test-debt bundle (`render_event_detail_inline` non-string fallback, missing test fixtures, `run_verify` `e.ok()` miscount, `--respondent-id` typo silently zero-fills, mid-file `use` in status.rs) → Epic 5 hygiene bundle
-- Epic 4b final review: `ingest --dry-run` is not dry — pre-existing wart, raised stakes now that `ingest` takes window flags → Epic 5
 - Epic 4c operator review: `main.rs` re-declares the library's entire module tree (double compilation, broadened `pub` surface, a driver of the accumulated `dead_code` allows) → Epic 5 hygiene bundle (cites ADR-0002's deferred bin/lib reassessment)
-- Epic 4c T05 review: startup `cleanup_tmp_files` sweep can delete a concurrent live process's in-flight tmp — pre-existing, multi-process deployments only → Epic 5 (bundle with the `cleanup_tmp_files` polish entry)
+- Epic 5a T01 review: tmp sweep's age guard has an inherent mtime-read → `remove_file` TOCTOU window — accepted plan-level tradeoff, recorded for completeness → Epic 5 (only if evidence appears)
 - Epic 4c T03 review: `upsert_metadata_raw` is not claim-guarded — a stale worker can overwrite a newer envelope (accepted last-write-wins tradeoff; snapshot staleness only, self-heals) → Epic 5
 - PR #23 review: ingest file-ledger hardening bundle (basename-only key collision risk, 1s-resolution change detector, no mid-tx rollback test) → Epic 5 (ingest/sync-IO sweep)
 - v0.3.1 review: CLI test-hardening bundle — `global = true` both-position test asserts parse acceptance only (no value-propagation or duplicate-precedence assertion); `backfill-metadata` `--dry-run`/`--limit` needs `conflicts_with`; dry-run test needs a PATH shim; `statuses()` snapshot needs claim/attempt columns → Epic 5 (test-hardening bundle)
@@ -81,9 +80,9 @@ finding 3 → Epic 5, finding 4 → Plan C (see those groups below).
 - Epic 4c close: capacity estimate for the production batch — 2,982,471 uniques, throughput / window narrowing / disk (`video_metadata_raw` ~3–6 GB, transient WAVs) → measured 2026-07-29 (`docs/operations/capacity-estimate-2026-07-29.md`, commit e73e2f0); HOLD pending 4-download-worker A/B + PI window decision
 - Epic 4c close: `video_metadata_raw` prune / VACUUM decision — keep for re-parse, prune for export, or reclaim in place → after the first production batch's `load-metadata` completes
 - v0.3.1 backfill: cookie-gated metadata residue — hypothesis (unverified) that part of the cohort is now login-gated; carries two rejected argv-hardening candidates (`--ignore-no-formats-error`, `--` separator) → after the first full `backfill-metadata` run's stats
-- Campaign shakedown 2026-07-28: **Hypothesis (unverified):** concurrent-writer lost updates (one run's 13 successes reverted to pending, idempotently re-done) → verify/instrument before concurrency work; operators watch for `pending` increases
-- Campaign shakedown 2026-07-28: `process` claims beyond `--max-videos` → two-writer instrumentation (with concurrent-writer entry); per-worker cap accounting diagnosis falsified 2026-07-29 (fix landed 9228c89, predates the observation)
-- Campaign ops 2026-07-29: periodic in-run checkpoint for uncapped runs (manual hop-1 ritual is the interim; see researchcloud repo `yoda-operations.md`) → if the ritual gets missed / next ops epic
+- Campaign shakedown 2026-07-28: **Hypothesis (unverified):** concurrent-writer lost updates (one run's 13 successes reverted to pending, idempotently re-done) → instrumented in v0.3.2 (`31c18df`); adjudicate at the next `pending` bump via `swept_stale` events, then graduate to a fix task
+- Campaign shakedown 2026-07-28: `process` claims beyond `--max-videos` → same two-writer cluster, same v0.3.2 instrumentation; per-worker cap accounting diagnosis falsified 2026-07-29 (fix landed 9228c89, predates the observation)
+- Epic 5a T03 review: `swept_stale` event-set/recovered-set invariant is enforced only by `debug_assert_eq!` (compiled out of release) → next-campaign hardening; operator ruling: prefer a DB-visible signal over a log warn
 - Full production-run entries: [followups/production-run.md](followups/production-run.md)
 
 **Plan C (short-link resolution, multi-engine, storage scale)**
