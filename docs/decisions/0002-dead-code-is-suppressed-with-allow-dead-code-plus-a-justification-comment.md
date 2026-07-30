@@ -35,11 +35,13 @@ been `pub(crate)` or a genuine dead-code regression.
 
 A thin-binary/fat-library restructuring was deliberately deferred at Plan A
 and taken in Epic 5b: `lib.rs` is now the single module root, so files no
-longer compile twice and `pub` library items are no longer exempt from
-`dead_code`. The allows that existed only to absorb that duplicate
-compilation were removed with the restructure.
+longer compile twice. Externally reachable `pub` library items remain outside
+`dead_code` — the restructure removed the second compilation context, not the
+exemption — so visibility discipline, not the lint, is now the only protection
+against `pub` being used to hide dead code. The allows that existed only to
+absorb the duplicate compilation were removed with the restructure.
 
 ## Alternatives
 
-- **`#[expect(dead_code)]`** — rejected; unfulfilled-expectation failures under `-D warnings` (see Guidance), historically because pub lib items were exempt in the bin+lib shape, now because feature gating makes deadness configuration-dependent.
+- **`#[expect(dead_code)]`** — rejected; unfulfilled expectations are fatal under `-D warnings`, and two things make them unfulfillable here: a reachable `pub` item never fires the lint at all, and feature gating makes deadness configuration-dependent (see Guidance).
 - **Blanket `#[allow(dead_code)]` at the crate root** — silences the lint everywhere and forfeits its regression value.

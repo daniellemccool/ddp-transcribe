@@ -29,9 +29,11 @@ code, and the library never calls `process::exit`.
 ## Why
 
 With one module root every file compiles once — no inline unit tests running
-twice, no `pub`-library-item exemption from `dead_code`, no duplicate-type
-footgun — and holding the façade to four names is what keeps the binary
-boundary from silently widening the crate's public API.
+twice, no duplicate-type footgun — and holding the façade to four names is
+what keeps the binary boundary from silently widening the crate's public API.
+Reachable `pub` items are exempt from `dead_code` in any library, so a narrow
+façade policed by `unreachable_pub` is the only thing stopping `pub` from
+becoming a place to park unused code.
 
 ## Alternatives
 
