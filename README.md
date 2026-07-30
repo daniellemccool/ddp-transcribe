@@ -212,42 +212,59 @@ src/
   config.rs           # resolved runtime config (profile → values)
   canonical.rs        # TikTok URL → canonical video_id
   ingest.rs           # DDP JSON → videos + watch_history upserts
-  state/              # rusqlite Store + schema (WAL, claim_next, mark_succeeded, ...)
+  state/              # rusqlite Store: schema, migrations, claims, read queries
   fetcher/            # VideoFetcher trait + YtDlpFetcher
+  audio.rs            # WAV → float32 PCM 16 kHz mono, the engine's input invariant
   transcribe.rs       # embedded whisper.cpp engine (whisper-rs)
-  pipeline.rs         # per-video orchestration (fetch → transcribe → artifacts)
-  process.rs          # batch loop used by the `process` subcommand
-  output/artifacts.rs # atomic transcript/metadata writes + tmp cleanup
+  pipeline/           # shared types + serial loop + pipelined orchestrator
+  batch.rs            # batch lifecycle: start-of-batch sweep + run census
+  failure.rs          # failure classification: tool error → three-arm verdict
+  classification.rs   # the operator-editable classification policy (TOML)
+  process.rs          # bounded subprocess runner (timeout + capped capture)
+  output/             # transcript sharding + atomic artifact writes + tmp cleanup
+  status.rs           # the read-only operator report
+  metadata_loader.rs  # load-metadata: raw envelopes → typed columns
+  backfill.rs         # backfill-metadata: envelopes for pre-capture videos
   errors.rs           # typed error enums
 
 tests/                # integration tests; most gated by feature `test-helpers`
-  fixtures/ddp/       # sample donation-extractor JSON(s)
+  fixtures/           # DDP JSONs, WAV audio, captured yt-dlp stderr
+  pipeline_fakes/     # orchestrator tests against fake fetcher + transcriber
   e2e_real_tools.rs   # ignored by default; real yt-dlp/ffmpeg + model + network
 
-scripts/              # one-off dev scripts (model fetch)
+scripts/              # dev helpers (model fetch, bake comparisons)
 
 docs/
-  superpowers/specs/  # canonical design spec
-  superpowers/plans/  # Plan A tasks + Plan B kickoff prompt
-  decisions/          # ADRs (+ index.yaml)
-  reference/          # scraped TikTok developer documentation
-  FOLLOWUPS.md        # deferred work captured during Plan A
+  reference/architecture/  # the architecture doc set — start here
+  decisions/               # lean ADRs (README.md is the generated index)
+  superpowers/specs/       # per-epic design docs
+  superpowers/plans/       # per-task plan files
+  operations/              # VM runbook + capacity worknotes
+  FOLLOWUPS.md             # scope index over followups/*.md
+  madr-archive/            # the frozen pre-migration MADR corpus
 ```
 
 ## Where to read more
 
-- [`docs/superpowers/specs/2026-04-16-uu-tiktok-pipeline-design.md`](docs/superpowers/specs/2026-04-16-uu-tiktok-pipeline-design.md)
-  — the canonical design: scope, architecture, data model, error taxonomy,
-  operational model. Start here for *why*.
-- [`docs/decisions/`](docs/decisions/) — ADRs covering concrete choices
-  (e.g. transcript sharding `0004`, `test-helpers` feature `0005`,
-  artifact-write ordering `0008`). See `index.yaml`.
-- [`docs/superpowers/plans/2026-04-16-plan-a/`](docs/superpowers/plans/2026-04-16-plan-a/)
-  — per-task Plan A files (what was built, in order).
-- [`docs/superpowers/plans/PLAN-B-KICKOFF-PROMPT.md`](docs/superpowers/plans/PLAN-B-KICKOFF-PROMPT.md)
-  — what Plan B will build on top of the walking skeleton.
-- [`docs/FOLLOWUPS.md`](docs/FOLLOWUPS.md) — deferred work and known gaps
-  (including the whisper-model-path override).
+- [`docs/reference/architecture/index.md`](docs/reference/architecture/index.md)
+  — **start here.** The architecture doc set: the donor's journey end to end,
+  plus four lifecycle-stage deepdives (data input, state machine,
+  orchestration, transcription). Owns the *what*; redirects to ADRs for the
+  *why*.
+- [`docs/decisions/`](docs/decisions/) — lean ADRs covering concrete choices
+  (e.g. transcript sharding `0004`, artifact-write ordering `0008`, shutdown
+  order `0025`, the checkpoint hook `0044`). `README.md` there is the
+  generated index; `madr-archive/` holds the frozen pre-migration corpus.
+- [`docs/superpowers/specs/`](docs/superpowers/specs/) — one design doc per
+  epic; `2026-04-16-uu-tiktok-pipeline-design.md` is the original Plan A
+  design, still the best statement of overall scope and data model.
+- [`docs/superpowers/plans/`](docs/superpowers/plans/) — per-task plan files,
+  one directory per epic (what was built, in order).
+- [`docs/operations/`](docs/operations/) — `src-vm.md` is the deployment
+  runbook for the SRC A10 workspace; the capacity worknote carries measured
+  throughput and the window-narrowing numbers.
+- [`docs/FOLLOWUPS.md`](docs/FOLLOWUPS.md) — deferred work and known gaps: a
+  scope index over the per-epic files in `docs/followups/`.
 - [`docs/reference/tiktok-for-developers/`](docs/reference/tiktok-for-developers/)
   — local copy of TikTok's scraped developer docs (Research API, DDP,
   Content Posting, etc.). Used for lookup during design; not a runtime dep.
