@@ -104,6 +104,14 @@ pub async fn dispatch(cli: Cli) -> Result<CommandExit> {
             let work_dir = cfg.transcripts.join(".work");
             std::fs::create_dir_all(&work_dir).context("creating work dir")?;
 
+            // Epic 5b: same startup hygiene for the fetcher's per-acquire
+            // attempt dirs. Age-gated on the same threshold — a fresh dir may
+            // belong to a live sibling process's in-flight fetch.
+            let swept = output::artifacts::cleanup_work_dirs(&work_dir, cfg.stale_claim_threshold)?;
+            if swept > 0 {
+                tracing::info!(swept, "cleaned up leftover fetch work dirs");
+            }
+
             // Epic 4a: the active classification policy — the operator's
             // `--classification` TOML (validated, hard-fail) or the
             // evidence-derived compiled default. Built before the sweep

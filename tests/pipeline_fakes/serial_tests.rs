@@ -585,3 +585,125 @@ async fn max_videos_budget_counts_retries() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// Epic 5b Task 07 — attempt-dir lifecycle, success side. The caller owns the
+/// attempt dir once `acquire` returns: after the DB commit the WHOLE dir goes,
+/// not just the wav (the leftover dir was the "disk churn" the old cleanup
+/// comment conceded). A sibling attempt dir staged beside it is untouched —
+/// cleanup is per-attempt, never a sweep of the work dir.
+#[tokio::test]
+async fn success_removes_the_whole_attempt_dir() -> anyhow::Result<()> {
+    let tmp = TempDir::new()?;
+    let mut store = Store::open(&tmp.path().join("state.sqlite"))?;
+    store.upsert_video("vid_a", "https://example/a", false)?;
+
+    // The FakeFetcher reports the wav's parent as the attempt dir when the
+    // parent follows the `ytdlp-` attempt-dir naming convention.
+    let work = tmp.path().join(".work");
+    let attempt = work.join("ytdlp-vid_a.4242-0");
+    std::fs::create_dir_all(&attempt)?;
+    let wav = attempt.join("vid_a.wav");
+    std::fs::copy(silence_fixture(), &wav)?;
+    let sibling = work.join("ytdlp-vid_z.4243-0");
+    std::fs::create_dir_all(&sibling)?;
+
+    let map = HashMap::from([("vid_a".to_string(), wav.clone())]);
+    let fetcher = FakeFetcher {
+        canned: Mutex::new(map),
+        always_fails: false,
+        first_call_gate: tokio::sync::Mutex::new(None),
+        canned_stderr: std::sync::Mutex::new(None),
+        received_opts: std::sync::Mutex::new(Vec::new()),
+        fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
+        canned_metadata: std::sync::Mutex::new(None),
+    };
+    let transcriber = FakeTranscriber::echo();
+
+    let opts = ProcessOptions {
+        worker_id: "test-worker".into(),
+        transcripts_root: tmp.path().join("transcripts"),
+        max_videos: Some(1),
+        compute_lang_probs: false,
+        transcribe_timeout: Duration::from_secs(5),
+        stale_claim_threshold: Duration::from_secs(60),
+        download_workers: 3,
+        channel_capacity: 2,
+        cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
+        retries: 1,
+        checkpoint: None,
+    };
+
+    let stats = run_serial(&mut store, &fetcher, &transcriber, opts).await?;
+    assert_eq!(stats.succeeded, 1);
+    assert!(
+        !attempt.exists(),
+        "the whole attempt dir must be gone after the DB commit, not just the wav"
+    );
+    assert!(
+        sibling.exists(),
+        "another attempt's dir is never touched by this claim's cleanup"
+    );
+    assert!(
+        tmp.path().join("transcripts/_a/vid_a.txt").exists(),
+        "artifacts are durable before the cleanup (0008 ordering preserved)"
+    );
+    Ok(())
+}
+
+/// Epic 5b Task 07 — attempt-dir lifecycle, failure side. A transcribe-side
+/// retryable failure drops the attempt dir too: the row requeues and the next
+/// claim re-fetches into a FRESH dir, so keeping these bytes only leaks disk.
+#[tokio::test]
+async fn transcribe_failure_removes_the_attempt_dir() -> anyhow::Result<()> {
+    let tmp = TempDir::new()?;
+    let mut store = Store::open(&tmp.path().join("state.sqlite"))?;
+    store.upsert_video("vid_a", "https://example/a", false)?;
+
+    let attempt = tmp.path().join(".work").join("ytdlp-vid_a.4242-1");
+    std::fs::create_dir_all(&attempt)?;
+    let wav = attempt.join("vid_a.wav");
+    std::fs::copy(silence_fixture(), &wav)?;
+
+    let map = HashMap::from([("vid_a".to_string(), wav)]);
+    let fetcher = FakeFetcher {
+        canned: Mutex::new(map),
+        always_fails: false,
+        first_call_gate: tokio::sync::Mutex::new(None),
+        canned_stderr: std::sync::Mutex::new(None),
+        received_opts: std::sync::Mutex::new(Vec::new()),
+        fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
+        canned_metadata: std::sync::Mutex::new(None),
+    };
+    let transcriber = FakeTranscriber::always_fails_retryable();
+
+    let opts = ProcessOptions {
+        worker_id: "test-worker".into(),
+        transcripts_root: tmp.path().join("transcripts"),
+        max_videos: Some(1),
+        compute_lang_probs: false,
+        transcribe_timeout: Duration::from_secs(5),
+        stale_claim_threshold: Duration::from_secs(60),
+        download_workers: 3,
+        channel_capacity: 2,
+        cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
+        retries: 1,
+        checkpoint: None,
+    };
+
+    let stats = run_serial(&mut store, &fetcher, &transcriber, opts).await?;
+    assert_eq!(stats.succeeded, 0);
+    assert_eq!(stats.failed, 1);
+    assert!(
+        !attempt.exists(),
+        "a failed attempt leaves no dir behind — the retry re-fetches into a fresh one"
+    );
+    Ok(())
+}

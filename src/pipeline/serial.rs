@@ -278,13 +278,13 @@ async fn process_one(
             );
         }
     }
-    let (samples, wav_path) = fetch_result?;
+    let (samples, audio) = fetch_result?;
     transcribe_and_write(
         store,
         transcriber,
         claim,
         samples,
-        wav_path,
+        audio,
         fetcher.name(),
         opts,
     )
@@ -384,7 +384,7 @@ mod tests {
         let (_capture, acq) = fetcher
             .acquire("vid_a", "https://example/a", &FetchOpts::default())
             .await;
-        assert!(matches!(acq?, Acquisition::AudioFile(_)));
+        assert!(matches!(acq?, Acquisition::AudioFile { .. }));
 
         let opts = ProcessOptions {
             worker_id: "worker-1".into(),

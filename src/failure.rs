@@ -140,6 +140,19 @@ pub fn classify_fetch_error(e: &FetchError, table: &ClassificationTable) -> Clas
                 "yt-dlp exit 0 but expected wav missing",
             ),
         ),
+        // Epic 5b: same class as MissingOutput — yt-dlp exited 0 but the
+        // attempt dir's contents don't match the one-wav contract. Retryable
+        // rather than Bug: a re-fetch lands in a FRESH dir, and a Bug verdict
+        // would cancel the whole batch (0025) over one video's output shape.
+        FetchError::AmbiguousOutput { dir, count } => retryable(
+            labels::YTDLP_OTHER,
+            ctx(
+                Some(0),
+                None,
+                &format!("{count} wav files in {} after exit 0", dir.display()),
+                "yt-dlp exit 0 but attempt dir holds more than one wav",
+            ),
+        ),
         FetchError::NetworkError(detail) => retryable(
             labels::NETWORK_TRANSIENT,
             ctx(None, None, detail, "network error"),

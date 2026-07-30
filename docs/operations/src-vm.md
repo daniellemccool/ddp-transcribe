@@ -227,7 +227,20 @@ file has vanished: ".../.work/ytdlp-<id>/<id>.wav"
 
 Those warnings are **expected and benign** — `.work/` holds per-fetch
 transients that yt-dlp and the pipeline delete as they go, so rsync races them
-by design. But rsync **exits 24** ("some files vanished before they could be
+by design. As of the Epic 5b close-out (unreleased at the time of writing —
+this behavior ships with the next tag, not with v0.3.2), each fetch attempt
+gets its own directory
+(`.work/ytdlp-<id>.<pid>-<seq>/`) and the pipeline removes the **whole
+directory** at the end of that attempt — after the DB commit on success, or on
+a decode/transcribe failure — so mid-sync `file has vanished` (and
+`directory has vanished`) warnings for `.work/` remain expected, and the
+example path above now carries the `.<pid>-<seq>` suffix. What is left behind
+is only crash/`kill`/cancellation residue, and `process` sweeps that at
+startup: any `.work/ytdlp-*` directory older than `--stale-claim-threshold` is
+removed (`cleaned up leftover fetch work dirs` in the startup log). The age gate
+is what makes a two-instance deployment safe — a fresh directory may belong to
+the other instance's in-flight fetch — so a dir left by a crash **one minute**
+before a restart survives that restart and goes on the next one. But rsync **exits 24** ("some files vanished before they could be
 transferred"), which has two operational consequences:
 
 1. Manually, exit 24 breaks any `&&` chain after the sync — the sync itself

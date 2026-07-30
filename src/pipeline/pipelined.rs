@@ -7,7 +7,6 @@
 //! `--pipelined` branch in `main.rs`.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -19,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     classify_fetch_phase, cookie_opts_for, fetch_and_decode, mark_after_artifacts,
-    write_artifacts_durable, ProcessOptions, ProcessOutcome, ProcessStats,
+    write_artifacts_durable, FetchedAudio, ProcessOptions, ProcessOutcome, ProcessStats,
 };
 use crate::errors::TranscribeError;
 use crate::failure::{classify_transcribe_error, ClassifiedFailure};
@@ -149,7 +148,7 @@ pub type SharedStore = std::sync::Arc<tokio::sync::Mutex<Store>>;
 /// Channel payload from fetch workers to the transcribe worker.
 ///
 /// Per 0027: fetch workers do WAV decode in parallel so the transcribe
-/// path is lean. The `PathBuf` rides through for cleanup after
+/// path is lean. The [`FetchedAudio`] handle rides through for cleanup after
 /// `mark_succeeded` per 0008. `samples_len` is carried so the transcribe
 /// worker can compute `duration_s = samples_len as f64 / 16_000.0`
 /// without re-deriving from the moved `samples` Vec (which is consumed
@@ -180,7 +179,10 @@ pub struct FetchedItem {
     pub claim: Claim,
     pub samples: Vec<f32>,
     pub samples_len: usize,
-    pub wav_path: PathBuf,
+    /// Epic 5b: the wav AND the attempt dir that holds it. The transcribe
+    /// worker owns this handle and ends its lifecycle exactly once — cleanup
+    /// after the DB commit, or discard on a transcribe failure.
+    pub audio: FetchedAudio,
     pub fetcher_name: &'static str,
     pub fetch_policy_tag: &'static str,
 }
@@ -332,13 +334,13 @@ pub async fn fetch_worker(
         }
 
         match fetch_result {
-            Ok((samples, wav_path)) => {
+            Ok((samples, audio)) => {
                 let samples_len = samples.len();
                 let item = FetchedItem {
                     claim,
                     samples,
                     samples_len,
-                    wav_path,
+                    audio,
                     // T18 Decision B: stamp the fetcher's identifier onto
                     // the item so the transcribe worker can pass it to
                     // the phase-4 helpers (instead of a hardcoded
@@ -352,8 +354,10 @@ pub async fn fetch_worker(
                 if sender.send(item).await.is_err() {
                     // Channel closed — transcribe_worker exited (panic or
                     // shutdown). Bug-class signal up to the orchestrator;
-                    // the WAV is on disk and the claim remains in_progress
-                    // until the next sweep recovers it.
+                    // the attempt dir is on disk and the claim remains
+                    // in_progress until the next sweep recovers both (the
+                    // item — and with it the cleanup handle — died with the
+                    // closed channel, so the `.work` sweep is the collector).
                     tracing::error!(
                         worker = %worker_id,
                         "fetch_worker: channel closed; transcribe_worker has exited"
@@ -454,7 +458,8 @@ pub async fn fetch_worker(
 /// Phase 2 transcribe worker. 1 instance per 0027. Drains
 /// [`FetchedItem`]s emitted by N fetch workers and runs phases 3+4 per
 /// item: transcribe (NO store lock) → write artifacts (NO store lock) →
-/// mark_succeeded (store lock, sub-50ms critical section) → cleanup wav.
+/// mark_succeeded (store lock, sub-50ms critical section) → attempt-dir
+/// cleanup.
 ///
 /// **Loop structure.** A `biased` `tokio::select!` at the loop top
 /// prefers the cancellation arm when both are ready — without `biased`,
@@ -553,7 +558,7 @@ pub async fn transcribe_worker(
             claim,
             samples,
             samples_len,
-            wav_path,
+            audio,
             fetcher_name,
             fetch_policy_tag,
         } = item;
@@ -593,7 +598,7 @@ pub async fn transcribe_worker(
                 // Phase 4a (0008 first half): durable artifact writes with
                 // NO store lock — the fsyncs must not serialize other
                 // workers' claim/failure dispatch behind this mutex.
-                let duration_s = write_artifacts_durable(
+                let durable = write_artifacts_durable(
                     &transcribe_output,
                     &claim,
                     samples_len,
@@ -601,7 +606,19 @@ pub async fn transcribe_worker(
                     fetcher_name,
                     transcriber.name(),
                 )
-                .with_context(|| format!("write_artifacts_durable for {}", claim.video_id))?;
+                .with_context(|| format!("write_artifacts_durable for {}", claim.video_id));
+                let duration_s = match durable {
+                    Ok(d) => d,
+                    Err(e) => {
+                        // Artifact write failed (disk full / permissions):
+                        // the row stays `in_progress` for the next sweep to
+                        // reclaim and re-fetch, so this attempt's bytes are
+                        // dead — and on a full disk, freeing them is the
+                        // friendlier failure.
+                        audio.discard();
+                        return Err(e);
+                    }
+                };
 
                 // Phase 4b (0008 second half): lock exactly around the DB
                 // acknowledgement.
@@ -612,7 +629,7 @@ pub async fn transcribe_worker(
                         &claim,
                         duration_s,
                         &transcribe_output.language,
-                        wav_path,
+                        audio,
                         fetcher_name,
                         transcriber.name(),
                         &opts,
@@ -636,7 +653,11 @@ pub async fn transcribe_worker(
             Err(TranscribeError::Cancelled) => {
                 // Coordinated shutdown, not a row failure. Row stays
                 // `in_progress`; sweep recovers on next startup. Do
-                // NOT increment any failure counter.
+                // NOT increment any failure counter. The attempt dir is
+                // deliberately left alone too — same reasoning as the
+                // fetch-side cancellation arm, where the dropped `acquire`
+                // future leaves its dir behind: the startup `.work` sweep
+                // collects it once it is older than the stale-claim window.
                 tracing::info!(
                     worker = %worker_id,
                     video_id = claim.video_id.as_str(),
@@ -647,6 +668,8 @@ pub async fn transcribe_worker(
             Err(e @ TranscribeError::Bug { .. }) => {
                 // Bug-class: orchestrator reacts per 0025 (cancel all
                 // + drain). Wrap with anyhow context for the JoinSet.
+                // This attempt is over either way — drop its bytes.
+                audio.discard();
                 tracing::error!(
                     worker = %worker_id,
                     video_id = claim.video_id.as_str(),
@@ -666,6 +689,9 @@ pub async fn transcribe_worker(
                 // `Unavailable` — cannot reach either arm here. Both are
                 // `unreachable!()`; the live path is `Retryable`.
                 let video_id = claim.video_id.clone();
+                // Epic 5b: the attempt ends here — the row requeues (and
+                // re-fetches into a fresh dir) or goes terminal.
+                audio.discard();
                 // ADR-0007 input-side accounting: one failure-dispatched
                 // attempt (mirrors run_serial's per-attempt bump).
                 stats_failed.fetch_add(1, Ordering::Relaxed);

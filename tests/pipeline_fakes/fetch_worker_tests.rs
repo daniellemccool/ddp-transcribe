@@ -99,12 +99,15 @@ async fn fetch_worker_drains_pending_rows_and_exits() -> anyhow::Result<()> {
     }
     assert_eq!(items.len(), 2, "two pending rows → two channel items");
 
-    // Sanity-check the payload — claim + samples + samples_len + wav_path
-    // ride together.
+    // Sanity-check the payload — claim + samples + samples_len + the audio
+    // handle ride together.
     for item in &items {
         assert!(item.samples_len > 0, "decoded samples must be non-empty");
         assert_eq!(item.samples.len(), item.samples_len);
-        assert!(item.wav_path.exists(), "wav_path must still exist on disk");
+        assert!(
+            item.audio.wav_path.exists(),
+            "wav_path must still exist on disk"
+        );
         assert!(
             ["vid_a", "vid_b"].contains(&item.claim.video_id.as_str()),
             "claim.video_id matches the upsert set"

@@ -236,6 +236,81 @@ pub fn cleanup_tmp_files(transcripts_root: &Path, older_than: Duration) -> Resul
     Ok(removed)
 }
 
+/// Sweep leftover per-acquire fetch directories under the `.work` root
+/// (`ytdlp-{video_id}.{pid}-{seq}`, plus any pre-5b `ytdlp-{video_id}` dirs).
+/// Called at process startup so attempt dirs orphaned by a crash, a `kill`, or
+/// a cancelled fetch don't accumulate — the live paths clean up after
+/// themselves (see [`crate::pipeline::FetchedAudio`]). The returned count
+/// reports ONLY directories this sweep actually deleted; failures are
+/// warn-logged and not counted (ADR-0006 shape).
+///
+/// Only dirs whose mtime is older than `older_than` are deleted, the same
+/// argument [`cleanup_tmp_files`] makes for tmp files: a dir younger than the
+/// stale-claim window may belong to a live sibling process mid-fetch
+/// (two-instance deployment), and deleting it destroys that fetch's output
+/// while yt-dlp is still writing into it. A dir older than the stale-claim
+/// window cannot belong to a live claim (the claim itself would have been
+/// swept). Unreadable mtime ⇒ skip + warn (never destroy on uncertainty); an
+/// mtime in the future (clock anomaly) counts as fresh. Fresh orphans from a
+/// crash survive one sweep and are collected next start.
+///
+/// Shallow and prefix-scoped on purpose: only `work_dir`'s own entries, only
+/// directories named like attempt dirs. Anything else an operator parked under
+/// `.work` is out of scope.
+pub fn cleanup_work_dirs(work_dir: &Path, older_than: Duration) -> Result<usize> {
+    if !work_dir.exists() {
+        return Ok(0);
+    }
+    let mut removed = 0;
+    for entry in std::fs::read_dir(work_dir)
+        .with_context(|| format!("reading work dir {}", work_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        let is_attempt_dir = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|n| n.starts_with(crate::fetcher::ytdlp::ATTEMPT_DIR_PREFIX));
+        if !is_attempt_dir {
+            continue;
+        }
+        // One `metadata` call decides both questions (still a directory? old
+        // enough?) — and its failure is the "never destroy on uncertainty"
+        // case, e.g. a dangling symlink wearing the prefix.
+        let meta = match std::fs::metadata(&path) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "work dir mtime unreadable; sparing dir (never destroy on uncertainty)");
+                continue;
+            }
+        };
+        if !meta.is_dir() {
+            continue;
+        }
+        let old_enough = match meta.modified() {
+            Ok(mtime) => match mtime.elapsed() {
+                Ok(age) => age > older_than,
+                // mtime in the future / clock anomaly: treat as fresh.
+                Err(_) => false,
+            },
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "work dir mtime unreadable; sparing dir (never destroy on uncertainty)");
+                false
+            }
+        };
+        if !old_enough {
+            continue;
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => removed += 1,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "work dir cleanup failed; not counted");
+            }
+        }
+    }
+    Ok(removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,6 +423,133 @@ mod tests {
         let removed = cleanup_tmp_files(tmp.path(), Duration::ZERO).unwrap();
         assert_eq!(removed, 1);
         assert!(!tmp_file.exists());
+    }
+
+    // ------------------------------------------------------------------
+    // Epic 5b Task 07 — `.work` attempt-dir sweep. Mirrors the 5a
+    // `cleanup_tmp_files` family above, including the age-guard argument:
+    // a fresh entry may belong to a LIVE sibling process.
+    // ------------------------------------------------------------------
+
+    /// Backdate a directory's mtime. `set_mtime_secs_ago` opens with
+    /// `write(true)`, which is `EISDIR` on a directory — a read-only handle
+    /// is enough for `futimens` on an owned inode.
+    fn set_dir_mtime_secs_ago(path: &Path, secs: u64) {
+        let t = std::time::SystemTime::now() - Duration::from_secs(secs);
+        let f = File::open(path).unwrap();
+        f.set_times(std::fs::FileTimes::new().set_modified(t))
+            .unwrap();
+    }
+
+    fn stage_attempt_dir(work: &Path, name: &str) -> std::path::PathBuf {
+        let d = work.join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("vid.wav"), b"riff").unwrap();
+        d
+    }
+
+    /// The 5a argument verbatim, applied to attempt dirs: a dir younger than
+    /// the stale-claim window may be a live sibling's in-flight fetch —
+    /// removing it destroys that fetch's output mid-download.
+    #[test]
+    fn cleanup_work_dirs_spares_fresh_and_collects_old() {
+        let tmp = TempDir::new().unwrap();
+        let work = tmp.path();
+        let fresh = stage_attempt_dir(work, "ytdlp-vid_a.1234-0");
+        let old = stage_attempt_dir(work, "ytdlp-vid_b.5678-0");
+        set_dir_mtime_secs_ago(&old, 3600);
+
+        let removed = cleanup_work_dirs(work, Duration::from_secs(1800)).unwrap();
+
+        assert_eq!(removed, 1, "only the old attempt dir is collected");
+        assert!(
+            fresh.exists(),
+            "a fresh attempt dir may belong to a live sibling — spared"
+        );
+        assert!(!old.exists(), "the old attempt dir and its wav are gone");
+    }
+
+    #[test]
+    fn cleanup_work_dirs_with_zero_threshold_collects() {
+        let tmp = TempDir::new().unwrap();
+        let d = stage_attempt_dir(tmp.path(), "ytdlp-vid_a.1-1");
+        set_dir_mtime_secs_ago(&d, 2);
+        let removed = cleanup_work_dirs(tmp.path(), Duration::ZERO).unwrap();
+        assert_eq!(removed, 1);
+        assert!(!d.exists());
+    }
+
+    /// Never destroy on uncertainty: an entry whose mtime cannot be read
+    /// (here a broken symlink) is skipped and warned about, not removed.
+    /// Non-attempt entries are out of scope entirely.
+    #[test]
+    fn cleanup_work_dirs_spares_unreadable_and_unrelated_entries() {
+        let tmp = TempDir::new().unwrap();
+        let work = tmp.path();
+        let broken = work.join("ytdlp-vid_c.9-9");
+        std::os::unix::fs::symlink(work.join("nonexistent"), &broken).unwrap();
+        let unrelated_dir = work.join("scratch");
+        std::fs::create_dir_all(&unrelated_dir).unwrap();
+        set_dir_mtime_secs_ago(&unrelated_dir, 3600);
+        let unrelated_file = work.join("notes.txt");
+        std::fs::write(&unrelated_file, b"x").unwrap();
+        let old = stage_attempt_dir(work, "ytdlp-vid_d.7-0");
+        set_dir_mtime_secs_ago(&old, 3600);
+
+        let removed = cleanup_work_dirs(work, Duration::from_secs(60)).unwrap();
+
+        assert_eq!(removed, 1, "only the one collectible attempt dir counts");
+        assert!(
+            std::fs::symlink_metadata(&broken).is_ok(),
+            "unreadable mtime ⇒ spared"
+        );
+        assert!(unrelated_dir.exists(), "non-attempt dirs are out of scope");
+        assert!(unrelated_file.exists());
+        assert!(!old.exists());
+    }
+
+    /// ADR-0006 shape: the count reports ONLY dirs this sweep actually
+    /// removed. A removal that fails (here: a dir whose parent denies write)
+    /// is warn-logged and not counted.
+    #[test]
+    fn cleanup_work_dirs_counts_only_real_deletions() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let work = tmp.path();
+        let removable = stage_attempt_dir(work, "ytdlp-vid_a.1-0");
+        set_dir_mtime_secs_ago(&removable, 3600);
+
+        // A nested read-only parent: `remove_dir_all` on the inner attempt
+        // dir needs write permission on THIS dir, so the removal fails.
+        let locked_parent = work.join("locked");
+        std::fs::create_dir_all(&locked_parent).unwrap();
+        let stuck = stage_attempt_dir(&locked_parent, "ytdlp-vid_b.2-0");
+        set_dir_mtime_secs_ago(&stuck, 3600);
+        std::fs::set_permissions(&locked_parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+        // Root ignores the permission bits; skip the assertion there.
+        let denied = std::fs::write(locked_parent.join("probe"), b"x").is_err();
+
+        let removed = cleanup_work_dirs(work, Duration::from_secs(60)).unwrap();
+        let stuck_removed = cleanup_work_dirs(&locked_parent, Duration::from_secs(60)).unwrap();
+
+        assert_eq!(
+            removed, 1,
+            "the sweep is shallow: only `work`'s own entries"
+        );
+        assert!(!removable.exists());
+        if denied {
+            assert_eq!(stuck_removed, 0, "a failed removal is not counted");
+            assert!(stuck.exists());
+        }
+        // Restore so TempDir's own cleanup can run.
+        std::fs::set_permissions(&locked_parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn cleanup_work_dirs_missing_root_is_zero() {
+        let tmp = TempDir::new().unwrap();
+        let removed = cleanup_work_dirs(&tmp.path().join("absent"), Duration::ZERO).unwrap();
+        assert_eq!(removed, 0);
     }
 
     #[test]

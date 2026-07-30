@@ -42,6 +42,16 @@ pub enum FetchError {
     #[error("tool succeeded but expected output {path} is missing")]
     MissingOutput { path: std::path::PathBuf },
 
+    /// Epic 5b: the attempt directory holds MORE than one `*.wav` after a
+    /// clean exit. Distinct from [`FetchError::MissingOutput`] on purpose —
+    /// picking one of them would transcribe an arbitrary file and stamp it as
+    /// this video's transcript, so ambiguity fails instead of guessing.
+    #[error("tool succeeded but attempt dir {dir} holds {count} wav files (expected exactly 1)")]
+    AmbiguousOutput {
+        dir: std::path::PathBuf,
+        count: usize,
+    },
+
     // No production construction sites remain after Task 02's error split
     // (WorkDirCreate/MissingOutput/ToolNotFound/SystemIo took over the
     // acquire-path uses), but both variants are still constructed by

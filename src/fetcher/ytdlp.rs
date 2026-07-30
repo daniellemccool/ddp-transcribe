@@ -187,10 +187,108 @@ pub(crate) fn build_metadata_only_args(source_url: &str) -> Vec<String> {
 /// Redact the cookie file path from a stderr excerpt so it never lands in
 /// error messages or the state DB (ADR 0035). Pure function, factored out
 /// of `acquire` for unit-testability.
+///
+/// An EMPTY cookie path returns the excerpt unchanged: `str::replace` with an
+/// empty pattern splices the replacement between every character, shredding
+/// the excerpt the classifier and the operator both read (Epic 5b hardening
+/// of the Epic 3 FOLLOWUPS entry).
 fn scrub_cookie_path(excerpt: String, cookies: Option<&Path>) -> String {
     match cookies {
-        Some(path) => excerpt.replace(&path.display().to_string(), "[COOKIES-REDACTED]"),
-        None => excerpt,
+        Some(path) if !path.as_os_str().is_empty() => {
+            excerpt.replace(&path.display().to_string(), "[COOKIES-REDACTED]")
+        }
+        _ => excerpt,
+    }
+}
+
+/// Filename prefix of a per-acquire attempt directory. The startup sweep
+/// ([`crate::output::artifacts::cleanup_work_dirs`]) collects `.work` entries
+/// by this prefix, and it is also how the test `FakeFetcher` recognizes a
+/// staged attempt dir — keep the three in sync.
+pub(crate) const ATTEMPT_DIR_PREFIX: &str = "ytdlp-";
+
+/// Process-local monotonic sequence for attempt-dir names. Same convention as
+/// [`crate::output::artifacts::atomic_write`]'s tmp names: pid makes the name
+/// unique across concurrent processes, the sequence within this one.
+static ATTEMPT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Path of a FRESH attempt directory for one `acquire` call:
+/// `{work_dir}/ytdlp-{video_id}.{pid}-{seq}`.
+///
+/// Never reused: a retry of the same video, a concurrent fetch worker, and a
+/// second process all get their own dir. That is what makes the exactly-one-WAV
+/// scan below sound (nothing else writes here) and what makes cleanup safe
+/// (removing this dir cannot touch another attempt's in-flight output).
+/// `acquire` deliberately does NOT pre-clean prior `ytdlp-{video_id}.*` dirs —
+/// one may belong to a live sibling. Crash residue is the startup sweep's job.
+fn attempt_dir_path(work_dir: &Path, video_id: &str) -> PathBuf {
+    work_dir.join(format!(
+        "{ATTEMPT_DIR_PREFIX}{video_id}.{}-{}",
+        std::process::id(),
+        ATTEMPT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    ))
+}
+
+/// Find the single `*.wav` yt-dlp produced in THIS attempt's directory.
+///
+/// The output path is discovered by scanning the attempt dir — never by
+/// parsing yt-dlp's stdout. Stdout carries the Epic 4c metadata line and is
+/// stored UNPARSED in `video_metadata_raw`; adding an untagged path line
+/// there would corrupt `load-metadata`'s input.
+///
+/// Because the dir is fresh per acquire, the scan sees only this invocation's
+/// output: exactly one wav ⇒ success; zero ⇒ [`FetchError::MissingOutput`]
+/// (the pre-existing no-output failure, reported against `expected_wav` so the
+/// message keeps naming the path the argv asked for); more than one ⇒
+/// [`FetchError::AmbiguousOutput`] — a distinct failure, never a guess.
+fn find_single_wav(attempt_dir: &Path, expected_wav: &Path) -> Result<PathBuf, FetchError> {
+    let entries = std::fs::read_dir(attempt_dir).map_err(|e| FetchError::SystemIo {
+        tool: "yt-dlp".to_string(),
+        // SystemIo (retryable), not WorkDirCreate (Bug): a transient read
+        // failure on one attempt dir must not cancel the whole batch.
+        detail: format!("reading attempt dir {}: {e}", attempt_dir.display()),
+    })?;
+    let mut wavs = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| FetchError::SystemIo {
+            tool: "yt-dlp".to_string(),
+            detail: format!(
+                "reading attempt dir entry in {}: {e}",
+                attempt_dir.display()
+            ),
+        })?;
+        let path = entry.path();
+        if path
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("wav"))
+        {
+            wavs.push(path);
+        }
+    }
+    match wavs.len() {
+        1 => Ok(wavs.remove(0)),
+        0 => Err(FetchError::MissingOutput {
+            path: expected_wav.to_path_buf(),
+        }),
+        count => Err(FetchError::AmbiguousOutput {
+            dir: attempt_dir.to_path_buf(),
+            count,
+        }),
+    }
+}
+
+/// Best-effort removal of an attempt directory. Used by `acquire`'s own
+/// failure returns (the caller never receives a handle on those paths, so the
+/// fetcher cleans up what it created) and by the pipeline's lifecycle points
+/// via [`crate::pipeline::FetchedAudio`]. A failure here is warn-logged and
+/// swallowed: the leftover dir is disk churn the startup sweep collects, never
+/// a reason to change a video's outcome.
+pub(crate) fn remove_attempt_dir(dir: &Path) {
+    if let Err(e) = std::fs::remove_dir_all(dir) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(path = %dir.display(), error = %e, "could not remove fetch attempt dir");
+        }
     }
 }
 
@@ -232,8 +330,13 @@ impl VideoFetcher for YtDlpFetcher {
         source_url: &str,
         opts: &FetchOpts,
     ) -> (Option<MetadataCapture>, Result<Acquisition, FetchError>) {
-        // Per-video tmp dir keeps yt-dlp's intermediate files contained.
-        let video_dir = self.work_dir.join(format!("ytdlp-{video_id}"));
+        // Fresh per-acquire dir (Epic 5b): keeps yt-dlp's intermediate files
+        // contained AND makes this invocation the only writer, which is what
+        // the exactly-one-WAV scan below relies on. Ownership: every failure
+        // return in this function removes the dir before returning (the caller
+        // gets no handle on those paths); once `Ok(Acquisition)` is returned
+        // the CALLER owns it and runs the lifecycle cleanup.
+        let video_dir = attempt_dir_path(&self.work_dir, video_id);
         if let Err(e) = std::fs::create_dir_all(&video_dir) {
             return (
                 None,
@@ -263,7 +366,10 @@ impl VideoFetcher for YtDlpFetcher {
         .await
         {
             Ok(o) => o,
-            Err(e) => return (None, Err(e.into())),
+            Err(e) => {
+                remove_attempt_dir(&video_dir);
+                return (None, Err(e.into()));
+            }
         };
 
         // Epic 4c: build the envelope BEFORE interpreting exit status — the
@@ -283,6 +389,7 @@ impl VideoFetcher for YtDlpFetcher {
         if outcome.exit_code != 0 {
             let stderr_excerpt =
                 scrub_cookie_path(outcome.stderr_excerpt, opts.cookies_file.as_deref());
+            remove_attempt_dir(&video_dir);
             return (
                 capture,
                 Err(FetchError::ToolFailed {
@@ -294,11 +401,25 @@ impl VideoFetcher for YtDlpFetcher {
             );
         }
 
-        if !wav_path.exists() {
-            return (capture, Err(FetchError::MissingOutput { path: wav_path }));
-        }
+        // Exactly-one-WAV discovery over THIS attempt's dir. `wav_path` is the
+        // name the `-o` template asked for; the scan is what decides, because
+        // the extension yt-dlp actually wrote is not knowable from the argv
+        // and stdout must stay the unparsed metadata capture.
+        let wav_path = match find_single_wav(&video_dir, &wav_path) {
+            Ok(p) => p,
+            Err(e) => {
+                remove_attempt_dir(&video_dir);
+                return (capture, Err(e));
+            }
+        };
 
-        (capture, Ok(Acquisition::AudioFile(wav_path)))
+        (
+            capture,
+            Ok(Acquisition::AudioFile {
+                wav: wav_path,
+                attempt_dir: Some(video_dir),
+            }),
+        )
     }
 
     fn name(&self) -> &'static str {
@@ -539,6 +660,91 @@ mod tests {
         let excerpt = "ERROR: some other failure".to_string();
         let scrubbed = scrub_cookie_path(excerpt.clone(), None);
         assert_eq!(scrubbed, excerpt);
+    }
+
+    /// Epic 5b (FOLLOWUPS: "`scrub_cookie_path` has no guard against an empty
+    /// cookie path"): `str::replace` with an empty pattern inserts the
+    /// replacement between EVERY character, shredding the excerpt. An empty
+    /// path must leave the excerpt untouched.
+    #[test]
+    fn scrub_cookie_path_noop_on_empty_path() {
+        let excerpt = "ERROR: unable to download video data".to_string();
+        let scrubbed = scrub_cookie_path(excerpt.clone(), Some(Path::new("")));
+        assert_eq!(
+            scrubbed, excerpt,
+            "an empty cookie path must not mangle the excerpt"
+        );
+    }
+
+    /// Epic 5b: every acquire gets its OWN directory, so a re-acquire of the
+    /// same video (retry, or a sibling process) can never observe or delete
+    /// another attempt's in-flight output.
+    #[test]
+    fn attempt_dirs_are_unique_per_acquire() {
+        let work = Path::new("/tmp/work");
+        let a = attempt_dir_path(work, "7234567890123456789");
+        let b = attempt_dir_path(work, "7234567890123456789");
+        assert_ne!(a, b, "two acquires of the same video id must not collide");
+        for d in [&a, &b] {
+            assert_eq!(d.parent(), Some(work));
+            let name = d
+                .file_name()
+                .and_then(|s| s.to_str())
+                .expect("attempt dir name");
+            assert!(
+                name.starts_with(&format!("{ATTEMPT_DIR_PREFIX}7234567890123456789.")),
+                "attempt dir must keep the sweepable `{ATTEMPT_DIR_PREFIX}` prefix \
+                 and name the video: {name}"
+            );
+        }
+    }
+
+    /// Exactly-one-WAV discovery scans ONLY this attempt's dir; the reported
+    /// path is never parsed out of stdout (stdout is the unparsed metadata
+    /// capture — an untagged line there would corrupt `load-metadata`).
+    #[test]
+    fn find_single_wav_returns_the_only_wav() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        let wav = dir.join("vid.wav");
+        std::fs::write(&wav, b"riff").unwrap();
+        // Non-wav residue (yt-dlp part files / the source media) is ignored.
+        std::fs::write(dir.join("vid.mp4"), b"x").unwrap();
+        std::fs::write(dir.join("vid.wav.part"), b"x").unwrap();
+        let found = find_single_wav(dir, &wav).expect("exactly one wav");
+        assert_eq!(found, wav);
+    }
+
+    /// Zero WAVs keeps the existing no-output failure (`MissingOutput`), which
+    /// classifies as a retryable `ytdlp_other`.
+    #[test]
+    fn find_single_wav_zero_is_missing_output() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("vid.mp4"), b"x").unwrap();
+        let expected = dir.join("vid.wav");
+        match find_single_wav(dir, &expected) {
+            Err(FetchError::MissingOutput { path }) => assert_eq!(path, expected),
+            other => panic!("expected MissingOutput, got {other:?}"),
+        }
+    }
+
+    /// More than one WAV is a DISTINCT failure — never pick one. Guessing
+    /// would transcribe an arbitrary file and stamp it as the video's
+    /// transcript.
+    #[test]
+    fn find_single_wav_multiple_is_ambiguous_failure() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("vid.wav"), b"x").unwrap();
+        std::fs::write(dir.join("vid-1.wav"), b"x").unwrap();
+        match find_single_wav(dir, &dir.join("vid.wav")) {
+            Err(FetchError::AmbiguousOutput { dir: d, count }) => {
+                assert_eq!(d, dir);
+                assert_eq!(count, 2);
+            }
+            other => panic!("expected AmbiguousOutput, got {other:?}"),
+        }
     }
 
     /// Envelope contract after the 2026-07-28 descope:
