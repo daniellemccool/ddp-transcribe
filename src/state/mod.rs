@@ -436,6 +436,187 @@ pub enum FailureRecordOutcome {
     StaleClaim,
 }
 
+/// Operator-supplied eligibility filter for [`Store::requeue_failures`]
+/// (0046). Built by the `requeue-failures` dispatch arm straight from the
+/// parsed flags; clap owns the default-deny grammar (which combinations are
+/// even expressible), this type owns only what the SQL predicate needs.
+///
+/// Deliberately NOT `Default`: an all-empty filter is exactly the unqualified
+/// invocation the record forbids, and `requeue_failures` rejects it rather
+/// than treating "no selector" as "every row".
+#[derive(Debug, Clone)]
+pub struct RequeueFilter {
+    /// Exact-byte-equality kind matches; repeats OR together. Empty = no
+    /// kind predicate.
+    pub error_kinds: Vec<String>,
+    /// Skip rows with `attempt_count >= N`.
+    pub max_attempts: Option<u32>,
+    /// Strictly older than: `last_failure_at < now - older_than`.
+    pub older_than: Option<std::time::Duration>,
+    /// Consider `failed_terminal` rows too (matching on `terminal_reason`).
+    pub include_terminal: bool,
+    /// Every `failed_retryable` row; mutually exclusive with the qualifying
+    /// selectors at parse time.
+    pub all: bool,
+    /// Cap on rows moved, applied in `attempt_count ASC, video_id ASC` order.
+    pub max: Option<u32>,
+}
+
+impl RequeueFilter {
+    /// The default-deny gate's library-side half: does this filter carry a
+    /// *qualifying* selector? `max` and dry-run are modifiers and never count.
+    fn has_qualifying_selector(&self) -> bool {
+        !self.error_kinds.is_empty() || self.max_attempts.is_some() || self.older_than.is_some()
+    }
+}
+
+/// What one `requeue-failures` invocation did (0046). `matched` is the
+/// selected set (identical in dry-run and real runs — same predicate SQL);
+/// `requeued` is the UPDATE's row-change count per 0006, and is 0 on a
+/// dry-run. `by_kind` carries the per-kind breakdown the command prints,
+/// sorted by kind for stable output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequeueOutcome {
+    pub matched: usize,
+    pub requeued: usize,
+    pub by_kind: Vec<(String, usize)>,
+}
+
+/// One row the requeue predicate selected, captured BEFORE the UPDATE so the
+/// `operator_requeued` event can carry the prior state (0046 forensics).
+struct RequeueCandidate {
+    video_id: String,
+    prior_status: String,
+    prior_kind: Option<String>,
+    attempt_count: i64,
+}
+
+/// Bucket label for a row whose kind column is NULL — a real state for rows
+/// terminalized before the classification columns existed.
+const REQUEUE_KIND_UNKNOWN: &str = "(none)";
+
+/// SQLite's default variable limit is 32766; requeue's UPDATE binds one
+/// variable per selected row, so a large `--all` run is chunked rather than
+/// prepared as one enormous IN list.
+const REQUEUE_UPDATE_CHUNK: usize = 512;
+
+/// The 0046 failure clock: `last_failure_at := MAX(video_events.at)` over the
+/// failure-event allowlist. Administrative transitions ('requeued',
+/// 'swept_stale', 'swept_terminal', 'claimed', 'succeeded') are deliberately
+/// absent — they must never reset an operator's `--older-than` clock.
+const REQUEUE_LAST_FAILURE_CTE: &str = "WITH last_failure AS (
+             SELECT video_id, MAX(at) AS last_failure_at
+             FROM video_events
+             WHERE event_type IN
+               ('failed_retryable','failed_terminal','retry_requeued','cookie_parked')
+             GROUP BY video_id
+         )";
+
+/// The kind a row is matched and counted by: `terminal_reason` for terminal
+/// rows, `last_retryable_kind` otherwise. Never a terminal row's retained
+/// retryable kind (0046).
+const REQUEUE_KIND_EXPR: &str =
+    "CASE WHEN v.status = 'failed_terminal' THEN v.terminal_reason ELSE v.last_retryable_kind END";
+
+/// Builds the ONE selection query both the dry-run and the real run execute —
+/// shared construction is what makes `--dry-run` an honest preview. Returns
+/// the SQL plus its positional parameters. `now` is the single per-invocation
+/// clock reading.
+fn build_requeue_select(filter: &RequeueFilter, now: i64) -> (String, Vec<rusqlite::types::Value>) {
+    use rusqlite::types::Value;
+
+    let mut params: Vec<Value> = Vec::new();
+    let mut sql = format!(
+        "{REQUEUE_LAST_FAILURE_CTE}
+         SELECT v.video_id, v.status, {REQUEUE_KIND_EXPR} AS kind, v.attempt_count
+         FROM videos v
+         LEFT JOIN last_failure lf ON lf.video_id = v.video_id
+         WHERE v.status IN ({})",
+        if filter.include_terminal {
+            "'failed_retryable','failed_terminal'"
+        } else {
+            "'failed_retryable'"
+        }
+    );
+
+    if !filter.error_kinds.is_empty() {
+        // Exact byte equality: SQLite's default BINARY collation on `=`/`IN`,
+        // no case folding. A NULL kind matches nothing (NULL IN (…) is NULL).
+        let placeholders = vec!["?"; filter.error_kinds.len()].join(",");
+        sql.push_str(&format!(
+            "\n           AND {REQUEUE_KIND_EXPR} IN ({placeholders})"
+        ));
+        for kind in &filter.error_kinds {
+            params.push(Value::Text(kind.clone()));
+        }
+    }
+
+    if let Some(max_attempts) = filter.max_attempts {
+        sql.push_str("\n           AND v.attempt_count < ?");
+        params.push(Value::Integer(i64::from(max_attempts)));
+    }
+
+    if let Some(older_than) = filter.older_than {
+        // Saturating conversion, mirroring sweep_stale_claims' threshold math.
+        let secs = i64::try_from(older_than.as_secs()).unwrap_or(i64::MAX);
+        sql.push_str(
+            "\n           AND lf.last_failure_at IS NOT NULL
+           AND lf.last_failure_at < ?",
+        );
+        params.push(Value::Integer(now.saturating_sub(secs)));
+    }
+
+    sql.push_str("\n         ORDER BY v.attempt_count ASC, v.video_id ASC");
+    if let Some(max) = filter.max {
+        sql.push_str("\n         LIMIT ?");
+        params.push(Value::Integer(i64::from(max)));
+    }
+
+    (sql, params)
+}
+
+/// Runs [`build_requeue_select`]'s query. Takes `&Connection` so the dry-run
+/// (bare connection, no write lock taken) and the real run (inside the
+/// IMMEDIATE transaction, deref-coerced) share one code path.
+fn select_requeue_candidates(
+    conn: &Connection,
+    sql: &str,
+    params: &[rusqlite::types::Value],
+) -> Result<Vec<RequeueCandidate>> {
+    let mut stmt = conn
+        .prepare(sql)
+        .context("prepare requeue_failures selection")?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(params.iter()), |r| {
+            Ok(RequeueCandidate {
+                video_id: r.get(0)?,
+                prior_status: r.get(1)?,
+                prior_kind: r.get(2)?,
+                attempt_count: r.get(3)?,
+            })
+        })
+        .context("query requeue_failures selection")?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("collect requeue_failures selection")?;
+    Ok(rows)
+}
+
+fn requeue_outcome(selected: &[RequeueCandidate], requeued: usize) -> RequeueOutcome {
+    let mut by_kind: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for candidate in selected {
+        let label = candidate
+            .prior_kind
+            .clone()
+            .unwrap_or_else(|| REQUEUE_KIND_UNKNOWN.to_string());
+        *by_kind.entry(label).or_default() += 1;
+    }
+    RequeueOutcome {
+        matched: selected.len(),
+        requeued,
+        by_kind: by_kind.into_iter().collect(),
+    }
+}
+
 /// Artifacts written to the database upon successful transcription.
 #[derive(Debug, Clone)]
 pub struct SuccessArtifacts {
@@ -1149,6 +1330,97 @@ impl Store {
         }
         tx.commit().context("commit sweep_requeue")?;
         Ok(changed)
+    }
+
+    /// Operator eligibility override (0046): restore failed rows to `pending`
+    /// after an external condition materially changed. This is NOT a retry
+    /// scheduler — 0036 remains the retry authority and the next fetch remains
+    /// the liveness oracle; this grants one more claim and nothing else.
+    ///
+    /// One `BEGIN IMMEDIATE` transaction shaped like [`Store::sweep_stale_claims`]:
+    /// select → update → one event per row. `attempt_count` is never reset or
+    /// decremented, `last_retryable_*`/`terminal_*` are retained, and
+    /// `videos.updated_at` is deliberately NOT touched — the command grants
+    /// eligibility, it does not launder history.
+    ///
+    /// `dry_run` executes the identical predicate SQL and stops there: no
+    /// write lock, no rows, no events, `requeued == 0`.
+    ///
+    /// Default-deny is enforced at parse time by clap; the guard here is the
+    /// library-side half of the same rule, so no in-process caller can reach
+    /// "no selector means every row" through a hand-built filter.
+    pub fn requeue_failures(
+        &mut self,
+        filter: &RequeueFilter,
+        actor: &str,
+        dry_run: bool,
+    ) -> Result<RequeueOutcome> {
+        if !filter.all && !filter.has_qualifying_selector() {
+            anyhow::bail!(
+                "requeue-failures: refusing to run without a qualifying selector \
+                 (--error-kind / --max-attempts / --older-than) or an explicit --all"
+            );
+        }
+
+        // One clock reading per invocation: the --older-than cutoff and every
+        // event's `at` come from this same `now`.
+        let now = unix_now();
+        let (sql, params) = build_requeue_select(filter, now);
+
+        if dry_run {
+            let selected = select_requeue_candidates(self.conn(), &sql, &params)?;
+            return Ok(requeue_outcome(&selected, 0));
+        }
+
+        let tx = self.transaction_immediate()?;
+        let selected = select_requeue_candidates(&tx, &sql, &params)?;
+
+        let mut changed = 0usize;
+        if !selected.is_empty() {
+            for chunk in selected.chunks(REQUEUE_UPDATE_CHUNK) {
+                let placeholders = vec!["?"; chunk.len()].join(",");
+                changed += tx
+                    .execute(
+                        &format!(
+                            "UPDATE videos
+                             SET status = 'pending',
+                                 claimed_by = NULL,
+                                 claimed_at = NULL
+                             WHERE video_id IN ({placeholders})"
+                        ),
+                        rusqlite::params_from_iter(chunk.iter().map(|c| c.video_id.as_str())),
+                    )
+                    .context("UPDATE videos for requeue_failures")?;
+            }
+            debug_assert_eq!(selected.len(), changed, "event set must match moved set");
+
+            let mut ev = tx
+                .prepare_cached(
+                    "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
+                     VALUES (?1, ?2, 'operator_requeued', ?3, ?4)",
+                )
+                .context("prepare operator_requeued event for requeue_failures")?;
+            for candidate in &selected {
+                let detail = serde_json::json!({
+                    "prior_status": candidate.prior_status,
+                    "prior_kind": candidate.prior_kind,
+                    "attempt_count": candidate.attempt_count,
+                })
+                .to_string();
+                ev.execute(params![candidate.video_id, now, actor, detail])
+                    .with_context(|| {
+                        format!("operator_requeued event for {}", candidate.video_id)
+                    })?;
+            }
+        }
+
+        tx.commit().context("commit requeue_failures")?;
+
+        if changed > 0 {
+            tracing::info!(requeued = changed, actor, "requeue_failures");
+        }
+
+        Ok(requeue_outcome(&selected, changed))
     }
 
     /// Open a batch-run record (Epic 4a): one row per `process` invocation,

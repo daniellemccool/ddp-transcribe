@@ -444,6 +444,59 @@ pub async fn dispatch(cli: Cli) -> Result<CommandExit> {
                 if dry_run { " (dry-run)" } else { "" }
             );
         }
+        cli::Command::RequeueFailures {
+            error_kind,
+            max_attempts,
+            older_than,
+            include_terminal,
+            all,
+            max,
+            dry_run,
+        } => {
+            let path = &cfg.state_db;
+            if !path.exists() {
+                anyhow::bail!(
+                    "requeue-failures: state.sqlite not found at {}. Run `ddp-transcribe init` first.",
+                    path.display()
+                );
+            }
+            let mut store = state::Store::open(path).context("opening state DB")?;
+            let filter = state::RequeueFilter {
+                error_kinds: error_kind,
+                max_attempts,
+                older_than,
+                include_terminal,
+                all,
+                max,
+            };
+            // 0046 attribution: distinct from the sweep's literal
+            // `worker_id = 'sweep'`, so an audit can tell an operator
+            // override from an automatic transition at a glance.
+            let actor = format!("operator:{}-{}", hostname_or_default(), std::process::id());
+            let outcome = store
+                .requeue_failures(&filter, &actor, dry_run)
+                .context("requeue-failures failed")?;
+            tracing::info!(
+                matched = outcome.matched,
+                requeued = outcome.requeued,
+                dry_run,
+                actor,
+                "requeue-failures complete"
+            );
+            if outcome.matched == 0 {
+                println!("requeue-failures: 0 rows matched");
+                return Ok(CommandExit::Success);
+            }
+            for (kind, count) in &outcome.by_kind {
+                println!("requeue-failures:   {kind}: {count}");
+            }
+            println!(
+                "requeue-failures: {} row(s) matched, {} requeued{}",
+                outcome.matched,
+                outcome.requeued,
+                if dry_run { " (dry-run)" } else { "" }
+            );
+        }
         cli::Command::BackfillMetadata { limit, dry_run } => {
             let path = &cfg.state_db;
             if !path.exists() {
@@ -506,7 +559,8 @@ fn log_resolved_config(cfg: &config::Config, command: &cli::Command) {
         | cli::Command::Status { .. }
         | cli::Command::RecomputeWindow { .. }
         | cli::Command::LoadMetadata { .. }
-        | cli::Command::BackfillMetadata { .. } => tracing::info!(
+        | cli::Command::BackfillMetadata { .. }
+        | cli::Command::RequeueFailures { .. } => tracing::info!(
             profile = ?cfg.profile,
             state_db = ?cfg.state_db,
             "config resolved"

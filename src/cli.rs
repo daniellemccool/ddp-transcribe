@@ -234,6 +234,71 @@ pub(crate) enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Operator override of retry eligibility (0046): restore failed rows to
+    /// `pending` after an external condition materially changed. Forensic and
+    /// DEFAULT-DENY — at least one qualifying selector (--error-kind /
+    /// --max-attempts / --older-than) or an explicit --all is required; the
+    /// modifiers --max and --dry-run never grant eligibility. Never resets
+    /// `attempt_count`; every moved row leaves an `operator_requeued` event.
+    ///
+    /// Post-override arithmetic: a row at `attempt_count = A` gets exactly one
+    /// forced attempt unless the next `process` run uses `--retries > A`.
+    // Grammar lives in clap, not in post-parse checks: `eligibility` is the
+    // required group (the default-deny gate), `qualifying` is the subset that
+    // --all conflicts with and that --include-terminal requires.
+    #[command(group(clap::ArgGroup::new("qualifying").multiple(true)))]
+    #[command(group(clap::ArgGroup::new("eligibility").required(true).multiple(true)))]
+    RequeueFailures {
+        /// Failure kind to match, compared by exact byte equality (no case
+        /// folding, no comma splitting — classification labels may legally
+        /// contain commas). Repeatable; repeats OR together. Matches
+        /// last_retryable_kind on retryable rows, terminal_reason on terminal
+        /// ones — never a terminal row's retained retryable kind.
+        #[arg(long = "error-kind", value_name = "KIND", groups = ["qualifying", "eligibility"])]
+        error_kind: Vec<String>,
+        /// Skip rows with attempt_count >= N.
+        #[arg(
+            long,
+            value_name = "N",
+            value_parser = clap::builder::RangedU64ValueParser::<u32>::new().range(1..),
+            groups = ["qualifying", "eligibility"],
+        )]
+        max_attempts: Option<u32>,
+        /// Match rows whose last FAILURE event (allowlist: failed_retryable,
+        /// failed_terminal, retry_requeued, cookie_parked) is strictly older
+        /// than this. Administrative events never reset that clock, and a row
+        /// with no allowlist event never matches. Accepts humantime strings:
+        /// "30d", "12h".
+        #[arg(
+            long,
+            value_name = "DUR",
+            value_parser = humantime::parse_duration,
+            groups = ["qualifying", "eligibility"],
+        )]
+        older_than: Option<std::time::Duration>,
+        /// Also consider failed_terminal rows. Opt-in twice over: it requires a
+        /// qualifying selector alongside it, so --include-terminal with --all
+        /// (or with --max alone) is a usage error.
+        #[arg(long, requires = "qualifying")]
+        include_terminal: bool,
+        /// Every failed_retryable row — never terminals. Conflicts with every
+        /// qualifying selector: `--all --older-than 30d` is a usage error, not
+        /// a silent intersection.
+        #[arg(long, group = "eligibility", conflicts_with = "qualifying")]
+        all: bool,
+        /// Cap the number of rows moved, taken in the deterministic order
+        /// attempt_count ASC, video_id ASC. A modifier: it never grants
+        /// eligibility on its own.
+        #[arg(
+            long,
+            value_name = "N",
+            value_parser = clap::builder::RangedU64ValueParser::<u32>::new().range(1..),
+        )]
+        max: Option<u32>,
+        /// Report per-kind counts for what would move, and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Backfill raw metadata (video_metadata_raw) for succeeded videos
     /// that predate fetch-time capture. Metadata-only yt-dlp per video —
     /// no media download, never touches video status. Best-effort and

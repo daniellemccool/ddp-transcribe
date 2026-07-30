@@ -179,6 +179,67 @@ fn process_checkpoint_cmd_with_interval_parses() {
 }
 
 #[test]
+fn requeue_failures_rejects_unqualified_invocations() {
+    // ADR-0046 default-deny: nothing but a qualifying selector (or an
+    // explicit --all) may grant eligibility, and --all never silently
+    // intersects with a selector. Every case here is a clap usage error (2),
+    // never a run that touches rows.
+    let cases: &[&[&str]] = &[
+        &["requeue-failures"],                                       // bare
+        &["requeue-failures", "--max", "5"],                         // modifier alone
+        &["requeue-failures", "--all", "--older-than", "30d"],       // conflict
+        &["requeue-failures", "--include-terminal", "--all"],        // terminal + --all
+        &["requeue-failures", "--include-terminal", "--max", "100"], // terminal + modifier
+        &["requeue-failures", "--max-attempts", "0"],                // positive range
+    ];
+    for args in cases {
+        Command::cargo_bin("ddp-transcribe")
+            .unwrap()
+            .args(*args)
+            .assert()
+            .code(2);
+    }
+}
+
+#[test]
+fn requeue_failures_accepts_qualified_invocations() {
+    // Parse-only checks: a qualified invocation gets PAST argument parsing
+    // and fails later on the missing state DB, not with a usage error (2).
+    let cases: &[&[&str]] = &[
+        &["requeue-failures", "--all"],
+        &[
+            "requeue-failures",
+            "--error-kind",
+            "timeout",
+            "--error-kind",
+            "geo_block",
+        ],
+        &[
+            "requeue-failures",
+            "--include-terminal",
+            "--error-kind",
+            "unavailable",
+            "--older-than",
+            "7d",
+        ],
+    ];
+    for args in cases {
+        let mut argv = vec!["--state-db", "/nonexistent/x.sqlite"];
+        argv.extend_from_slice(args);
+        let assert = Command::cargo_bin("ddp-transcribe")
+            .unwrap()
+            .args(&argv)
+            .assert()
+            .failure();
+        assert_ne!(
+            assert.get_output().status.code(),
+            Some(2),
+            "clap rejected {args:?}"
+        );
+    }
+}
+
+#[test]
 fn config_echo_omits_model_path_for_non_model_subcommands() {
     let tmp = tempfile::TempDir::new().unwrap();
     let db = tmp.path().join("state.sqlite");
