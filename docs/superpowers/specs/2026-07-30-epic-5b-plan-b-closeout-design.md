@@ -10,7 +10,7 @@ and three operator rulings. Feeds the implementation plan under
 Epic 5b closes Plan B. At epic end, every Plan-B-scope FOLLOWUPS entry is
 resolved (archived with its resolving SHA) or explicitly re-routed to Plan C
 with rationale. The epic produces a **FOLLOWUPS disposition matrix** early
-(see Phase 3) so that criterion is mechanically auditable, and ends with the
+(see Phase 0) so that criterion is mechanically auditable, and ends with the
 **v0.4.0** tag + version bump per ADR-0043.
 
 **Deployment context:** releases, tags, and version bumps continue normally.
@@ -28,18 +28,36 @@ before any removal.
 
 ## Approach
 
-Restructure-first, three phases. No second module-root restructuring after
-Phase 1 — later phases touch files again, but always on the final crate
-shape. (Alternatives considered: bundles-first — rejected because the
+A Phase-0 disposition matrix, then restructure-first across three phases.
+No second module-root restructuring after Phase 1 — later phases touch
+files again, but always on the final crate shape. (Alternatives considered: bundles-first — rejected because the
 dead-code-allow purge is impossible before unification; per-subsystem
 interleave — rejected because the module declarations are global.)
+
+## Phase 0 — FOLLOWUPS disposition matrix
+
+First task of the epic (docs-only, before any code moves): a table over
+every Epic 5 and cross-epic entry — fix / verify-and-archive /
+accepted-archive / re-route Plan C / out of Plan-B scope — making the
+definition of done mechanically auditable and giving every later task its
+authoritative row. Known judgment rows the matrix must decide (surfaced to
+the operator, never silently resolved): ingest-ledger basename-collision
+and 1s-fingerprint-resolution entries (contain design choices); the
+accepted tmp-sweep TOCTOU entry; `upsert_metadata_raw` claim-guard (resolve
+vs Plan C); `run_serial` retire-or-keep; T9 `updated_at` (decoupled from
+requeue — documented as **lifecycle-mutation time; a no-op ingest is
+clock-neutral**, with rename optional); the closed-reply logging fix (its
+FOLLOWUPS body asks for a video/request id the transcribe work item may
+not carry — verify the item's fields); `reset-stale-claims` recorded as a
+superseded sketch item.
 
 ## Phase 1 — unify on lib (thin bin / fat lib)
 
 Predetermined outcome (operator decision 2026-07-30). Runtime impact nil for
 this workload (hot paths are whisper.cpp inference, yt-dlp subprocesses,
-SQLite; Rust glue runs at per-video frequency); `lto = "thin"` in
-`[profile.release]` removes the cross-crate-inlining question, and a release
+SQLite; Rust glue runs at per-video frequency); ADDING `lto = "thin"` under
+`[profile.release]` — `Cargo.toml` has **no release profile today**, this is
+an explicit Phase-1 change, not an existing setting — removes the cross-crate-inlining question, and a release
 build joins the gate so it is actually exercised.
 
 1. **ADR first.** New lean record: thin bin / fat lib with a minimal public
@@ -59,9 +77,12 @@ build joins the gate so it is actually exercised.
      `CommandExit` carries the process-exit semantics currently inlined in
      main: `exit(3)` when a batch claims zero videos, `exit(1)` on a failed
      pause-safety verify);
-   - `Cli`'s `global`/`command` fields (and `GlobalArgs.log_format`) stay
-     public: main must read the log format to init tracing BEFORE handing
-     `Cli` to `dispatch`;
+   - `Cli`'s fields go `pub(crate)` (`GlobalArgs` and `Command` stay
+     internal — no public items without public paths, which is exactly what
+     `unreachable_pub` polices); main's pre-dispatch need is served by one
+     narrow accessor: `impl Cli { pub fn log_format(&self) -> LogFormat }`
+     (`LogFormat` derives `Copy`). main parses, calls `cli.log_format()`,
+     inits tracing, then hands `Cli` to `dispatch`;
    - `main.rs` owns argument parsing, tracing init, error rendering, and
      the final `std::process::exit` — the library never calls `exit`.
    `run_serial` is **retained** in Phase 1 (deleting it during a
@@ -69,14 +90,16 @@ build joins the gate so it is actually exercised.
    Phase-3 disposition-matrix row).
 3. **Visibility + allow purge.** Default `pub(crate)`; `pub` = the façade
    plus what `tests/` imports; test-only scaffolding stays behind
-   `test-helpers` (ADR-0005). Add `unreachable_pub` warn. Delete the
-   dead-code allows the double compilation caused (46 today); re-justify or
-   delete the rest per amended ADR-0002.
+   `test-helpers` (ADR-0005). Add `unreachable_pub` warn. Of the 46
+   dead-code allows (the total baseline — not all are
+   double-compilation-caused), delete those the double compilation caused;
+   re-justify or delete the rest per amended ADR-0002.
 
 **Acceptance evidence (behavior-preserving):** unchanged integration suite;
 inline unit tests stop running twice — measured expectation **345 → 261**
 runnable tests (84 duplicated library unit tests today; exact census
-re-verified with `cargo test -- --list` at plan time); clippy clean at the
+re-verified with `cargo test --features test-helpers -- --list` at plan
+time); clippy clean at the
 narrowed visibility; release build green.
 
 ## Phase 2 — requeue-failures + fetch hardening
@@ -89,10 +112,16 @@ ADR-0036 remains the normal retry authority: `batch::run_sweep` already
 re-adjudicates parked retryables each batch start, and fresh cookies alone
 are handled by that path for rows under the cap. What no automatic mechanism
 can do is restore rows blocked by the lifetime cap or already terminalized
-after an external condition materially changed (cookie-gated cohort is the
-live example); without a command, the operator's escape hatch is manual SQL.
+after an external condition materially changed (the live example: the
+**cap-exhausted tail** of the cookie-gated cohort — under-cap rows are
+already handled by `run_sweep` once cookies are fresh); without a command,
+the operator's escape hatch is manual SQL — which the ADR documents as
+unsupported emergency repair unless it preserves the forensic event
+invariant.
 
-**New ADR (likely 0045) + amendment to ADR-0036.** The carve-out, verbatim
+**New ADR + amendment to ADR-0036** (number assigned by `adg` at authoring
+time — the Phase-1 crate-shape record is authored first, so this one is NOT
+"0045"). The carve-out, verbatim
 target: *"ADR-0036 remains the normal retry authority. An operator may
 explicitly restore failed rows to pending after an external condition has
 materially changed. This is a forensic, default-deny override of
@@ -114,7 +143,10 @@ Command contract (binding content for the ADR and implementation):
     ordering specified in the ADR), `--dry-run`.
   - *Default-deny*: a bare invocation is an error — at least one
     qualifying selector or an explicit `--all` is required; modifiers
-    alone never satisfy this.
+    alone never satisfy this. `--all` conflicts with every qualifying
+    selector (`--all --older-than 30d` is a parse error, not a silent
+    intersection). `--max` and `--max-attempts` are range-checked
+    positive.
   - *Terminal rows*: `--include-terminal` requires at least one qualifying
     terminal selector in addition; `--include-terminal --all` and
     `--include-terminal --max N` are rejected.
@@ -140,10 +172,17 @@ Command contract (binding content for the ADR and implementation):
   value `operator:<hostname>-<pid>` (distinct from the sweep's literal
   `worker_id = 'sweep'`).
 - **Sequencing:** the transition intentionally happens before — and
-  therefore bypasses — the start-of-batch sweep; after the forced claim,
-  ordinary ADR-0036 behavior resumes. Documented: additional *automatic*
-  attempts require a `process --retries` lifetime cap above the row's
-  existing `attempt_count`.
+  therefore bypasses — the start-of-batch sweep; after the **next ordinary
+  claim** (the command itself claims nothing), ordinary ADR-0036 behavior
+  resumes.
+- **Post-override retry arithmetic (exact, in the ADR + tests):** for a row
+  with pre-requeue `attempt_count = A`, the next claim bumps it to `A + 1`,
+  and ADR-0036 requeues on failure only while `attempt_count < retries + 1`
+  — so an *automatic* retry after the forced fetch requires
+  `A + 1 < retries + 1`, i.e. **`--retries > A` strictly** (`--retries = A`
+  is insufficient). Example: a row exhausted at `A = 3` under `--retries 2`
+  gets exactly one forced attempt unless the operator runs `process` with
+  `--retries 4` or higher.
 - **Contract details the ADR must also fix:** transaction boundary,
   dry-run output, zero-match exit behavior, case/custom-label matching for
   `--error-kind`, deterministic `--max` ordering.
@@ -160,10 +199,22 @@ matrix records it as a superseded sketch item; nothing is archived.
   **freshness + uniqueness rules**: the fetcher currently reuses a
   persistent `ytdlp-{video_id}` work directory. A **fresh unique
   per-acquire directory is required** (pre-run cleanup is NOT acceptable —
-  it can delete another process's live output; path-parsing alone still
-  permits reusing an old file at the same path), combined with either
-  exactly-one-WAV validation or parsing yt-dlp's reported final path;
-  stale-file, zero-result, and multiple-result cases all tested.
+  it can delete another process's live output), bound to
+  **exactly-one-WAV validation** as the output strategy (NOT parsing a
+  reported final path: stdout is stored whole as the unparsed metadata
+  capture, and an untagged path line would corrupt metadata loading).
+  Stale-file, zero-result, and multiple-result cases all tested.
+- **Attempt-directory lifecycle contract** (fresh dirs create an
+  unbounded-residue risk unless every exit path is defined — today success
+  removes only the WAV, not its parent): the design must specify who owns
+  the attempt directory after `acquire` returns; cleanup on success, fetch
+  failure, decode failure, transcribe failure, and stale-claim outcomes;
+  cancellation/crash residue via an **age-gated startup sweep** (the 5a
+  tmp-sweep pattern: never collect a directory younger than the
+  stale-claim threshold); tests proving cleanup never removes another live
+  attempt's directory; and matching updates to
+  `docs/reference/architecture/data-input.md` and the runbook's `.work`
+  discussion.
 - `FetchOpts` derived `Debug` cookie-path redaction; `scrub_cookie_path`
   empty-path guard.
 - Multi-fetcher provenance: **archive-integrity check only** — already
@@ -176,27 +227,23 @@ matrix records it as a superseded sketch item; nothing is archived.
 
 The accepted-but-unimplemented invariant (ADR-0013 Guidance; cross-epic
 FOLLOWUPS audit 2026-05-18): wire whisper.cpp's init log through the
-`whisper_log_set` callback bridge (global-state design for the callback),
-assert the expected backend at engine construction, emit the
-`tracing::info!` backend/device line, `cfg(feature = "cuda")`-gate the
-assertion per the FOLLOWUPS entry. Tests cover the mismatch path; a CUDA
-build + runtime smoke runs on this workstation's GPU (or the paused SRC
-workspace if needed). Review rejects softening the contract to a warning
-(per the ADR itself).
+`whisper_log_set` callback bridge, honoring the **full global-callback
+invariant** (cross-epic FOLLOWUPS): the callback is process-global, so it
+is installed ONCE before any context initialization, routes all whisper.cpp
+logs through one global bridge, is never replaced per engine, and init
+capture is phase-scoped or synchronized. Assert the expected backend at
+engine construction, emit the `tracing::info!` backend/device line,
+`cfg(feature = "cuda")`-gate the assertion per the FOLLOWUPS entry. Tests
+cover the mismatch path; the CUDA gate is explicit —
+`cargo build --release --features cuda` plus a runtime smoke on this
+workstation's GPU (or the paused SRC workspace if needed). Review rejects
+softening the contract to a warning (per the ADR itself).
 
 ## Phase 3 — sweeps, audits, close-out
 
-- **FOLLOWUPS disposition matrix (early task):** a table over every Epic 5
-  and cross-epic entry — fix / verify-and-archive / accepted-archive /
-  re-route Plan C / out of Plan-B scope — making the DoD mechanically
-  auditable. Known judgment rows the matrix must decide (surfaced to the
-  operator, never silently resolved): ingest-ledger basename-collision and
-  1s-fingerprint-resolution entries (contain design choices); the accepted
-  tmp-sweep TOCTOU entry; `upsert_metadata_raw` claim-guard (resolve vs
-  Plan C); `run_serial` retire-or-keep; T9 `updated_at` (now decoupled from
-  requeue — resolves as rename vs document-as-frozen); the closed-reply
-  logging fix (its FOLLOWUPS body asks for a video/request id the transcribe
-  work item may not carry — verify the item's fields at plan time).
+- **Matrix execution:** work through the Phase-0 disposition matrix's
+  remaining rows; every row ends the epic in a terminal state (resolved
+  with SHA, archived, re-routed, or explicitly out of scope).
 - **Sync-IO sweep (restored to sketch scope):** an audit + policy task, not
   cosmetic cleanup. Audit synchronous I/O inside async paths across ingest,
   transcription, pipeline, and artifacts (current examples: synchronous WAV
@@ -228,8 +275,9 @@ workspace if needed). Review rejects softening the contract to a warning
 - Gate everywhere: `cargo fmt && cargo clippy --all-targets -- -D warnings
   && cargo test --features test-helpers -- --test-threads=1`
   (`--test-threads=1` is a workstation invariant), **plus a release build**
-  (`cargo build --release`) so thin-LTO is exercised, plus the CUDA
-  build/runtime smoke for the 0013 task.
+  (`cargo build --release`) so thin-LTO is exercised, plus
+  `cargo build --release --features cuda` + runtime smoke for the 0013
+  task.
 - Phase 1 evidence: unchanged integration suite + the 345→261 census +
   clippy at narrowed visibility. Phases 2–3: TDD per task.
 - `requeue-failures` test coverage checklist: command help, missing DB,
