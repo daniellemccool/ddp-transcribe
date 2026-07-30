@@ -135,11 +135,13 @@ impl WindowBounds {
 /// reads through that same transaction; the ledger *write* rides it and is
 /// discarded with everything else, leaving the store exactly as found.
 ///
-/// The cost, for the runbook: a dry-run holds ONE write transaction for the
-/// duration of the scan — file reads and JSON parsing included — where a
-/// real ingest takes only brief per-file write locks. It is safe under
-/// WAL + `busy_timeout` alongside a live `process`, but it holds the write
-/// lock much longer.
+/// The cost, for the runbook: a dry-run holds ONE `BEGIN IMMEDIATE` write
+/// transaction for the duration of the scan — file reads and JSON parsing
+/// included — where a real ingest takes only brief per-file write locks. A
+/// full-inbox dry-run beside a live `process` can hold that lock past
+/// `busy_timeout` (5s), in which case `process`'s `claim_next` gets
+/// `SQLITE_BUSY` and its batch aborts. Run dry-runs only at a pause — no
+/// `process` running — not alongside one.
 pub fn ingest(
     inbox: &Path,
     store: &mut Store,
@@ -157,7 +159,12 @@ pub fn ingest(
         // (`watch_history_duplicates`, `backfilled_raw_dates`) match. The
         // read + JSON parse happen inside this transaction — a dry-run
         // trades the real run's tight write-lock window for stat fidelity.
-        let tx = store.transaction()?;
+        // BEGIN IMMEDIATE (not the deferred default): held this long, a
+        // deferred transaction's read-to-write upgrade can fail immediately
+        // with SQLITE_BUSY under WAL snapshot isolation, which busy_timeout
+        // does not retry. Taking the write lock up front instead makes any
+        // contention a bounded busy_timeout wait, same as claim_next.
+        let tx = store.transaction_immediate()?;
         for path in &paths {
             let Some(prepared) = prepare_file(&tx, path, &mut stats)? else {
                 continue;

@@ -22,8 +22,10 @@ v0.3.2 — campaign-safety slice
   are exactly a real run's, cross-file duplicates and raw-date backfills
   included. Cost, stated honestly: a dry-run holds one write transaction
   (BEGIN IMMEDIATE … rollback) for the whole scan where a real ingest
-  takes brief per-file locks — safe under WAL + busy_timeout beside a
-  live `process`, but a longer write-lock hold.
+  takes brief per-file locks. A full-inbox dry-run beside a live
+  `process` can hold that lock past busy_timeout (5s) and abort the
+  live batch's next claim — run dry-runs only at a pause, not alongside
+  a live `process`.
 - Two-writer forensics: every row the stale-claim sweep recovers now
   writes a `swept_stale` event carrying the stale claim's provenance
   (`was_claimed_by`, `claimed_at`, `threshold_secs`), and instances

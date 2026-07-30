@@ -1054,9 +1054,10 @@ exactly, cross-file duplicates and raw-date backfills included, because each
 file sees the earlier files' uncommitted rows. The follow-up commit widened the
 transaction from per-file to whole-scan precisely to get that cross-file
 fidelity; the honest cost is that a dry-run holds one write transaction for the
-entire scan where a real ingest takes brief per-file locks (safe under WAL +
-`busy_timeout` beside a live `process`, but a longer write-lock hold — stated
-in both `README.md` and the runbook).
+entire scan where a real ingest takes brief per-file locks — a full-inbox
+dry-run beside a live `process` can hold that lock past `busy_timeout` (5s)
+and abort the live batch's next claim, so the runbook and `README.md` both
+say to run a dry-run only at a pause, not alongside a live `process`.
 
 `cli::Command::Ingest`'s `dry_run` arm (`src/main.rs`, ~line 58) logs
 `"dry-run: not yet implemented; running real ingest"` and then runs the real

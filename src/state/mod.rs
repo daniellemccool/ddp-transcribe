@@ -251,13 +251,31 @@ impl Store {
         Ok(changed)
     }
 
-    /// Open a transaction for the batch ingest path. `ingest` opens one transaction
-    /// per input file (after that file is read and parsed) and commits it before the
-    /// next file, instead of paying a per-row commit. Pair with [`upsert_video_tx`] /
-    /// [`upsert_watch_history_tx`], which reuse `prepare_cached` statements across
-    /// transactions on the same connection.
+    /// Open a transaction for the batch ingest path. On a real run, `ingest`
+    /// opens one of these per input file (after that file is read and
+    /// parsed) and commits it before the next file, instead of paying a
+    /// per-row commit. A dry-run instead opens one of these (via
+    /// [`Store::transaction_immediate`], not this deferred variant) for the
+    /// whole inbox scan and rolls it back. Pair with [`upsert_video_tx`] /
+    /// [`upsert_watch_history_tx`], which reuse `prepare_cached` statements
+    /// across transactions on the same connection.
     pub(crate) fn transaction(&mut self) -> Result<rusqlite::Transaction<'_>> {
         self.conn.transaction().context("begin ingest transaction")
+    }
+
+    /// Like [`Store::transaction`], but opens with `BEGIN IMMEDIATE` instead
+    /// of the default deferred behavior. The dry-run ingest path uses this:
+    /// it holds the transaction across the whole inbox scan (file reads and
+    /// JSON parsing included), and a deferred transaction held that long can
+    /// fail its read-to-write upgrade with `SQLITE_BUSY` the instant a
+    /// concurrent writer's snapshot has moved on — `busy_timeout` does not
+    /// retry that case. Taking the write lock immediately instead means any
+    /// contention is a bounded wait capped by `busy_timeout` (5s), same as
+    /// `claim_next`.
+    pub(crate) fn transaction_immediate(&mut self) -> Result<rusqlite::Transaction<'_>> {
+        self.conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("begin immediate for dry-run ingest transaction")
     }
 }
 

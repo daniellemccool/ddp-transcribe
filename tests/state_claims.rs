@@ -154,6 +154,61 @@ fn concurrent_claim_serializes_via_begin_immediate() -> Result<()> {
     Ok(())
 }
 
+/// Proof test for the final-review Finding 1/2 fixes (ingest dry-run lock
+/// contract): a write-lock hold that outlives `busy_timeout` (5s) makes a
+/// concurrent `claim_next` fail fast with `SQLITE_BUSY` rather than block
+/// forever. Thread A stands in for a full-inbox dry-run's whole-scan `BEGIN
+/// IMMEDIATE` transaction (`Store::transaction_immediate`); it is simulated
+/// with a raw `rusqlite::Connection` rather than the dry-run path itself so
+/// the test controls exactly how long the lock is held. Runs ~6s (deliberate
+/// — proves the 5s `busy_timeout` boundary, not just "eventually fails").
+#[test]
+fn claim_next_hits_busy_when_a_write_lock_outlives_busy_timeout() -> Result<()> {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    let tmp = TempDir::new()?;
+    let path = tmp.path().join("state.sqlite");
+
+    // Seed and open the "live process" instance's own Store handle before
+    // the dry-run-style lock is taken, mirroring a `process` already
+    // running when a full-inbox dry-run starts beside it.
+    let mut store_b = Store::open(&path)?;
+    store_b.upsert_video("7234567890123456789", "https://example/a", true)?;
+
+    let (tx_locked, rx_locked) = mpsc::channel::<()>();
+    let path_a = path.clone();
+    let handle_a = thread::spawn(move || -> anyhow::Result<()> {
+        // Stands in for the dry-run's whole-scan `BEGIN IMMEDIATE` hold:
+        // acquire the write lock, signal, then hold it past
+        // `Store::open`'s busy_timeout (5s) before releasing it.
+        let conn = rusqlite::Connection::open(&path_a)?;
+        conn.execute_batch("BEGIN IMMEDIATE;")?;
+        tx_locked.send(()).expect("main thread receiver dropped");
+        thread::sleep(Duration::from_secs(6));
+        conn.execute_batch("ROLLBACK;")?;
+        Ok(())
+    });
+
+    rx_locked
+        .recv()
+        .expect("thread A failed to signal lock acquired");
+
+    let err = store_b.claim_next("worker-B").expect_err(
+        "claim_next should hit SQLITE_BUSY once the dry-run-style lock \
+         outlives busy_timeout, not block forever",
+    );
+    let msg = format!("{err:#}").to_lowercase();
+    assert!(
+        msg.contains("busy") || msg.contains("locked"),
+        "expected a SQLITE_BUSY/locked error, got: {msg}"
+    );
+
+    handle_a.join().expect("thread A panicked")?;
+    Ok(())
+}
+
 #[test]
 fn mark_succeeded_with_stale_claim_returns_zero_and_does_not_update() -> Result<()> {
     let tmp = TempDir::new()?;

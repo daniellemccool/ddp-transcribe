@@ -106,9 +106,11 @@ across files.
 
 The cost: a dry-run holds **one** write transaction (`BEGIN IMMEDIATE` …
 rollback) for the whole inbox scan, file reads and JSON parsing included,
-where a real ingest takes only brief per-file write locks. It is safe under
-WAL + `busy_timeout` alongside a running `process`, but it holds the write
-lock much longer.
+where a real ingest takes only brief per-file write locks. A full-inbox
+dry-run alongside a running `process` can hold that lock past
+`busy_timeout` (5s), in which case `process`'s claims start failing with
+`SQLITE_BUSY` and its batch aborts. Run a dry-run only at a pause — no
+`process` running — not alongside one.
 
 ### `process [--max-videos N]`
 
