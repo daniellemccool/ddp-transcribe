@@ -34,6 +34,7 @@ Load the ADR(s) whose filename matches the area you are touching.
 - [0024 — Stale-claim sweep recovers rows blind: no validation, no attempt bump](./0024-stale-claim-sweep-recovers-rows-blind-no-validation-no-attempt-bump.md)
 - [0036 — Retry is in-pipeline: capped failure-time requeue; the re-fetch is the liveness oracle](./0036-retry-is-in-pipeline-capped-failure-time-requeue-the-re-fetch-is-the-liveness-oracle.md)
 - [0040 — Analysis window is computed at ingest; recompute-window is the only flag mutator](./0040-analysis-window-is-computed-at-ingest-recompute-window-is-the-only-flag-mutator.md)
+- [0046 — requeue-failures is a forensic default-deny override of retry eligibility](./0046-requeue-failures-is-a-forensic-default-deny-override-of-retry-eligibility.md)
 
 ### Whisper engine
 
