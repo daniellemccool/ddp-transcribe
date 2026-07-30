@@ -18,6 +18,7 @@ Load the ADR(s) whose filename matches the area you are touching.
 - [0002 — Dead code is suppressed with #[allow(dead_code)] plus a justification comment](./0002-dead-code-is-suppressed-with-allow-dead-code-plus-a-justification-comment.md)
 - [0005 — Integration tests reach library test items via the test-helpers Cargo feature](./0005-integration-tests-reach-library-test-items-via-the-test-helpers-cargo-feature.md)
 - [0007 — Stats structs count the input side, with verb-named parallel counters](./0007-stats-structs-count-the-input-side-with-verb-named-parallel-counters.md)
+- [0045 — The crate is a fat library with a thin binary behind a minimal public facade](./0045-the-crate-is-a-fat-library-with-a-thin-binary-behind-a-minimal-public-facade.md)
 
 ### Artifacts
 
