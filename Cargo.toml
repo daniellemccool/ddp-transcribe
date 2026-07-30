@@ -71,6 +71,12 @@ needless_raw_string_hashes = "warn"
 name = "state_ingest"
 required-features = ["test-helpers"]
 
+# `pragma_string` is test-helpers-gated (it interpolates a PRAGMA name into
+# SQL and has no production caller), so this file opts in per 0005.
+[[test]]
+name = "state_open"
+required-features = ["test-helpers"]
+
 [[test]]
 name = "state_claims"
 required-features = ["test-helpers"]

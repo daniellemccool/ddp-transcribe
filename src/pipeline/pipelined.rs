@@ -338,7 +338,7 @@ pub async fn fetch_worker(
         if let Some(capture) = metadata_capture {
             let insert = {
                 let mut guard = store.lock().await;
-                guard.upsert_metadata_raw(&claim.video_id, &capture.envelope_json)
+                guard.upsert_metadata_raw(&claim.video_id, &worker_id, &capture.envelope_json)
             };
             if let Err(e) = insert {
                 tracing::warn!(

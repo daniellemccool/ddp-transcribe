@@ -270,7 +270,9 @@ async fn process_one(
     let (metadata_capture, fetch_result) = fetch_and_decode(fetcher, claim, &fetch_opts).await;
     // Epic 4c: raw envelope persists regardless of fetch outcome; best-effort.
     if let Some(capture) = metadata_capture {
-        if let Err(e) = store.upsert_metadata_raw(&claim.video_id, &capture.envelope_json) {
+        if let Err(e) =
+            store.upsert_metadata_raw(&claim.video_id, &opts.worker_id, &capture.envelope_json)
+        {
             tracing::warn!(
                 video_id = claim.video_id.as_str(),
                 error = %e,

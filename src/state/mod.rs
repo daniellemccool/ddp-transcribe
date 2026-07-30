@@ -143,27 +143,24 @@ impl Store {
     }
 
     pub fn read_meta(&self, key: &str) -> Result<Option<String>> {
-        let result = self
-            .conn
+        self.conn
             .query_row(
                 "SELECT value FROM meta WHERE key = ?1",
                 params![key],
                 |row| row.get::<_, String>(0),
             )
-            .map_or_else(
-                |e| match e {
-                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                    other => Err(other),
-                },
-                |v| Ok(Some(v)),
-            )?;
-        Ok(result)
+            .optional()
+            .with_context(|| format!("reading meta key {key}"))
     }
 
-    // No production consumer; `tests/state_open.rs`'s
-    // `pragma_journal_mode_is_wal` is the only caller. Whether this should be
-    // `test-helpers`-gated instead of plain `pub` is deferred per FOLLOWUPS
-    // (`Store::pragma_string` visibility).
+    /// Read a PRAGMA whose value is a string. PRAGMA names cannot be
+    /// parameterized in SQLite, so this interpolates `name` into the SQL —
+    /// which is why it is not public API: no production code calls it, and
+    /// `tests/state_open.rs`'s `pragma_journal_mode_is_wal` (the only caller,
+    /// passing the literal `"journal_mode"`) reaches it through the
+    /// `test-helpers` feature per 0005. An external consumer can therefore no
+    /// longer hand it an attacker-controlled or malformed pragma name.
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn pragma_string(&self, name: &str) -> Result<String> {
         let value: String = self
             .conn
@@ -172,17 +169,17 @@ impl Store {
         Ok(value)
     }
 
-    /// Borrow the underlying connection for advanced operations. Internal use
-    /// for now; the public API will grow as Tasks 9+ add methods.
+    /// Borrow the underlying connection for reads that do not belong on the
+    /// `Store` surface. Crate-internal by design — a mutating caller uses a
+    /// mutator or [`Store::transaction`], never this.
     ///
-    /// T18 (pipelined orchestrator's `compute_process_stats`) was the first
-    /// in-bin consumer; the Epic 4a T06 review fix retired that fn
-    /// (`ProcessStats` is assembled from input-side counters per 0007),
-    /// leaving only in-module `#[cfg(test)]` schema tests and a `dead_code`
-    /// suppression per 0002. Epic 5a's dry-run ingest is the raw-connection
-    /// consumer that suppression was waiting for — `ingest` reads the
-    /// ledger through this connection on a real run and through its open
-    /// transaction on a dry-run — so the suppression is lifted.
+    /// Real consumers, as of Epic 5b: Epic 5a's ingest ledger read (a real
+    /// run reads the ledger on this connection; a dry-run reads it through
+    /// its own open transaction), `requeue_failures`' dry-run candidate
+    /// select, and the in-module `#[cfg(test)]` schema-invariant tests. The
+    /// `dead_code` suppression this accessor used to carry is gone with them
+    /// (0002). Its `&mut Connection` sibling `conn_mut` never gained a
+    /// consumer at all and was deleted in the same sweep.
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
     }
@@ -292,6 +289,25 @@ pub(crate) fn ingested_file_fingerprint(
 
 /// Shared INSERT-OR-IGNORE SQL so the `&mut self` convenience methods and the
 /// transaction-scoped batch helpers below cannot drift.
+///
+/// **`videos.updated_at` contract (operator-ruled, Epic 5b).** The column
+/// records **lifecycle-mutation time: when this row's status/claim state last
+/// changed. A no-op ingest is clock-neutral.** `INSERT OR IGNORE` therefore
+/// binds `updated_at` alongside `first_seen_at` on the insert and leaves both
+/// alone on every re-ingest — re-ingesting the same DDP export must not
+/// rewrite the column for millions of untouched rows, and the row-change
+/// count (0 on a re-ingest, per 0006) stays the caller's signal. The name is
+/// deliberately NOT `inserted_at`: every lifecycle mutator below bumps it, so
+/// on a row that has moved at all it is a genuine last-mutation marker.
+///
+/// Mutators that bump it: `claim_next`, `mark_succeeded`,
+/// `mark_retryable_failure`, `record_fetch_failure` (both the park and the
+/// requeue arm), `mark_terminal_failure`, `sweep_stale_claims`,
+/// `sweep_mark_terminal`, `sweep_requeue`. Deliberate non-bumpers:
+/// `requeue_failures` (0046 — the operator override grants eligibility, it
+/// does not launder history, and `--older-than` reads the event clock rather
+/// than this column) and `apply_metadata_batch` (descriptive columns only, no
+/// lifecycle transition — 0042).
 const UPSERT_VIDEO_SQL: &str = "INSERT OR IGNORE INTO videos
                  (video_id, source_url, canonical, status,
                   first_seen_at, updated_at)
@@ -671,7 +687,8 @@ impl Store {
             .context("claim_next: select oldest pending row")?;
 
         let Some((video_id, source_url, prev_attempts, last_retryable_kind)) = candidate else {
-            tx.commit()?;
+            tx.commit()
+                .context("commit claim transaction (no pending candidate)")?;
             return Ok(None);
         };
 
@@ -773,21 +790,43 @@ impl Store {
     /// wins across retries (engagement counts are point-in-time; fetched_at
     /// records the snapshot moment). Returns the row-change count per 0006.
     ///
+    /// **Claim-guarded** (Epic 5b, 0023 symmetry): the envelope is written
+    /// only while `videos.claimed_by = worker_id`, so a worker whose claim was
+    /// swept out from under it cannot overwrite a newer envelope captured by
+    /// whoever re-claimed the row. Last-write-wins still holds *among writers
+    /// that hold the claim* — that is what makes a retry refresh the envelope.
+    /// The guard rides the INSERT's source SELECT rather than the call site:
+    /// this mutator runs BEFORE outcome dispatch and must stay unconditional
+    /// on both the success and the failure path (0042 — metadata never
+    /// changes a video's outcome), so the caller keeps calling it exactly
+    /// once either way and a lost claim shows up as `Ok(0)`, never an error.
+    ///
     /// Callers treat failures as best-effort (log + continue): metadata
     /// must never change a video's pipeline outcome.
     ///
-    /// Both pipeline paths (`fetch_worker` and `process_one`) call this.
-    pub fn upsert_metadata_raw(&mut self, video_id: &str, envelope_json: &str) -> Result<usize> {
+    /// Both pipeline paths (`fetch_worker` and `process_one`) call this;
+    /// `backfill-metadata` writes unclaimed rows through
+    /// [`Store::insert_metadata_raw_if_missing`] instead.
+    pub fn upsert_metadata_raw(
+        &mut self,
+        video_id: &str,
+        worker_id: &str,
+        envelope_json: &str,
+    ) -> Result<usize> {
         let now = unix_now();
+        // INSERT … SELECT (not VALUES) so the claim predicate is part of the
+        // one statement. The SELECT carries a WHERE clause, which SQLite
+        // requires to disambiguate the trailing ON CONFLICT from a join's ON.
         let changed = self
             .conn
             .execute(
                 "INSERT INTO video_metadata_raw (video_id, fetched_at, raw_json)
-                 VALUES (?1, ?2, ?3)
+                 SELECT ?1, ?2, ?3 FROM videos
+                 WHERE video_id = ?1 AND claimed_by = ?4
                  ON CONFLICT(video_id) DO UPDATE SET
                      fetched_at = excluded.fetched_at,
                      raw_json   = excluded.raw_json",
-                params![video_id, now, envelope_json],
+                params![video_id, now, envelope_json, worker_id],
             )
             .with_context(|| format!("upsert_metadata_raw for {video_id}"))?;
         Ok(changed)
@@ -1256,6 +1295,13 @@ impl Store {
     /// caller), this operates on unclaimed failed rows; the operator-visible
     /// audit trail is the 'swept_terminal' event. last_retryable_* columns
     /// are preserved (0023 family convention: diagnostics accumulate).
+    ///
+    /// `claimed_by`/`claimed_at` are cleared defensively. Under the current
+    /// schema they are already NULL on every `failed_retryable` row (the
+    /// mutators that park a row there clear them), so the clear is inert
+    /// today — it exists so that if a future transition ever lets a still-
+    /// claimed row reach this mutator, the row cannot leave here terminal
+    /// while advertising an owner.
     pub fn sweep_mark_terminal(
         &mut self,
         video_id: &str,
@@ -1273,6 +1319,8 @@ impl Store {
                  SET status = 'failed_terminal',
                      terminal_reason = ?2,
                      terminal_message = ?3,
+                     claimed_by = NULL,
+                     claimed_at = NULL,
                      updated_at = ?4
                  WHERE video_id = ?1 AND status = 'failed_retryable'",
                 params![video_id, reason, message, now],
@@ -1296,6 +1344,11 @@ impl Store {
     /// are one statement). Writes the re-classified kind back so historical
     /// placeholder kinds ("Fetch") become taxonomy kinds before the row is
     /// claimable — cookie routing (ADR 0035) reads the kind at claim time.
+    ///
+    /// `claimed_by`/`claimed_at` are cleared defensively, for the reason given
+    /// on [`Store::sweep_mark_terminal`]: inert under the current schema, but a
+    /// row must never return to `pending` still advertising an owner —
+    /// `claim_next` would then hand it out with a stale claimant recorded.
     pub fn sweep_requeue(
         &mut self,
         video_id: &str,
@@ -1312,6 +1365,8 @@ impl Store {
                 "UPDATE videos
                  SET status = 'pending',
                      last_retryable_kind = ?2,
+                     claimed_by = NULL,
+                     claimed_at = NULL,
                      updated_at = ?3
                  WHERE video_id = ?1
                    AND status = 'failed_retryable'

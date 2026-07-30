@@ -785,3 +785,45 @@ fn fresh_rows_claim_before_requeued_retries() {
     let second = store.claim_next("w1").unwrap().expect("second claim");
     assert_eq!(second.video_id, "vid_retry");
 }
+
+/// End-to-end attempt-counting invariant across one full
+/// claim → fail → requeue → reclaim cycle. The pieces are exercised
+/// separately elsewhere; this pins the composition, because `attempt_count`
+/// is bumped in exactly one place (`claim_next`) and every retry decision
+/// (0036's cap, the sweep's cap predicate) reads it.
+#[test]
+fn attempt_count_is_two_after_claim_fail_requeue_reclaim() -> Result<()> {
+    let (_tmp, mut store) = fresh_store_with(&[("vid_a", "https://example/a")]);
+
+    let first = store.claim_next("w1")?.expect("first claim");
+    assert_eq!(first.attempt_count, 1, "claim_next bumps on the way out");
+
+    // Fail under the cap → back to 'pending', unowned (0036 end-of-queue retry).
+    let outcome = store.record_fetch_failure(
+        "vid_a",
+        "w1",
+        "NoDataBlocks",
+        "msg",
+        "frugal",
+        3,
+        false,
+        false,
+    )?;
+    assert_eq!(
+        outcome,
+        ddp_transcribe::state::FailureRecordOutcome::Requeued
+    );
+    let parked = store.get_video_for_test("vid_a")?.expect("row");
+    assert_eq!(parked.status, "pending");
+    assert_eq!(
+        parked.attempt_count, 1,
+        "the failure records the attempt, it does not add one"
+    );
+
+    let second = store.claim_next("w1")?.expect("reclaim");
+    assert_eq!(second.attempt_count, 2, "the reclaim is attempt 2");
+    let row = store.get_video_for_test("vid_a")?.expect("row");
+    assert_eq!(row.attempt_count, 2, "and the column agrees");
+    assert_eq!(row.status, "in_progress");
+    Ok(())
+}
