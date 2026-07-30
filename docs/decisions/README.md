@@ -56,6 +56,7 @@ Load the ADR(s) whose filename matches the area you are touching.
 - [0026 — Workers drain and exit on claim_next None — no polling](./0026-workers-drain-and-exit-on-claim-next-none-no-polling.md)
 - [0027 — Orchestrator topology: 3 fetch workers feed 1 transcribe worker over a capacity-2 channel](./0027-orchestrator-topology-3-fetch-workers-feed-1-transcribe-worker-over-a-capacity-2-channel.md)
 - [0041 — status is the read-only operator surface; the 0017 done-contract lives behind --verify](./0041-status-is-the-read-only-operator-surface-the-0017-done-contract-lives-behind-verify.md)
+- [0044 — In-run checkpointing is an operator-supplied hook that can never abort the run](./0044-in-run-checkpointing-is-an-operator-supplied-hook-that-can-never-abort-the-run.md)
 
 ### Failure classification
 

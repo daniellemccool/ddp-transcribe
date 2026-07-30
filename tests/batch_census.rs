@@ -69,6 +69,8 @@ fn batch_lifecycle_persists_provenance_chain() {
             terminal_by_label: std::collections::BTreeMap::new(),
             stale_after_success: 0,
             stale_after_failure: 0,
+            checkpoints_run: 0,
+            checkpoints_failed: 0,
         },
     };
     let census_json = serde_json::to_string(&census).unwrap();

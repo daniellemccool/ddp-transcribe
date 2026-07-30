@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use assert_cmd::Command as AssertCommand;
 use ddp_transcribe::ingest::{ingest, IngestStats};
 use ddp_transcribe::state::Store;
 use tempfile::TempDir;
@@ -29,6 +30,7 @@ fn ingest_news_orgs_fixture_writes_videos_and_watch_history() {
         &news_orgs_fixture(),
         &mut store,
         ddp_transcribe::ingest::WindowBounds::default(),
+        false,
     )
     .expect("ingest succeeds");
 
@@ -78,6 +80,7 @@ fn ingest_news_orgs_is_idempotent() {
         &news_orgs_fixture(),
         &mut store,
         ddp_transcribe::ingest::WindowBounds::default(),
+        false,
     )
     .unwrap();
     forget_ingested_files(&db);
@@ -85,6 +88,7 @@ fn ingest_news_orgs_is_idempotent() {
         &news_orgs_fixture(),
         &mut store,
         ddp_transcribe::ingest::WindowBounds::default(),
+        false,
     )
     .unwrap();
 
@@ -117,6 +121,7 @@ fn ingest_local_real_fixture_writes_videos_and_watch_history() {
         &fixture,
         &mut store,
         ddp_transcribe::ingest::WindowBounds::default(),
+        false,
     )
     .expect("ingest succeeds");
 
@@ -163,6 +168,7 @@ fn ingest_local_real_fixture_is_idempotent() {
         &fixture,
         &mut store,
         ddp_transcribe::ingest::WindowBounds::default(),
+        false,
     )
     .unwrap();
     forget_ingested_files(&db);
@@ -170,6 +176,7 @@ fn ingest_local_real_fixture_is_idempotent() {
         &fixture,
         &mut store,
         ddp_transcribe::ingest::WindowBounds::default(),
+        false,
     )
     .unwrap();
 
@@ -239,6 +246,7 @@ fn decline_stub_is_skipped_and_counted_without_aborting_the_run() {
         &inbox,
         &mut store,
         ddp_transcribe::ingest::WindowBounds::default(),
+        false,
     )
     .expect("one bad file must not veto the run");
 
@@ -283,6 +291,7 @@ fn junk_filename_is_skipped_and_counted() {
         &inbox,
         &mut store,
         ddp_transcribe::ingest::WindowBounds::default(),
+        false,
     )
     .expect("junk filename must not veto the run");
 
@@ -324,6 +333,7 @@ fn unchanged_files_are_skipped_via_the_ledger_on_re_ingest() {
         &inbox,
         &mut store,
         ddp_transcribe::ingest::WindowBounds::default(),
+        false,
     )
     .unwrap();
     assert_eq!(first.files_processed, 2);
@@ -334,6 +344,7 @@ fn unchanged_files_are_skipped_via_the_ledger_on_re_ingest() {
         &inbox,
         &mut store,
         ddp_transcribe::ingest::WindowBounds::default(),
+        false,
     )
     .unwrap();
     assert_eq!(second.files_skipped_already_ingested, 2);
@@ -376,6 +387,7 @@ fn changed_file_is_reprocessed_and_its_ledger_row_updated() {
         &inbox,
         &mut store,
         ddp_transcribe::ingest::WindowBounds::default(),
+        false,
     )
     .unwrap();
 
@@ -410,6 +422,7 @@ fn changed_file_is_reprocessed_and_its_ledger_row_updated() {
         &inbox,
         &mut store,
         ddp_transcribe::ingest::WindowBounds::default(),
+        false,
     )
     .unwrap();
     assert_eq!(second.files_processed, 1, "only the changed file");
@@ -461,7 +474,7 @@ fn ingest_window_flags_and_raw_preservation() {
         Some(chrono::NaiveDate::from_ymd_opt(2026, 2, 1).unwrap()),
         Some(chrono::NaiveDate::from_ymd_opt(2026, 2, 28).unwrap()),
     );
-    let stats = ddp_transcribe::ingest::ingest(&inbox, &mut store, window).unwrap();
+    let stats = ddp_transcribe::ingest::ingest(&inbox, &mut store, window, false).unwrap();
     assert_eq!(stats.watch_history_rows_processed, 2);
     assert_eq!(stats.computed_out_of_window, 1);
 
@@ -531,6 +544,7 @@ fn reingest_backfills_null_raw_without_touching_in_window() {
         &inbox,
         &mut store,
         ddp_transcribe::ingest::WindowBounds::default(),
+        false,
     )
     .unwrap();
     assert_eq!(stats.watch_history_duplicates, 1);
@@ -550,4 +564,275 @@ fn reingest_backfills_null_raw_without_touching_in_window() {
         "re-ingest must NOT touch in_window (recompute-window is the explicit path)"
     );
     assert_eq!(raw.as_deref(), Some("2026-02-10 12:00:00"));
+}
+
+/// Two-file inbox, one watch-history row each: the shared fixture for the
+/// dry-run tests below.
+fn dry_run_inbox(tmp: &tempfile::TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
+    let inbox = tmp.path().join("inbox");
+    write_ddp(
+        &inbox,
+        "participant=w1_source=tiktok.json",
+        &[(
+            "2026-02-10 12:00:00",
+            "https://www.tiktokv.com/share/video/7000000000000000111/",
+        )],
+    );
+    write_ddp(
+        &inbox,
+        "participant=w2_source=tiktok.json",
+        &[(
+            "2026-02-11 12:00:00",
+            "https://www.tiktokv.com/share/video/7000000000000000222/",
+        )],
+    );
+    (inbox, tmp.path().join("state.sqlite"))
+}
+
+fn table_count(db: &std::path::Path, table: &str) -> i64 {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+        .unwrap()
+}
+
+const DUP_LINK: &str = "https://www.tiktokv.com/share/video/7000000000000000222/";
+const SEEDED_LINK: &str = "https://www.tiktokv.com/share/video/7000000000000000111/";
+
+/// Two inbox files for the SAME respondent that share one watch entry, plus
+/// a pre-seeded pre-v4 row (NULL `watched_at_raw`) for a third video. The
+/// two row-change-derived counters — `watch_history_duplicates` (the shared
+/// entry, only visible to the second file if it can see the first file's
+/// rows) and `backfilled_raw_dates` (the seeded NULL) — are exactly the
+/// stats a per-file-rollback dry-run would under-report.
+fn cross_file_duplicate_inbox(tmp: &tempfile::TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
+    let inbox = tmp.path().join("inbox");
+    write_ddp(
+        &inbox,
+        "assignment=1_participant=w1_source=tiktok.json",
+        &[
+            ("2026-02-10 12:00:00", SEEDED_LINK),
+            ("2026-02-11 12:00:00", DUP_LINK),
+        ],
+    );
+    write_ddp(
+        &inbox,
+        "assignment=2_participant=w1_source=tiktok.json",
+        &[
+            // The cross-file duplicate: same respondent, video and instant.
+            ("2026-02-11 12:00:00", DUP_LINK),
+            (
+                "2026-02-12 12:00:00",
+                "https://www.tiktokv.com/share/video/7000000000000000333/",
+            ),
+        ],
+    );
+    let db = tmp.path().join("state.sqlite");
+    {
+        let store = ddp_transcribe::state::Store::open(&db).unwrap();
+        drop(store);
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO videos (video_id, source_url, canonical, status, first_seen_at, updated_at)
+             VALUES ('7000000000000000111', ?1, 1, 'pending', 1, 1)",
+            rusqlite::params![SEEDED_LINK],
+        )
+        .unwrap();
+        let ts = chrono::NaiveDate::from_ymd_opt(2026, 2, 10)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        // Pre-v4 shape: NULL watched_at_raw, waiting to be backfilled.
+        conn.execute(
+            "INSERT INTO watch_history (respondent_id, video_id, watched_at, in_window)
+             VALUES ('w1', '7000000000000000111', ?1, 1)",
+            rusqlite::params![ts],
+        )
+        .unwrap();
+    }
+    (inbox, db)
+}
+
+/// Operator ruling 2026-07-29: dry-run wraps the WHOLE inbox scan in one
+/// transaction, so a later file sees an earlier file's (uncommitted) rows.
+/// Without that, a duplicate split across two files is invisible to dry-run
+/// but real in a live run — the stats would diverge exactly where the
+/// operator is relying on them.
+#[test]
+fn dry_run_counts_cross_file_duplicates_like_a_real_run() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (inbox, db) = cross_file_duplicate_inbox(&tmp);
+    let mut store = Store::open(&db).unwrap();
+
+    let dry = ingest(
+        &inbox,
+        &mut store,
+        ddp_transcribe::ingest::WindowBounds::default(),
+        true,
+    )
+    .unwrap();
+
+    // Nothing beyond the seeded rows persisted, and the seeded NULL raw is
+    // still NULL: the dry-run's backfill was rolled back too.
+    assert_eq!(
+        table_count(&db, "videos"),
+        1,
+        "dry-run must persist nothing"
+    );
+    assert_eq!(table_count(&db, "watch_history"), 1);
+    assert_eq!(table_count(&db, "ingested_files"), 0);
+    let raw_after_dry: Option<String> = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT watched_at_raw FROM watch_history WHERE video_id='7000000000000000111'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        raw_after_dry.is_none(),
+        "dry-run must not backfill for real"
+    );
+
+    let real = ingest(
+        &inbox,
+        &mut store,
+        ddp_transcribe::ingest::WindowBounds::default(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(
+        real.watch_history_duplicates, 2,
+        "the seeded row plus the cross-file duplicate"
+    );
+    assert_eq!(real.backfilled_raw_dates, 1, "the seeded NULL raw");
+    assert_eq!(
+        dry.watch_history_duplicates, real.watch_history_duplicates,
+        "a cross-file duplicate must count identically in both modes"
+    );
+    assert_eq!(dry.backfilled_raw_dates, real.backfilled_raw_dates);
+    assert_eq!(
+        dry.watch_history_rows_processed,
+        real.watch_history_rows_processed
+    );
+}
+
+/// `--dry-run` runs the full per-file transaction — every upsert, so every
+/// row-change-derived counter is real — and then rolls it back. Nothing
+/// persists, not even the ingest ledger.
+#[test]
+fn dry_run_reports_real_stats_but_writes_nothing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (inbox, db) = dry_run_inbox(&tmp);
+    let mut store = Store::open(&db).unwrap();
+
+    let stats = ingest(
+        &inbox,
+        &mut store,
+        ddp_transcribe::ingest::WindowBounds::default(),
+        true,
+    )
+    .expect("dry-run ingest succeeds");
+
+    assert_eq!(stats.files_processed, 2);
+    assert_eq!(stats.unique_videos_seen, 2);
+    assert_eq!(stats.watch_history_rows_processed, 2);
+    assert_eq!(stats.files_skipped_already_ingested, 0);
+    assert_eq!(stats.files_skipped_unparseable, 0);
+
+    assert_eq!(
+        (
+            table_count(&db, "videos"),
+            table_count(&db, "watch_history")
+        ),
+        (0, 0),
+        "dry-run must persist nothing"
+    );
+    assert_eq!(
+        table_count(&db, "ingested_files"),
+        0,
+        "dry-run must not poison the ingest ledger"
+    );
+}
+
+/// The ledger write rides the rolled-back transaction, so a dry-run leaves
+/// no fingerprint behind: the next real run ingests everything, with stats
+/// identical to the dry-run's.
+#[test]
+fn real_ingest_after_dry_run_ingests_everything() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (inbox, db) = dry_run_inbox(&tmp);
+    let mut store = Store::open(&db).unwrap();
+
+    let dry = ingest(
+        &inbox,
+        &mut store,
+        ddp_transcribe::ingest::WindowBounds::default(),
+        true,
+    )
+    .unwrap();
+    let real = ingest(
+        &inbox,
+        &mut store,
+        ddp_transcribe::ingest::WindowBounds::default(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(
+        real.files_skipped_already_ingested, 0,
+        "ledger must be clean after a dry-run"
+    );
+    assert_eq!(real.files_processed, dry.files_processed);
+    assert_eq!(real.unique_videos_seen, dry.unique_videos_seen);
+    assert_eq!(
+        real.watch_history_rows_processed,
+        dry.watch_history_rows_processed
+    );
+    assert_eq!(real.watch_history_duplicates, dry.watch_history_duplicates);
+    assert_eq!(real.computed_out_of_window, dry.computed_out_of_window);
+    assert_eq!(real.backfilled_raw_dates, dry.backfilled_raw_dates);
+
+    assert!(
+        table_count(&db, "videos") > 0,
+        "real run after dry-run ingests normally"
+    );
+    assert_eq!(table_count(&db, "ingested_files"), 2);
+}
+
+/// The operator-facing half: `ingest --dry-run` marks its summary line so a
+/// dry run is never mistaken for a real one, and still writes nothing.
+#[test]
+fn dry_run_cli_marks_its_output_and_writes_nothing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (inbox, db) = dry_run_inbox(&tmp);
+
+    let assert = AssertCommand::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args([
+            "--state-db",
+            db.to_str().unwrap(),
+            "--inbox",
+            inbox.to_str().unwrap(),
+            "ingest",
+            "--dry-run",
+        ])
+        .assert()
+        .success();
+    let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(out.contains("(dry-run)"), "stdout was: {out}");
+    // The dry-run pass still reports real counts.
+    assert!(out.contains("files 2"), "stdout was: {out}");
+
+    assert_eq!(
+        (
+            table_count(&db, "videos"),
+            table_count(&db, "watch_history")
+        ),
+        (0, 0),
+        "dry-run must persist nothing"
+    );
+    assert_eq!(table_count(&db, "ingested_files"), 0);
 }

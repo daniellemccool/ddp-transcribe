@@ -57,12 +57,11 @@ async fn main() -> Result<()> {
         } => {
             cli::validate_window_order("ingest", window_start, window_end)?;
             let mut store = state::Store::open(&cfg.state_db).context("opening state DB")?;
-            if dry_run {
-                tracing::info!("dry-run: not yet implemented; running real ingest");
-            }
             let window = ingest::WindowBounds::from_dates(window_start, window_end);
-            let stats = ingest::ingest(&cfg.inbox, &mut store, window).context("ingest failed")?;
+            let stats =
+                ingest::ingest(&cfg.inbox, &mut store, window, dry_run).context("ingest failed")?;
             tracing::info!(
+                dry_run,
                 files = stats.files_processed,
                 files_skipped_unparseable = stats.files_skipped_unparseable,
                 files_skipped_already_ingested = stats.files_skipped_already_ingested,
@@ -76,16 +75,20 @@ async fn main() -> Result<()> {
                 backfilled_raw_dates = stats.backfilled_raw_dates,
                 "ingest complete"
             );
+            println!("ingest: {stats}{}", if dry_run { " (dry-run)" } else { "" });
         }
         cli::Command::Process {
             max_videos,
             cookies_file,
             retries,
+            checkpoint_cmd,
+            checkpoint_every,
         } => {
             let mut store = state::Store::open(&cfg.state_db).context("opening state DB")?;
             std::fs::create_dir_all(&cfg.transcripts).context("creating transcripts dir")?;
             // Tmp cleanup at startup
-            let removed = output::artifacts::cleanup_tmp_files(&cfg.transcripts)?;
+            let removed =
+                output::artifacts::cleanup_tmp_files(&cfg.transcripts, cfg.stale_claim_threshold)?;
             if removed > 0 {
                 tracing::info!(removed, "cleaned up leftover .tmp files");
             }
@@ -123,12 +126,24 @@ async fn main() -> Result<()> {
             // run the start-of-batch sweep of parked failures BEFORE the
             // engine loads its model — fail fast on policy before paying
             // that cost.
+            // Epic 5a: the checkpoint hook's configuration rides the
+            // batch_runs params so a census can attribute a run's mid-run
+            // syncing (or lack of it). `null`/`null` when the feature is
+            // off — the path is recorded verbatim; it is an operator script
+            // path, not a credential (unlike --cookies-file, which stays a
+            // boolean presence flag per 0035).
+            let checkpoint = checkpoint_cmd.map(|cmd| pipeline::CheckpointConfig {
+                cmd,
+                every: checkpoint_every,
+            });
             let params_json = serde_json::json!({
                 "retries": retries,
                 "max_videos": max_videos,
                 "cookies_present": cookies_file.is_some(),
                 "download_workers": cfg.download_workers,
                 "worker_host": hostname_or_default(),
+                "checkpoint_cmd": checkpoint.as_ref().map(|c| c.cmd.display().to_string()),
+                "checkpoint_every_secs": checkpoint.as_ref().map(|c| c.every.as_secs()),
             })
             .to_string();
             let run_id = store.open_batch_run(&params_json, classification.source_toml())?;
@@ -183,6 +198,7 @@ async fn main() -> Result<()> {
                 cookies_file,
                 classification: std::sync::Arc::clone(&classification),
                 retries,
+                checkpoint,
             };
 
             // ────────────────────────────────────────────────────────────
@@ -253,6 +269,11 @@ async fn main() -> Result<()> {
                 requeued_for_retry = stats.requeued_for_retry,
                 exhausted_retries = stats.exhausted_retries,
                 parked_for_cookies = stats.parked_for_cookies,
+                // Epic 5a: the operator checkpoint hook's outcome. A
+                // nonzero checkpoints_failed means mid-run syncing did not
+                // happen — an alarm, but never a run failure.
+                checkpoints_run = stats.checkpoints_run,
+                checkpoints_failed = stats.checkpoints_failed,
                 "process complete"
             );
 
@@ -485,7 +506,17 @@ fn log_resolved_config(cfg: &config::Config, command: &cli::Command) {
     }
 }
 
+/// Real hostname for worker attribution (two-instance deployments):
+/// `/proc/sys/kernel/hostname` → `$HOSTNAME` → `"host"`. Before this, both
+/// SRC instances reported the literal `"host"` and A/B attribution leaned on
+/// pid ranges alone.
 fn hostname_or_default() -> String {
+    if let Ok(h) = std::fs::read_to_string("/proc/sys/kernel/hostname") {
+        let h = h.trim();
+        if !h.is_empty() {
+            return h.to_string();
+        }
+    }
     std::env::var("HOSTNAME").unwrap_or_else(|_| "host".to_string())
 }
 

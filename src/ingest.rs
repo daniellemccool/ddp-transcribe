@@ -9,7 +9,8 @@ use rusqlite::Transaction;
 
 use crate::canonical::{canonicalize_url, Canonical};
 use crate::state::{
-    backfill_watch_raw_tx, upsert_ingested_file_tx, upsert_video_tx, upsert_watch_history_tx, Store,
+    backfill_watch_raw_tx, ingested_file_fingerprint, upsert_ingested_file_tx, upsert_video_tx,
+    upsert_watch_history_tx, Store,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -44,6 +45,29 @@ pub struct IngestStats {
     /// this exact (name, size, mtime) triple. Parallel to `files_processed`
     /// per 0007 — the normal fast path on a re-run over a 142-file inbox.
     pub files_skipped_already_ingested: usize,
+}
+
+/// One-line operator summary, same field order as the structured
+/// `ingest complete` log. Mirrors `LoadStats`' Display so the human line of
+/// every subcommand reads the same way.
+impl std::fmt::Display for IngestStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "files {} / skipped-unparseable {} / already-ingested {} / videos {} / history {} / duplicates {} / short-links {} / invalid-urls {} / date-parse-failures {} / out-of-window {} / backfilled-raw {}",
+            self.files_processed,
+            self.files_skipped_unparseable,
+            self.files_skipped_already_ingested,
+            self.unique_videos_seen,
+            self.watch_history_rows_processed,
+            self.watch_history_duplicates,
+            self.short_links_skipped,
+            self.invalid_urls_skipped,
+            self.date_parse_failures,
+            self.computed_out_of_window,
+            self.backfilled_raw_dates
+        )
+    }
 }
 
 /// Analysis-window bounds in unix seconds, derived from inclusive UTC
@@ -98,88 +122,179 @@ impl WindowBounds {
 /// the subset of processed rows where the upsert was a no-op (existing PK).
 /// The three file-level counters are parallel per 0007: each walked file
 /// increments exactly one of them.
-pub fn ingest(inbox: &Path, store: &mut Store, window: WindowBounds) -> Result<IngestStats> {
+///
+/// `dry_run` does the same work and reports the same stats as a real pass,
+/// then throws the writes away: ONE transaction spans the whole inbox scan
+/// and is rolled back at the end (operator ruling 2026-07-29). The single
+/// outer transaction is what makes "same stats" true rather than
+/// approximate — every file sees the previous files' (uncommitted) rows, so
+/// a duplicate watch entry split across two inbox files, or a raw-date
+/// backfill an earlier file already performed, counts exactly as it would
+/// in a live run. The ledger *read* stays active (so
+/// `files_skipped_already_ingested` reports what a real run would skip) and
+/// reads through that same transaction; the ledger *write* rides it and is
+/// discarded with everything else, leaving the store exactly as found.
+///
+/// The cost, for the runbook: a dry-run holds ONE `BEGIN IMMEDIATE` write
+/// transaction for the duration of the scan — file reads and JSON parsing
+/// included — where a real ingest takes only brief per-file write locks. A
+/// full-inbox dry-run beside a live `process` can hold that lock past
+/// `busy_timeout` (5s), in which case `process`'s `claim_next` gets
+/// `SQLITE_BUSY` and its batch aborts. Run dry-runs only at a pause — no
+/// `process` running — not alongside one.
+pub fn ingest(
+    inbox: &Path,
+    store: &mut Store,
+    window: WindowBounds,
+    dry_run: bool,
+) -> Result<IngestStats> {
     let mut stats = IngestStats::default();
     let mut unique_videos: HashSet<String> = HashSet::new();
+    let paths = walk_json_files(inbox)?;
 
-    // Batch writes per file: the read + JSON parse happen OUTSIDE the write
-    // transaction, then one transaction wraps that file's row upserts and commits
-    // before the next file. This keeps the SQLite write-lock window off filesystem
-    // I/O, lets partial progress survive a later malformed file, and still amortizes
-    // the per-row commit cost. `prepare_cached` lives on the connection, so the two
-    // statements stay prepared across files. INSERT-OR-IGNORE keeps re-runs idempotent.
-    for path in walk_json_files(inbox)? {
-        let respondent_id = match parse_respondent_id_from_filename(&path) {
-            Ok(id) => id,
-            Err(e) => {
-                skip_unparseable(&path, &e, &mut stats);
+    if dry_run {
+        // One transaction for the whole scan, rolled back at the end: the
+        // work is identical to a real run's, and every later file reads the
+        // earlier files' rows, so the row-change-derived counters
+        // (`watch_history_duplicates`, `backfilled_raw_dates`) match. The
+        // read + JSON parse happen inside this transaction — a dry-run
+        // trades the real run's tight write-lock window for stat fidelity.
+        // BEGIN IMMEDIATE (not the deferred default): held this long, a
+        // deferred transaction's read-to-write upgrade can fail immediately
+        // with SQLITE_BUSY under WAL snapshot isolation, which busy_timeout
+        // does not retry. Taking the write lock up front instead makes any
+        // contention a bounded busy_timeout wait, same as claim_next.
+        let tx = store.transaction_immediate()?;
+        for path in &paths {
+            let Some(prepared) = prepare_file(&tx, path, &mut stats)? else {
                 continue;
-            }
-        };
-
-        // Ledger check BEFORE the read: on a re-run over an unchanged inbox
-        // this is the only I/O the file costs — one stat plus one indexed
-        // SELECT, instead of parsing megabytes of JSON to discover that
-        // every row is a no-op upsert.
-        let fingerprint = resolve_fingerprint(&path, std::fs::metadata(&path));
-        if let Some((name, size, mtime)) = &fingerprint {
-            // A ledger read failure is a broken store, not a broken file:
-            // propagate rather than silently re-ingesting everything.
-            if store.ingested_file_fingerprint(name)? == Some((*size, *mtime)) {
-                // Debug, not warn: this is the normal fast path.
-                tracing::debug!(file = %path.display(), "file skipped (already ingested)");
-                stats.files_skipped_already_ingested += 1;
-                continue;
-            }
+            };
+            write_file_rows(&tx, &prepared, window, &mut stats, &mut unique_videos)?;
+            stats.files_processed += 1;
         }
-
-        let raw = match std::fs::read(&path) {
-            Ok(raw) => raw,
-            Err(e) => {
-                skip_unparseable(&path, &anyhow::Error::new(e), &mut stats);
+        // Dropping the Transaction would roll back too; rolling back
+        // explicitly says so — and surfaces a rollback failure.
+        tx.rollback()
+            .context("rolling back the dry-run ingest transaction")?;
+    } else {
+        // Batch writes per file: the read + JSON parse happen OUTSIDE the write
+        // transaction, then one transaction wraps that file's row upserts and commits
+        // before the next file. This keeps the SQLite write-lock window off filesystem
+        // I/O, lets partial progress survive a later malformed file, and still amortizes
+        // the per-row commit cost. `prepare_cached` lives on the connection, so the two
+        // statements stay prepared across files. INSERT-OR-IGNORE keeps re-runs idempotent.
+        for path in &paths {
+            let Some(prepared) = prepare_file(store.conn(), path, &mut stats)? else {
                 continue;
-            }
-        };
-        // The donation platform writes decline stubs (`{"status":
-        // "data_submission declined"}` — a top-level object, not an array)
-        // into the same inbox. Those must cost one counted skip, never the run.
-        let sections: Vec<Section> = match serde_json::from_slice(&raw) {
-            Ok(sections) => sections,
-            Err(e) => {
-                skip_unparseable(&path, &anyhow::Error::new(e), &mut stats);
-                continue;
-            }
-        };
-
-        let tx = store.transaction()?;
-        for section in sections {
-            if let Some(rows) = section.tiktok_watch_history {
-                for entry in rows {
-                    process_watch_entry(
-                        &tx,
-                        &respondent_id,
-                        &entry,
-                        &mut stats,
-                        &mut unique_videos,
-                        window,
-                    )?;
-                }
-            }
+            };
+            let tx = store.transaction()?;
+            write_file_rows(&tx, &prepared, window, &mut stats, &mut unique_videos)?;
+            tx.commit()
+                .with_context(|| format!("committing ingest transaction for {}", path.display()))?;
+            stats.files_processed += 1;
         }
-        // Ledger row rides the SAME transaction as the file's rows, so it
-        // exists iff that file's data is committed — a crash mid-file leaves
-        // no ledger row and the next run reprocesses it.
-        if let Some((name, size, mtime)) = &fingerprint {
-            upsert_ingested_file_tx(&tx, name, *size, *mtime)?;
-        }
-        tx.commit()
-            .with_context(|| format!("committing ingest transaction for {}", path.display()))?;
-
-        stats.files_processed += 1;
     }
 
     stats.unique_videos_seen = unique_videos.len();
     Ok(stats)
+}
+
+/// A walked file that survived the ledger check, the read and the JSON
+/// parse: everything a real run computes before it opens that file's write
+/// transaction.
+struct PreparedFile {
+    respondent_id: String,
+    /// `(basename, size, mtime)`, or `None` for an unfingerprintable file —
+    /// which gets no ledger row and is simply re-examined next run.
+    fingerprint: Option<(String, i64, i64)>,
+    sections: Vec<Section>,
+}
+
+/// The non-writing half of a file's ingest: filename parse, ledger check,
+/// read, JSON parse. `Ok(None)` = this file is done (skipped and counted);
+/// every skip arm increments exactly one file-level counter per 0007.
+///
+/// `conn` is the bare connection on a real run and the open dry-run
+/// transaction on a dry-run (`&Transaction` derefs to `&Connection`), so the
+/// ledger check sees the same rows either mode would have committed by now.
+fn prepare_file(
+    conn: &rusqlite::Connection,
+    path: &Path,
+    stats: &mut IngestStats,
+) -> Result<Option<PreparedFile>> {
+    let respondent_id = match parse_respondent_id_from_filename(path) {
+        Ok(id) => id,
+        Err(e) => {
+            skip_unparseable(path, &e, stats);
+            return Ok(None);
+        }
+    };
+
+    // Ledger check BEFORE the read: on a re-run over an unchanged inbox
+    // this is the only I/O the file costs — one stat plus one indexed
+    // SELECT, instead of parsing megabytes of JSON to discover that
+    // every row is a no-op upsert.
+    let fingerprint = resolve_fingerprint(path, std::fs::metadata(path));
+    if let Some((name, size, mtime)) = &fingerprint {
+        // A ledger read failure is a broken store, not a broken file:
+        // propagate rather than silently re-ingesting everything.
+        if ingested_file_fingerprint(conn, name)? == Some((*size, *mtime)) {
+            // Debug, not warn: this is the normal fast path.
+            tracing::debug!(file = %path.display(), "file skipped (already ingested)");
+            stats.files_skipped_already_ingested += 1;
+            return Ok(None);
+        }
+    }
+
+    let raw = match std::fs::read(path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            skip_unparseable(path, &anyhow::Error::new(e), stats);
+            return Ok(None);
+        }
+    };
+    // The donation platform writes decline stubs (`{"status":
+    // "data_submission declined"}` — a top-level object, not an array)
+    // into the same inbox. Those must cost one counted skip, never the run.
+    let sections: Vec<Section> = match serde_json::from_slice(&raw) {
+        Ok(sections) => sections,
+        Err(e) => {
+            skip_unparseable(path, &anyhow::Error::new(e), stats);
+            return Ok(None);
+        }
+    };
+
+    Ok(Some(PreparedFile {
+        respondent_id,
+        fingerprint,
+        sections,
+    }))
+}
+
+/// The writing half: one file's rows plus its ledger row, all on `tx`. The
+/// single code path both modes take — a real run commits `tx` afterwards, a
+/// dry-run rolls back the transaction that spans every file.
+fn write_file_rows(
+    tx: &Transaction<'_>,
+    file: &PreparedFile,
+    window: WindowBounds,
+    stats: &mut IngestStats,
+    unique_videos: &mut HashSet<String>,
+) -> Result<()> {
+    for section in &file.sections {
+        if let Some(rows) = &section.tiktok_watch_history {
+            for entry in rows {
+                process_watch_entry(tx, &file.respondent_id, entry, stats, unique_videos, window)?;
+            }
+        }
+    }
+    // Ledger row rides the SAME transaction as the file's rows, so it
+    // exists iff that file's data is committed — a crash mid-file leaves
+    // no ledger row and the next run reprocesses it.
+    if let Some((name, size, mtime)) = &file.fingerprint {
+        upsert_ingested_file_tx(tx, name, *size, *mtime)?;
+    }
+    Ok(())
 }
 
 /// One bad file must never veto the run (July-2026 production incident: a

@@ -179,11 +179,12 @@ impl Store {
     ///
     /// T18 (pipelined orchestrator's `compute_process_stats`) was the first
     /// in-bin consumer; the Epic 4a T06 review fix retired that fn
-    /// (`ProcessStats` is assembled from input-side counters per 0007), so
-    /// no bin caller remains. In-module `#[cfg(test)]` schema tests still
-    /// call it — suppressed per 0002; lift when the next raw-connection
-    /// consumer lands.
-    #[allow(dead_code)]
+    /// (`ProcessStats` is assembled from input-side counters per 0007),
+    /// leaving only in-module `#[cfg(test)]` schema tests and a `dead_code`
+    /// suppression per 0002. Epic 5a's dry-run ingest is the raw-connection
+    /// consumer that suppression was waiting for — `ingest` reads the
+    /// ledger through this connection on a real run and through its open
+    /// transaction on a dry-run — so the suppression is lifted.
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
     }
@@ -250,28 +251,52 @@ impl Store {
         Ok(changed)
     }
 
-    /// Open a transaction for the batch ingest path. `ingest` opens one transaction
-    /// per input file (after that file is read and parsed) and commits it before the
-    /// next file, instead of paying a per-row commit. Pair with [`upsert_video_tx`] /
-    /// [`upsert_watch_history_tx`], which reuse `prepare_cached` statements across
-    /// transactions on the same connection.
+    /// Open a transaction for the batch ingest path. On a real run, `ingest`
+    /// opens one of these per input file (after that file is read and
+    /// parsed) and commits it before the next file, instead of paying a
+    /// per-row commit. A dry-run instead opens one of these (via
+    /// [`Store::transaction_immediate`], not this deferred variant) for the
+    /// whole inbox scan and rolls it back. Pair with [`upsert_video_tx`] /
+    /// [`upsert_watch_history_tx`], which reuse `prepare_cached` statements
+    /// across transactions on the same connection.
     pub(crate) fn transaction(&mut self) -> Result<rusqlite::Transaction<'_>> {
         self.conn.transaction().context("begin ingest transaction")
     }
 
-    /// The `ingested_files` fingerprint recorded for `file_name` (basename),
-    /// as `(size_bytes, mtime)`; `None` = never fully ingested. Read on the
-    /// connection rather than inside the per-file transaction because it
-    /// decides whether that transaction is opened at all. `prepare_cached`
-    /// keeps it to one prepare across the whole walk.
-    pub(crate) fn ingested_file_fingerprint(&self, file_name: &str) -> Result<Option<(i64, i64)>> {
+    /// Like [`Store::transaction`], but opens with `BEGIN IMMEDIATE` instead
+    /// of the default deferred behavior. The dry-run ingest path uses this:
+    /// it holds the transaction across the whole inbox scan (file reads and
+    /// JSON parsing included), and a deferred transaction held that long can
+    /// fail its read-to-write upgrade with `SQLITE_BUSY` the instant a
+    /// concurrent writer's snapshot has moved on — `busy_timeout` does not
+    /// retry that case. Taking the write lock immediately instead means any
+    /// contention is a bounded wait capped by `busy_timeout` (5s), same as
+    /// `claim_next`.
+    pub(crate) fn transaction_immediate(&mut self) -> Result<rusqlite::Transaction<'_>> {
         self.conn
-            .prepare_cached(SELECT_INGESTED_FILE_SQL)
-            .context("preparing ingested_file_fingerprint")?
-            .query_row(params![file_name], |r| Ok((r.get(0)?, r.get(1)?)))
-            .optional()
-            .with_context(|| format!("reading ingest ledger row for {file_name}"))
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("begin immediate for dry-run ingest transaction")
     }
+}
+
+/// The `ingested_files` fingerprint recorded for `file_name` (basename), as
+/// `(size_bytes, mtime)`; `None` = never fully ingested. Connection-scoped
+/// rather than a `Store` method because the ingest pass reads it two ways:
+/// a real run reads it on the bare connection (it decides whether that
+/// file's transaction is opened at all), while a dry-run reads it through
+/// its one open transaction — where `&Transaction` derefs to `&Connection`
+/// — so an earlier file's uncommitted ledger row is visible, exactly as a
+/// committed one would be to a real run. `prepare_cached` keeps it to one
+/// prepare across the whole walk either way.
+pub(crate) fn ingested_file_fingerprint(
+    conn: &Connection,
+    file_name: &str,
+) -> Result<Option<(i64, i64)>> {
+    conn.prepare_cached(SELECT_INGESTED_FILE_SQL)
+        .context("preparing ingested_file_fingerprint")?
+        .query_row(params![file_name], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()
+        .with_context(|| format!("reading ingest ledger row for {file_name}"))
 }
 
 /// Shared INSERT-OR-IGNORE SQL so the `&mut self` convenience methods and the
@@ -937,6 +962,15 @@ impl Store {
     /// sweep is operator-recovery semantics; application-retry semantics
     /// (and the `attempt_count` ladder) belong to Epic 3's classifier.
     ///
+    /// **Observability:** every recovered row also gets a `swept_stale`
+    /// `video_events` row carrying the stale claim's provenance
+    /// (`was_claimed_by` / `claimed_at` / `threshold_secs`). This is pure
+    /// forensics — it changes no predicate and no status semantics. Its
+    /// purpose is that after this change *every* legitimate
+    /// `in_progress → pending` transition leaves a trace, so a pending-count
+    /// increase WITHOUT matching events is hard evidence for the
+    /// concurrent-writer-loss hypothesis rather than a sweep.
+    ///
     /// **`threshold == 0` semantics:** cutoff == now, so the predicate is
     /// `claimed_at < now` — same-second claims survive the sweep (the
     /// timestamp has second resolution; a claim made in the same second as
@@ -958,8 +992,32 @@ impl Store {
         let threshold_secs = i64::try_from(threshold.as_secs()).unwrap_or(i64::MAX);
         let cutoff = now.saturating_sub(threshold_secs);
 
-        let changed = self
+        let tx = self
             .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("begin immediate for sweep_stale_claims")?;
+
+        // Provenance of the rows the UPDATE below is about to recover. Read
+        // inside the same IMMEDIATE transaction with the same predicate, so
+        // the event set exactly matches the recovered set.
+        let stale: Vec<(String, Option<String>, Option<i64>)> = {
+            let mut stmt = tx
+                .prepare_cached(
+                    "SELECT video_id, claimed_by, claimed_at FROM videos
+                     WHERE status = 'in_progress'
+                       AND claimed_at IS NOT NULL
+                       AND claimed_at < ?1",
+                )
+                .context("prepare stale-claim provenance for sweep_stale_claims")?;
+            let rows = stmt
+                .query_map(params![cutoff], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .context("query stale-claim provenance for sweep_stale_claims")?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .context("collect stale-claim provenance for sweep_stale_claims")?;
+            rows
+        };
+
+        let changed = tx
             .execute(
                 "UPDATE videos
                  SET status = 'pending',
@@ -972,6 +1030,29 @@ impl Store {
                 params![now, cutoff],
             )
             .context("UPDATE videos for sweep_stale_claims")?;
+
+        debug_assert_eq!(stale.len(), changed, "event set must match recovered set");
+
+        {
+            let mut ev = tx
+                .prepare_cached(
+                    "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
+                     VALUES (?1, ?2, 'swept_stale', 'sweep', ?3)",
+                )
+                .context("prepare swept_stale event for sweep_stale_claims")?;
+            for (video_id, claimed_by, claimed_at) in &stale {
+                let detail = serde_json::json!({
+                    "was_claimed_by": claimed_by,
+                    "claimed_at": claimed_at,
+                    "threshold_secs": threshold.as_secs(),
+                })
+                .to_string();
+                ev.execute(params![video_id, now, detail])
+                    .with_context(|| format!("swept_stale event for {video_id}"))?;
+            }
+        }
+
+        tx.commit().context("commit sweep_stale_claims")?;
 
         if changed > 0 {
             tracing::info!(recovered = changed, threshold_secs, "sweep_stale_claims");

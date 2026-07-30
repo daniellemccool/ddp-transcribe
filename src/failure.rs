@@ -256,7 +256,7 @@ mod tests {
         let cases: &[(FetchError, fn(&ClassifiedFailure) -> bool)] = &[
             (
                 FetchError::ToolTimeout {
-                    tool: "yt-dlp",
+                    tool: "yt-dlp".to_string(),
                     duration: Duration::from_secs(300),
                 },
                 |c| {
@@ -268,7 +268,7 @@ mod tests {
             ),
             (
                 FetchError::ToolNotFound {
-                    tool: "yt-dlp",
+                    tool: "yt-dlp".to_string(),
                     detail: "ENOENT".into(),
                 },
                 |c| matches!(c, ClassifiedFailure::Bug { .. }),
@@ -282,7 +282,7 @@ mod tests {
             ),
             (
                 FetchError::SystemIo {
-                    tool: "yt-dlp",
+                    tool: "yt-dlp".to_string(),
                     detail: "pipe".into(),
                 },
                 |c| {
@@ -321,7 +321,7 @@ mod tests {
         use crate::errors::FetchError;
         let table = ClassificationTable::compiled_default().unwrap();
         let e = FetchError::ToolFailed {
-            tool: "yt-dlp",
+            tool: "yt-dlp".to_string(),
             exit_code: 1,
             signal: None,
             stderr_excerpt: fixture!("ip_blocked").to_string(),
@@ -341,7 +341,7 @@ mod tests {
         use crate::errors::FetchError;
         let table = ClassificationTable::compiled_default().unwrap();
         let e = FetchError::ToolFailed {
-            tool: "yt-dlp",
+            tool: "yt-dlp".to_string(),
             exit_code: 1,
             signal: None,
             stderr_excerpt: fixture!("video_not_available_10240").to_string(),
@@ -363,7 +363,7 @@ mod tests {
         use crate::errors::FetchError;
         let table = ClassificationTable::compiled_default().unwrap();
         let mk = |stderr: &str| FetchError::ToolFailed {
-            tool: "yt-dlp",
+            tool: "yt-dlp".to_string(),
             exit_code: 1,
             signal: None,
             stderr_excerpt: stderr.to_string(),

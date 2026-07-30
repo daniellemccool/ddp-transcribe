@@ -402,6 +402,7 @@ mod tests {
                     .expect("default table"),
             ),
             retries: 1,
+            checkpoint: None,
         };
 
         // Use the same Claim returned by claim_next — process_one needs

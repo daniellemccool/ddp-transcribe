@@ -253,7 +253,7 @@ impl VideoFetcher for FakeFetcher {
                     return (
                         capture,
                         Err(FetchError::ToolFailed {
-                            tool: "yt-dlp",
+                            tool: "yt-dlp".to_string(),
                             exit_code: 1,
                             signal: None,
                             stderr_excerpt: stderr,
@@ -282,7 +282,7 @@ impl VideoFetcher for FakeFetcher {
                 return (
                     capture,
                     Err(FetchError::ToolFailed {
-                        tool: "yt-dlp",
+                        tool: "yt-dlp".to_string(),
                         exit_code: 1,
                         signal: None,
                         stderr_excerpt,

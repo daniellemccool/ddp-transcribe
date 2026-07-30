@@ -12,7 +12,6 @@ TikTok is the currently supported source.
 
 > **Plan A — walking skeleton.** Only the `Dev` profile is wired. Known
 > Plan-A quirks when you test:
-> - `ingest --dry-run` is not yet implemented — it logs a note and runs a real ingest anyway.
 > - `process` exits with code **3** when it claimed zero videos — this is intentional, not a failure.
 
 ## Quickstart
@@ -98,8 +97,20 @@ Walks `--inbox`, parses each DDP watch-history JSON, canonicalizes each
 `watch_history`. Summary counts (files processed, unique videos, duplicate
 watch rows, short-links skipped, invalid URLs skipped) are logged.
 
-`--dry-run` is accepted but not yet implemented — the command runs a real
-ingest and logs a note.
+`--dry-run` does the full pass — every file read, parsed and upserted — inside
+a single transaction spanning the whole inbox, then rolls that transaction
+back. Nothing persists (not even the ingest ledger), and because every file
+sees the earlier files' uncommitted rows, the reported counts are exactly a
+real run's — including duplicates and raw-date backfills that only show up
+across files.
+
+The cost: a dry-run holds **one** write transaction (`BEGIN IMMEDIATE` …
+rollback) for the whole inbox scan, file reads and JSON parsing included,
+where a real ingest takes only brief per-file write locks. A full-inbox
+dry-run alongside a running `process` can hold that lock past
+`busy_timeout` (5s), in which case `process`'s claims start failing with
+`SQLITE_BUSY` and its batch aborts. Run a dry-run only at a pause — no
+`process` running — not alongside one.
 
 ### `process [--max-videos N]`
 

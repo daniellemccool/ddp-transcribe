@@ -157,6 +157,18 @@ change; do not fix blind.
 the campaign (operators watch the 5-minute tally; a bump = recurrence, note
 the timestamp), or the next epic touching claiming/state commits.
 
+**Instrumented in v0.3.2 (`31c18df`):** every row the stale-claim sweep
+recovers now writes a `swept_stale` `video_events` row carrying the stale
+claim's provenance (`was_claimed_by`, `claimed_at`, `threshold_secs`), and
+instances report their real hostname in `worker_id` instead of the literal
+`host`, so the two GPU runs are distinguishable without pid archaeology.
+**Next occurrence of a pending-count bump:** pull the snapshot and check for
+`swept_stale` events matching the affected rows and timestamps — present = the
+sweep did it (expected behavior, ADR-0024's blind revert); absent = evidence of
+writer loss, at which point this entry graduates from hypothesis to a fix task.
+The instrumentation changed no predicate and no status semantics, so it neither
+confirms nor refutes the hypothesis on its own.
+
 ---
 
 ### `process` claims more than `--max-videos`
@@ -176,20 +188,35 @@ by construction across N concurrent fetch workers. That fix landed in
 `9228c89` on 2026-05-21, *before* the 2026-07-28 shakedown observation, so
 per-worker accounting cannot explain `claimed=13`/`claimed=10` under
 `--max-videos 5`. The overshoot is therefore **unexplained** and belongs
-with the concurrent-writer instrumentation work below — treat the two
+with the concurrent-writer instrumentation work above — treat the two
 entries as one two-writer anomaly cluster rather than two separate bugs.
+
+**Instrumented in v0.3.2 (`31c18df`)** along with the concurrent-writer entry:
+the same `swept_stale` events and real hostnames apply here, since a capped run
+whose rows were swept back to `pending` and re-claimed is one of the candidate
+explanations for an inflated `claimed` count. Same adjudication rule — matching
+events = sweep, none = writer loss.
 
 ---
 
-### Periodic in-run checkpoint for uncapped campaign runs
+### `swept_stale` event/recovered-set invariant is enforced only in debug builds
 
-**Found in:** campaign ops 2026-07-29 — the batch-end auto-sync (hop 1)
-only fires when a `process` invocation exits, so an uncapped campaign run
-staled the volume (and the Yoda-pushed resume snapshot) for hours until a
-manual `sync-to-storage.sh`. Documented as an operator ritual in the
-researchcloud repo (`yoda-operations.md`, "Campaign checkpoint ritual"), but
-the pipeline could emit a periodic checkpoint (or invoke a configurable hook)
-every N videos/minutes and remove the human dependency.
-**Disposition:** ops-robustness feature, small.
-**Trigger to revisit:** the ritual getting missed in practice, or the next
-ops-focused epic.
+**Found in:** Epic 5a Task 03 review (2026-07-30), parked by operator ruling
+the same day. Filed here rather than under an epic because its trigger is the
+next campaign, not a code sweep.
+**Disposition:** Deferred to the next campaign (~2 months out). The sweep
+gathers its forensic rows with a SELECT that repeats the UPDATE's predicate
+verbatim inside one IMMEDIATE transaction, and a `debug_assert_eq!` pins
+"event set == recovered set". `debug_assert` compiles out of `--release`, which
+is the only build the campaign machine ever runs — so in production the
+invariant has **no runtime enforcement**. If a future edit de-syncs the two
+predicates, the sweep would keep reporting a recovered count while silently
+emitting a different set of events, and the forensic trail would lie precisely
+when it is being trusted to adjudicate a two-writer anomaly.
+**Operator ruling (2026-07-29):** do not harden mid-campaign; any fix should
+prefer a **DB-visible signal** (e.g. recording the mismatch where a query can
+find it) over a `tracing::warn!` — the operator runs in tmux and cannot scroll
+back, so log warnings are operationally invisible.
+**Trigger to revisit:** next-campaign hardening pass, or any edit to
+`sweep_stale_claims`' SELECT/UPDATE predicate pair (ADR-0024's Guidance already
+rejects adding a condition to either side).

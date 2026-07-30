@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -180,7 +181,16 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
 /// so leftover tmp files from crashed runs don't accumulate. The returned
 /// count reports ONLY files this sweep actually deleted; failures are
 /// warn-logged and not counted.
-pub fn cleanup_tmp_files(transcripts_root: &Path) -> Result<usize> {
+///
+/// Only tmps whose mtime is older than `older_than` are deleted: a tmp
+/// younger than the stale-claim window may belong to a live sibling process
+/// mid-[`atomic_write`] (two-instance deployment), and deleting it makes that
+/// sibling's rename fail — which aborts its whole batch run. A tmp older than
+/// the stale-claim window cannot belong to a live claim (the claim itself
+/// would have been swept). Unreadable mtime ⇒ skip + warn (never destroy on
+/// uncertainty); an mtime in the future (clock anomaly) counts as fresh. Fresh
+/// orphans from a crash survive one sweep and are collected next start.
+pub fn cleanup_tmp_files(transcripts_root: &Path, older_than: Duration) -> Result<usize> {
     if !transcripts_root.exists() {
         return Ok(0);
     }
@@ -199,6 +209,20 @@ pub fn cleanup_tmp_files(transcripts_root: &Path) -> Result<usize> {
                     .and_then(|s| s.to_str())
                     .is_some_and(|n| n.contains(".tmp"));
                 if is_tmp {
+                    let old_enough = match std::fs::metadata(&p).and_then(|m| m.modified()) {
+                        Ok(mtime) => match mtime.elapsed() {
+                            Ok(age) => age > older_than,
+                            // mtime in the future / clock anomaly: treat as fresh.
+                            Err(_) => false,
+                        },
+                        Err(e) => {
+                            tracing::warn!(path = %p.display(), error = %e, "tmp mtime unreadable; sparing file (never destroy on uncertainty)");
+                            false
+                        }
+                    };
+                    if !old_enough {
+                        continue;
+                    }
                     match std::fs::remove_file(&p) {
                         Ok(()) => removed += 1,
                         Err(e) => {
@@ -272,7 +296,7 @@ mod tests {
         // not be counted.
         std::fs::create_dir(shard.join("v4.txt.tmp")).unwrap();
 
-        let removed = cleanup_tmp_files(tmp.path()).unwrap();
+        let removed = cleanup_tmp_files(tmp.path(), Duration::ZERO).unwrap();
 
         assert_eq!(
             removed, 2,
@@ -281,6 +305,49 @@ mod tests {
         assert!(!shard.join("v1.txt.tmp").exists());
         assert!(!shard.join("v2.json.tmp-1234-7").exists());
         assert!(shard.join("v3.txt").exists());
+    }
+
+    /// Backdate a file's mtime so the age guard sees it as old.
+    fn set_mtime_secs_ago(path: &Path, secs: u64) {
+        let t = std::time::SystemTime::now() - Duration::from_secs(secs);
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_times(std::fs::FileTimes::new().set_modified(t))
+            .unwrap();
+    }
+
+    /// Epic 5a: a tmp younger than the stale-claim window may be a live
+    /// sibling process's in-flight `atomic_write` — it must survive the sweep.
+    #[test]
+    fn cleanup_spares_fresh_tmp_and_removes_old_tmp() {
+        let tmp = TempDir::new().unwrap();
+        let shard = tmp.path().join("ab");
+        std::fs::create_dir_all(&shard).unwrap();
+        let fresh = shard.join("v1.txt.tmp-1234-0");
+        let old = shard.join("v2.txt.tmp-5678-0");
+        std::fs::write(&fresh, b"x").unwrap();
+        std::fs::write(&old, b"x").unwrap();
+        set_mtime_secs_ago(&old, 3600);
+
+        let removed = cleanup_tmp_files(tmp.path(), Duration::from_secs(1800)).unwrap();
+        assert_eq!(removed, 1, "only the old tmp is collected");
+        assert!(
+            fresh.exists(),
+            "a fresh tmp may belong to a live sibling — spared"
+        );
+        assert!(!old.exists());
+    }
+
+    #[test]
+    fn cleanup_with_zero_threshold_keeps_prior_behavior() {
+        let tmp = TempDir::new().unwrap();
+        let shard = tmp.path().join("cd");
+        std::fs::create_dir_all(&shard).unwrap();
+        let tmp_file = shard.join("v3.json.tmp-1-1");
+        std::fs::write(&tmp_file, b"x").unwrap();
+        set_mtime_secs_ago(&tmp_file, 2);
+        let removed = cleanup_tmp_files(tmp.path(), Duration::ZERO).unwrap();
+        assert_eq!(removed, 1);
+        assert!(!tmp_file.exists());
     }
 
     #[test]
@@ -421,7 +488,7 @@ mod tests {
         std::fs::write(shard_dir.join("video.txt.tmp"), b"junk").unwrap();
         std::fs::write(shard_dir.join("video.txt"), b"real").unwrap();
 
-        let removed = cleanup_tmp_files(root).unwrap();
+        let removed = cleanup_tmp_files(root, Duration::ZERO).unwrap();
         assert_eq!(removed, 1);
         assert!(!shard_dir.join("video.txt.tmp").exists());
         assert!(shard_dir.join("video.txt").exists());

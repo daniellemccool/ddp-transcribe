@@ -155,6 +155,22 @@ pub enum Command {
             value_parser = clap::builder::RangedI64ValueParser::<i64>::new().range(0..=1_000_000)
         )]
         retries: i64,
+        /// Operator checkpoint hook: run this command every
+        /// --checkpoint-every while the batch is running (e.g.
+        /// ~/sync-to-storage.sh). Failures warn and count; they never
+        /// stop the run. Absent = no in-run checkpointing.
+        #[arg(long)]
+        checkpoint_cmd: Option<PathBuf>,
+        /// Interval between checkpoint hook runs, and the hook's own
+        /// timeout. Accepts humantime strings: "15m" (default), "1h".
+        /// Requires --checkpoint-cmd.
+        #[arg(
+            long,
+            default_value = "15m",
+            value_parser = humantime::parse_duration,
+            requires = "checkpoint_cmd"
+        )]
+        checkpoint_every: std::time::Duration,
     },
     /// Upgrade a pre-Epic-2 (v1) state.sqlite to the current schema version.
     /// Idempotent: no-op if already at the current version.

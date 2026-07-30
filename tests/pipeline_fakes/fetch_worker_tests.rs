@@ -73,6 +73,7 @@ async fn fetch_worker_drains_pending_rows_and_exits() -> anyhow::Result<()> {
                 .expect("default table"),
         ),
         retries: 1,
+        checkpoint: None,
     };
 
     let worker_handle = tokio::spawn(fetch_worker(
@@ -177,6 +178,7 @@ async fn fetch_worker_increments_stale_after_failure_on_swept_claim() -> anyhow:
                 .expect("default table"),
         ),
         retries: 1,
+        checkpoint: None,
     };
 
     let counter_handle = Arc::clone(&stats_stale_after_failure);
@@ -351,6 +353,7 @@ async fn fetch_worker_threads_cookies_on_sensitive_login_gated_retry() -> anyhow
                 .expect("default table"),
         ),
         retries: 1,
+        checkpoint: None,
     });
 
     let worker = tokio::spawn(fetch_worker(
@@ -494,6 +497,7 @@ async fn retry_requeues_then_recovers_in_same_batch() -> anyhow::Result<()> {
                 .expect("default table"),
         ),
         retries: 1,
+        checkpoint: None,
     };
 
     let stats = run_pipelined(Arc::clone(&shared), fetcher, transcriber, opts).await?;
@@ -562,6 +566,7 @@ async fn retry_exhausts_into_failed_retryable() -> anyhow::Result<()> {
                 .expect("default table"),
         ),
         retries: 1,
+        checkpoint: None,
     };
 
     let stats = run_pipelined(Arc::clone(&shared), fetcher, transcriber, opts).await?;
@@ -644,6 +649,7 @@ async fn requires_cookie_parks_without_cookies_and_requeues_with() -> anyhow::Re
         cookies_file: None,
         classification: table(),
         retries: 1,
+        checkpoint: None,
     };
     let stats = run_pipelined(Arc::clone(&shared), failing, transcriber, opts).await?;
     assert_eq!(stats.parked_for_cookies, 1, "parked, not requeued");
@@ -701,6 +707,7 @@ async fn requires_cookie_parks_without_cookies_and_requeues_with() -> anyhow::Re
         cookies_file: Some(cookie_path.clone()),
         classification: table(),
         retries: 1,
+        checkpoint: None,
     };
     let stats2 = run_pipelined(
         Arc::clone(&shared),
@@ -787,6 +794,7 @@ async fn fetch_worker_stale_terminal_claim_not_counted_in_census() -> anyhow::Re
                 .expect("default table"),
         ),
         retries: 1,
+        checkpoint: None,
     };
 
     let worker_handle = tokio::spawn(fetch_worker(
