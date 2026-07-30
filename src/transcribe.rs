@@ -378,14 +378,24 @@ const EXPECTED_BACKEND: ExpectedBackend = if cfg!(feature = "cuda") {
 /// What whisper.cpp's init log says actually happened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DetectedBackend {
-    /// whisper.cpp selected a GPU device; `device` is ggml's device name
-    /// (e.g. `CUDA0`) as it appears in the `using ... backend` line.
+    /// whisper.cpp selected a GPU device AND its backend initialized;
+    /// `device` is ggml's device name (e.g. `CUDA0`) as it appears in the
+    /// `using ... backend` line.
     Gpu { device: String },
+    /// whisper.cpp selected a GPU device but `ggml_backend_dev_init` failed
+    /// (whisper.cpp:1321-1324), so `whisper_backend_init_gpu` returned nullptr
+    /// and the caller fell silently through to ACCEL/CPU
+    /// (whisper.cpp:1332-1358). Kept distinct from `Cpu` because the operator's
+    /// remedy differs — a GPU was found, so this is a driver/runtime fault, not
+    /// a missing device — and because saying "no GPU found" here would be a lie.
+    /// Rejected by a CUDA build exactly like `Cpu`.
+    GpuInitFailed { device: String },
     /// whisper.cpp walked the device list and found no GPU — the silent
     /// fallback 0013 exists to catch.
     Cpu,
-    /// Neither line appeared. Not proof of anything, and therefore not proof
-    /// of GPU use: a CUDA build treats this as a failure (fail closed).
+    /// No verdict line appeared (including a log truncated before whisper.cpp
+    /// resolved a backend). Not proof of anything, and therefore not proof of
+    /// GPU use: a CUDA build treats this as a failure (fail closed).
     Unknown,
 }
 
@@ -402,10 +412,15 @@ impl std::fmt::Display for DetectedBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Gpu { device } => write!(f, "GPU backend {device}"),
+            Self::GpuInitFailed { device } => write!(
+                f,
+                "a CPU fallback after GPU backend {device} was selected but failed to start \
+                 (whisper.cpp logged `failed to initialize {device} backend`)"
+            ),
             Self::Cpu => write!(f, "CPU (whisper.cpp logged `no GPU found`)"),
             Self::Unknown => write!(
                 f,
-                "an unrecognized backend (no whisper_backend_init_gpu line in the init log)"
+                "an unrecognized backend (the init log reached no whisper_backend_init_gpu verdict)"
             ),
         }
     }
@@ -416,40 +431,77 @@ impl std::fmt::Display for DetectedBackend {
 /// suffix) logs the identical wording for ACCEL backends such as BLAS
 /// (whisper.cpp:1342), which are emphatically not GPUs.
 const GPU_BACKEND_LINE_PREFIX: &str = "whisper_backend_init_gpu: using ";
+/// `whisper_backend_init_gpu: failed to initialize CUDA0 backend`
+/// (whisper.cpp:1323). Note the ACCEL loop logs the SAME wording under the
+/// `whisper_backend_init:` prefix (whisper.cpp:1346); a BLAS failure must not
+/// be read as a GPU failure, hence the `_gpu`-anchored prefix here too.
+const GPU_BACKEND_FAILED_PREFIX: &str = "whisper_backend_init_gpu: failed to initialize ";
 const GPU_BACKEND_LINE_SUFFIX: &str = " backend";
 /// `whisper_backend_init_gpu: no GPU found` (whisper.cpp:1316).
 const NO_GPU_LINE: &str = "whisper_backend_init_gpu: no GPU found";
 
+/// Strip `<prefix>DEVICE backend` down to `DEVICE`.
+fn parse_backend_device<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    let device = line
+        .strip_prefix(prefix)?
+        .strip_suffix(GPU_BACKEND_LINE_SUFFIX)?;
+    (!device.is_empty()).then_some(device)
+}
+
 /// Parse whisper.cpp's captured init log into the backend it engaged.
 ///
 /// Pure and GPU-free, so the whole decision is unit-testable on a CPU box
-/// (see `backend_assertion_tests`). A positive GPU line wins outright — it is
-/// emitted only after whisper.cpp has actually selected a device.
+/// (see `backend_assertion_tests`).
+///
+/// This is an ORDERED parse, not a substring search, because `using X backend`
+/// is logged BEFORE `ggml_backend_dev_init` is even attempted
+/// (whisper.cpp:1320-1321). A `using X` line is therefore only a *pending*
+/// claim; it is retracted by a following `failed to initialize X backend`, on
+/// which whisper.cpp returns nullptr and its caller falls silently through to
+/// ACCEL/CPU. Treating the pending claim as proof would let a CUDA build pass
+/// this assertion while running on CPU — the precise failure 0013 exists to
+/// catch.
+///
+/// Precedence, most to least conclusive:
+///   1. a `using X` that survived to the end of the phase unretracted → `Gpu`
+///      (so a failed attempt followed by a later successful one still passes);
+///   2. otherwise a retracted attempt → `GpuInitFailed`;
+///   3. otherwise `no GPU found` → `Cpu`;
+///   4. otherwise → `Unknown` (fail closed; includes truncated logs).
 fn detect_backend(log: &str) -> DetectedBackend {
+    // The most recent unretracted `using X backend` claim.
+    let mut pending: Option<&str> = None;
+    // The most recent retracted claim, kept for the diagnostic.
+    let mut failed: Option<&str> = None;
     let mut saw_no_gpu = false;
 
     for line in log.lines() {
         let line = line.trim_end();
 
-        if let Some(rest) = line.strip_prefix(GPU_BACKEND_LINE_PREFIX) {
-            if let Some(device) = rest.strip_suffix(GPU_BACKEND_LINE_SUFFIX) {
-                if !device.is_empty() {
-                    return DetectedBackend::Gpu {
-                        device: device.to_string(),
-                    };
-                }
+        if let Some(device) = parse_backend_device(line, GPU_BACKEND_LINE_PREFIX) {
+            pending = Some(device);
+        } else if let Some(device) = parse_backend_device(line, GPU_BACKEND_FAILED_PREFIX) {
+            failed = Some(device);
+            // Retract only the claim this failure actually names. A failure
+            // naming some other device leaves an unrelated pending claim
+            // standing rather than silently invalidating it.
+            if pending == Some(device) {
+                pending = None;
             }
-        }
-
-        if line == NO_GPU_LINE {
+        } else if line == NO_GPU_LINE {
             saw_no_gpu = true;
         }
     }
 
-    if saw_no_gpu {
-        DetectedBackend::Cpu
-    } else {
-        DetectedBackend::Unknown
+    match (pending, failed, saw_no_gpu) {
+        (Some(device), _, _) => DetectedBackend::Gpu {
+            device: device.to_string(),
+        },
+        (None, Some(device), _) => DetectedBackend::GpuInitFailed {
+            device: device.to_string(),
+        },
+        (None, None, true) => DetectedBackend::Cpu,
+        (None, None, false) => DetectedBackend::Unknown,
     }
 }
 
@@ -478,12 +530,13 @@ fn check_backend(
     match (expected, detected) {
         (ExpectedBackend::Unconstrained, _)
         | (ExpectedBackend::Gpu, DetectedBackend::Gpu { .. }) => Ok(()),
-        (ExpectedBackend::Gpu, DetectedBackend::Cpu | DetectedBackend::Unknown) => {
-            Err(WhisperInitError::BackendMismatch {
-                expected: expected.to_string(),
-                detected: detected.to_string(),
-            })
-        }
+        (
+            ExpectedBackend::Gpu,
+            DetectedBackend::GpuInitFailed { .. } | DetectedBackend::Cpu | DetectedBackend::Unknown,
+        ) => Err(WhisperInitError::BackendMismatch {
+            expected: expected.to_string(),
+            detected: detected.to_string(),
+        }),
     }
 }
 
@@ -781,6 +834,12 @@ impl WhisperEngine {
                 let device_description = detect_device_description(&init_log);
                 let (backend, device) = match &detected {
                     DetectedBackend::Gpu { device } => ("GPU", device.as_str()),
+                    // The GPU was found and named but never started: report the
+                    // CPU reality, and keep the device so the audit line says
+                    // WHICH backend failed to come up.
+                    DetectedBackend::GpuInitFailed { device } => {
+                        ("CPU (GPU init failed)", device.as_str())
+                    }
                     DetectedBackend::Cpu => ("CPU", "none"),
                     DetectedBackend::Unknown => ("unknown", "none"),
                 };
@@ -1486,6 +1545,96 @@ whisper_backend_init: using BLAS backend
         assert_eq!(detect_backend(log), DetectedBackend::Cpu);
     }
 
+    /// The false-Gpu-positive gap. whisper.cpp logs `using X backend` BEFORE
+    /// calling `ggml_backend_dev_init` (whisper.cpp:1320-1321); when that call
+    /// fails it logs `failed to initialize X backend` and returns nullptr, and
+    /// the caller falls silently through to ACCEL/CPU (whisper.cpp:1332-1358).
+    /// Treating the `using` line as proof of GPU would let a CUDA build sail
+    /// past the assertion while running on CPU — exactly 0013's target class.
+    const CUDA_INIT_FAILED_LOG: &str = "\
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: flash attn = 1
+whisper_model_load: loading model
+ggml_cuda_init: found 1 CUDA devices:
+  Device 0: NVIDIA A10, compute capability 8.6, VMM: yes
+whisper_backend_init_gpu: device 0: CUDA0 (type: 1)
+whisper_backend_init_gpu: found GPU device 0: CUDA0 (type: 1, cnt: 0)
+whisper_backend_init_gpu: using CUDA0 backend
+whisper_backend_init_gpu: failed to initialize CUDA0 backend
+whisper_init_state: kv self size  =    3.15 MB
+";
+
+    #[test]
+    fn detect_backend_rejects_a_gpu_whose_backend_init_failed() {
+        assert_eq!(
+            detect_backend(CUDA_INIT_FAILED_LOG),
+            DetectedBackend::GpuInitFailed {
+                device: "CUDA0".to_string()
+            }
+        );
+        let err = check_backend(ExpectedBackend::Gpu, &detect_backend(CUDA_INIT_FAILED_LOG))
+            .expect_err("a failed GPU backend init is a silent CPU fallback — must hard-fail");
+        match err {
+            WhisperInitError::BackendMismatch { detected, .. } => {
+                assert!(
+                    detected.contains("CUDA0") && detected.contains("failed to initialize"),
+                    "the error must name the failure the operator has to act on: {detected}"
+                );
+            }
+            other => panic!("expected BackendMismatch, got {other:?}"),
+        }
+    }
+
+    /// Ordered parse, not "any failure poisons the log": a failed attempt
+    /// followed by a LATER successful GPU selection is a working GPU.
+    #[test]
+    fn detect_backend_accepts_a_gpu_selected_after_an_earlier_failure() {
+        let log = "\
+whisper_backend_init_gpu: using CUDA0 backend
+whisper_backend_init_gpu: failed to initialize CUDA0 backend
+whisper_backend_init_gpu: using CUDA1 backend
+whisper_init_state: kv self size  =    3.15 MB
+";
+        assert_eq!(
+            detect_backend(log),
+            DetectedBackend::Gpu {
+                device: "CUDA1".to_string()
+            }
+        );
+        check_backend(ExpectedBackend::Gpu, &detect_backend(log))
+            .expect("a GPU that did initialize satisfies a CUDA build");
+    }
+
+    /// The ACCEL loop reuses the failure wording too (whisper.cpp:1346) under
+    /// the `whisper_backend_init:` prefix. A BLAS failure says nothing about
+    /// the GPU verdict — here, CPU.
+    #[test]
+    fn detect_backend_ignores_an_accel_backend_init_failure() {
+        let log = "\
+whisper_backend_init_gpu: no GPU found
+whisper_backend_init: using BLAS backend
+whisper_backend_init: failed to initialize BLAS backend
+";
+        assert_eq!(detect_backend(log), DetectedBackend::Cpu);
+    }
+
+    /// Fail closed on a log that stops before whisper.cpp reaches a verdict:
+    /// device enumeration alone proves nothing, and `Unknown` is rejected by
+    /// the CUDA assertion.
+    #[test]
+    fn detect_backend_reads_a_truncated_init_log_as_unknown() {
+        let log = "\
+whisper_init_with_params_no_state: use gpu    = 1
+ggml_cuda_init: found 1 CUDA devices:
+  Device 0: NVIDIA A10, compute capability 8.6, VMM: yes
+whisper_backend_init_gpu: device 0: CUDA0 (type: 1)
+whisper_backend_init_gpu: found GPU device 0: CUDA0 (type: 1, cnt: 0)
+";
+        assert_eq!(detect_backend(log), DetectedBackend::Unknown);
+        check_backend(ExpectedBackend::Gpu, &detect_backend(log))
+            .expect_err("an unresolved init log is not proof of GPU use");
+    }
+
     #[test]
     fn detect_device_description_extracts_the_cuda_device_name() {
         assert_eq!(
@@ -1534,6 +1683,9 @@ whisper_backend_init: using BLAS backend
             DetectedBackend::Cpu,
             DetectedBackend::Unknown,
             DetectedBackend::Gpu {
+                device: "CUDA0".to_string(),
+            },
+            DetectedBackend::GpuInitFailed {
                 device: "CUDA0".to_string(),
             },
         ] {
