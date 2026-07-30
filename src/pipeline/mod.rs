@@ -92,14 +92,10 @@ pub struct ProcessOptions {
     /// main.rs and consumed below.
     pub stale_claim_threshold: Duration,
     /// 0027: default 3; flag-tunable via --download-workers. Consumed by
-    /// T15-T18 when the pipelined orchestrator is wired; suppressed until
-    /// then per 0002.
-    #[allow(dead_code)]
+    /// `run_pipelined` when sizing the fetch-worker pool.
     pub download_workers: usize,
     /// 0027: default 2; flag-tunable via --channel-capacity. Consumed by
-    /// T15-T18 when the pipelined orchestrator is wired; suppressed until
-    /// then per 0002.
-    #[allow(dead_code)]
+    /// `run_pipelined` when sizing the fetch→transcribe channel.
     pub channel_capacity: usize,
     /// Netscape-format cookie file, flag-tunable via `--cookies-file`
     /// (Epic 3 T08). Threaded to `fetcher.acquire` ONLY on claims whose
@@ -396,11 +392,8 @@ pub(crate) async fn fetch_and_decode(
 /// ([`write_artifacts_durable`] then [`mark_after_artifacts`] — the 0008
 /// ordering owner) directly, so it can keep the store lock off the
 /// durable writes; after T18 the pipelined worker no longer routes
-/// through this outer wrapper. Kept for `run_serial` (integration tests).
-///
-/// 0002: paired with `run_serial`'s suppression; bin doesn't reach
-/// this after T18.
-#[allow(dead_code)]
+/// through this outer wrapper. Kept for `run_serial` (integration tests),
+/// which reaches it through `process_one`.
 pub(crate) async fn transcribe_and_write(
     store: &mut Store,
     transcriber: &dyn Transcriber,

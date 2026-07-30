@@ -15,8 +15,14 @@ pub fn shard(video_id: &str) -> &str {
 }
 
 /// Returns `{transcripts_root}/{shard}/` (does NOT create the directory).
-// consumed by T13/T14 (ingest-cmd, process-cmd)
-#[allow(dead_code)]
+///
+/// UNUSED: `pipeline::write_artifacts` open-codes the same
+/// `transcripts_root.join(shard(id))` join rather than calling this, so the
+/// only caller is this module's own unit test. FOLLOWUPS E8 rules this a
+/// deletion (fn + its unit test), scheduled for Epic 5b Task 09 — it is out of
+/// scope for Task 04, which only removed the stale dead-code suppression that
+/// falsely named T13/T14 as consumers. Task 09 decides delete-vs-wire against
+/// 0004's single-source-of-truth guidance.
 pub fn shard_dir(transcripts_root: &Path, video_id: &str) -> PathBuf {
     transcripts_root.join(shard(video_id))
 }

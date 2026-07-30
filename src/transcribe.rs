@@ -293,14 +293,16 @@ pub(crate) struct TranscribeRequest {
     pub reply: oneshot::Sender<Result<TranscribeOutput, TranscribeError>>,
 }
 
-// 0002: BackendMismatch is constructed by T13's backend-assertion path;
-// suppress dead_code until then.
+// 0013: `BackendMismatch` is deliberately unconstructed — the startup
+// backend assertion is an accepted-but-unimplemented decision, and whoever
+// next touches engine init lands it. The variant is the reserved error shape
+// for that check, not an oversight. No suppression is needed: the variant is
+// reachable public API, so the lint never fires on it.
 #[derive(Debug, thiserror::Error)]
 pub enum WhisperInitError {
     #[error("loading whisper model from {path}: {detail}")]
     ModelLoad { path: String, detail: String },
 
-    #[allow(dead_code)]
     #[error(
         "backend mismatch: expected GPU but whisper.cpp engaged CPU fallback (sharp-edges.md:61)"
     )]
@@ -357,9 +359,15 @@ pub struct WhisperEngine {
     /// Counter incremented each time the worker thread lazily allocates
     /// `lang_state` (at most once per worker lifetime). Always present so the
     /// worker capture doesn't branch on a feature flag; only **read** outside
-    /// the worker via the `test-helpers` getter below. 0002: `dead_code`
-    /// is allowed because the field is constructed and written-to in the
-    /// worker (via a cloned `Arc`) but only read in test-helpers builds.
+    /// the worker via the `test-helpers` getter below.
+    // 0002: this allow survives the Epic 5b purge. The field is private and
+    // written-to via a cloned `Arc` in the worker, but its only reader is
+    // `WhisperEngine::lang_state_allocations` below, gated on
+    // `feature = "test-helpers"` — so a default build genuinely has no read
+    // and fires `dead_code`. The named consumer is `tests/transcribe_lang_state.rs`
+    // (0005/0016). Deleting this allow requires the counter to gain a
+    // production reader; `#[expect]` is not an option because the deadness is
+    // configuration-dependent (0002 Guidance).
     #[allow(dead_code)]
     lang_state_allocations: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -816,13 +824,9 @@ impl WhisperEngine {
     /// to assert the lazy lifecycle (0 for non-opt-in workers; exactly 1 for
     /// opt-in workers regardless of request count). 0016: the counter is
     /// the only piece of the lazy lifecycle exposed outside the worker thread.
-    ///
-    /// 0002/0005: `dead_code` is allowed because workspace-level
-    /// `--features test-helpers` activates this getter on the bin compilation
-    /// path too, but only integration tests call it — matches the
-    /// `Store::get_video_for_test` / `EventRow` pattern in `src/state/mod.rs`.
+    /// Gated per 0005 — matches the `Store::get_video_for_test` / `EventRow`
+    /// pattern in `src/state/mod.rs`.
     #[cfg(feature = "test-helpers")]
-    #[allow(dead_code)]
     pub fn lang_state_allocations(&self) -> usize {
         self.lang_state_allocations
             .load(std::sync::atomic::Ordering::Relaxed)

@@ -231,10 +231,8 @@ pub struct FetchedItem {
 /// `stats_stale_after_failure` and continue, do NOT return Err. T18
 /// merges this counter into `ProcessStats` after worker drain.
 ///
-/// T18: `run_pipelined` is the in-bin caller; the prior
-/// `#[allow(dead_code)]` placeholder is lifted as part of this wiring
-/// per 0002. Integration tests in `tests/pipeline_fakes/fetch_worker_tests.rs`
-/// continue to exercise it directly.
+/// `run_pipelined` is the production caller (T18). Integration tests in
+/// `tests/pipeline_fakes/fetch_worker_tests.rs` also exercise it directly.
 #[allow(clippy::too_many_arguments)] // one worker; each Arc counter/handle is a distinct sink
 pub async fn fetch_worker(
     token: CancellationToken,
@@ -512,11 +510,9 @@ pub async fn fetch_worker(
 /// worker increments `stats_stale_after_success` and continues — this
 /// is the success-side counterpart to `stats_stale_after_failure`.
 ///
-/// T18: `run_pipelined` is the in-bin caller; the prior
-/// `#[allow(dead_code)]` placeholder is lifted as part of this wiring
-/// per 0002. Integration tests in
-/// `tests/pipeline_fakes/transcribe_worker_tests.rs` continue to exercise
-/// it directly.
+/// `run_pipelined` is the production caller (T18). Integration tests in
+/// `tests/pipeline_fakes/transcribe_worker_tests.rs` also exercise it
+/// directly.
 #[allow(clippy::too_many_arguments)] // one worker; each Arc counter is a distinct sink
 pub async fn transcribe_worker(
     token: CancellationToken,

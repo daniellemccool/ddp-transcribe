@@ -20,28 +20,23 @@ pub mod labels {
     pub const TRANSCRIBE_OTHER: &str = "TranscribeOther";
 }
 
-// 0002: lifted in Epic 3 T07 — constructed within classify_fetch_error/
-// classify_transcribe_error, both reached from `main()` via the pipeline
-// dispatch this task wires.
+// Constructed within classify_fetch_error/classify_transcribe_error, both
+// reached from the pipeline dispatch.
 #[derive(Debug, Clone)]
 pub struct FailureContext {
-    // 0002: `tool`/`exit_code`/`signal` are populated for every verdict but
-    // only read by `Debug` (dead-code analysis ignores derived-trait reads,
-    // per rustc's own diagnostic). Nothing reconstructs a `FailureContext`
-    // to display them: the start-of-batch sweep classifies the *stored*
-    // message text directly via the classification table's `classify`, and
-    // both the sweep and run censuses aggregate on the label string only —
-    // there is no raw tool/exit_code/signal display anywhere. Still
-    // genuinely dead; re-tagged rather than lifted. Revisit if a future task
-    // adds an operator-facing raw-context view.
-    #[allow(dead_code)]
+    // `tool`/`exit_code`/`signal` are populated for every verdict but only
+    // read back through `Debug`. Nothing reconstructs a `FailureContext` to
+    // display them: the start-of-batch sweep classifies the *stored* message
+    // text directly via the classification table's `classify`, and both the
+    // sweep and run censuses aggregate on the label string only — there is no
+    // raw tool/exit_code/signal display anywhere. Retained as the structured
+    // diagnostic payload behind `Debug`; an operator-facing raw-context view
+    // would be their first non-`Debug` reader.
     pub tool: &'static str,
-    #[allow(dead_code)]
     pub exit_code: Option<i32>,
     /// Unix signal that killed the tool, when applicable. Not read by the
     /// classifiers themselves or by the start-of-batch sweep/run census
     /// (see note above).
-    #[allow(dead_code)]
     pub signal: Option<i32>,
     pub stderr_excerpt: String,
     /// Which rule matched — audit trail for "why was this row written off".
@@ -52,8 +47,8 @@ impl FailureContext {
     /// Message written to last_retryable_message / terminal_message. Leads
     /// with the matched rule so operators can grep verdicts, keeps the raw
     /// excerpt so nothing is lost.
-    // 0002: lifted in Epic 3 T07 — dispatch calls this to build the
-    // message/reason text persisted to state columns.
+    // Dispatch calls this to build the message/reason text persisted to
+    // state columns.
     pub fn message(&self) -> String {
         format!("[{}] {}", self.classification_reason, self.stderr_excerpt)
     }
@@ -70,13 +65,11 @@ impl FailureContext {
 pub enum ClassifiedFailure {
     Retryable {
         label: String,
-        // 0002: populated by every Retryable arm (classify_fetch_error's
-        // ToolFailed match on Disposition::RequiresCookie is the only arm
-        // that sets this true) but not yet read by any dispatch site —
-        // `fetch_worker`/`transcribe_worker`/`run_serial` all bind it as
-        // `requires_cookie: _`. Epic 4a T04/T06 consume it via
-        // `record_fetch_failure`; lift then.
-        #[allow(dead_code)]
+        // Populated by every Retryable arm (classify_fetch_error's ToolFailed
+        // match on Disposition::RequiresCookie is the only arm that sets this
+        // true) and read by the pipelined workers, which thread it into
+        // `Store::record_fetch_failure` to park cookie-needing rows when no
+        // cookies are configured.
         requires_cookie: bool,
         ctx: FailureContext,
     },
@@ -89,11 +82,10 @@ pub enum ClassifiedFailure {
     },
 }
 
-// 0002: lifted in Epic 3 T07 — called by `classify_fetch_phase`
-// (`src/pipeline/mod.rs`), reached from `main()` via `fetch_worker`/
-// `run_serial`'s dispatch. Epic 4a T03: the `ToolFailed` arm's message
-// classification now consults the operator-editable `ClassificationTable`
-// instead of a hardcoded `classify_message` chain.
+// Called by `classify_fetch_phase` (`src/pipeline/mod.rs`), reached from the
+// dispatch path via `fetch_worker`/`run_serial`. Epic 4a T03: the `ToolFailed`
+// arm's message classification consults the operator-editable
+// `ClassificationTable` instead of a hardcoded `classify_message` chain.
 pub fn classify_fetch_error(e: &FetchError, table: &ClassificationTable) -> ClassifiedFailure {
     let ctx = |exit_code: Option<i32>, signal: Option<i32>, excerpt: &str, reason: &'static str| {
         FailureContext {

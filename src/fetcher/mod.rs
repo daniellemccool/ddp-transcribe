@@ -66,9 +66,8 @@ pub struct FetchOpts {
 /// stored verbatim in `video_metadata_raw`. Produced on success AND
 /// tool-failure paths; absent on structural failures (timeout/spawn/io).
 ///
-/// Task 03 wired both pipeline paths to read the field into
-/// `Store::upsert_metadata_raw` before outcome dispatch, lifting the
-/// placeholder `#[allow(dead_code)]` per 0002.
+/// Both pipeline paths read the field into `Store::upsert_metadata_raw`
+/// before outcome dispatch (0042).
 #[derive(Debug, Clone)]
 pub struct MetadataCapture {
     pub envelope_json: String,
@@ -97,10 +96,8 @@ pub trait VideoFetcher: Send + Sync {
 }
 
 // Cfg-gated test fixture per 0005; consumed by the tests/pipeline_fakes/
-// test files. Bin compilation also gets the feature when --features
-// test-helpers is enabled, hence the dead_code suppression.
+// test files.
 #[cfg(any(test, feature = "test-helpers"))]
-#[allow(dead_code)]
 pub struct FakeFetcher {
     pub canned: std::sync::Mutex<std::collections::HashMap<String, std::path::PathBuf>>,
     /// When true, `acquire` always returns `FetchError::NetworkError` regardless
@@ -140,7 +137,6 @@ pub struct FakeFetcher {
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
-#[allow(dead_code)]
 impl FakeFetcher {
     /// Construct a `FakeFetcher` that fails every `acquire` call. Used by T9's
     /// continue-on-failure test in `tests/pipeline_fakes/serial_tests.rs`.

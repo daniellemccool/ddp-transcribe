@@ -17,14 +17,13 @@ use crate::fetcher::VideoFetcher;
 use crate::state::{Claim, FailureRecordOutcome, Store};
 use crate::transcribe::Transcriber;
 
-// 0002: T18 swapped main.rs's Process arm to `run_pipelined`, so this
-// helper is no longer reached from the bin. It stays exercised by the
-// integration tests in `tests/pipeline_fakes/serial_tests.rs` (serial's
-// behavioral contract — retryable classification + StaleAfterSuccess — is
-// part of the helper-shared invariants documented in `mod.rs`). Suppress
-// dead_code until a follow-up either retires the helper or restores a
-// bin caller.
-#[allow(dead_code)]
+// T18 swapped the Process dispatch arm to `run_pipelined`, so this helper is
+// no longer on the production path. It stays exercised by the integration
+// tests in `tests/pipeline_fakes/serial_tests.rs` (serial's behavioral
+// contract — retryable classification + StaleAfterSuccess — is part of the
+// helper-shared invariants documented in `mod.rs`), which reach it through
+// `pipeline`'s re-export. Retiring the helper or restoring a behind-a-flag
+// caller is a FOLLOWUPS item.
 pub async fn run_serial(
     store: &mut Store,
     fetcher: &dyn VideoFetcher,
@@ -251,8 +250,8 @@ fn record_fetch_failure_serial(
 /// helpers (T15): `fetch_and_decode` runs phases 1+2; `transcribe_and_write`
 /// runs phases 3+4 and owns the 0008 artifact-before-mark_succeeded
 /// invariant (plus the StaleAfterSuccess branch).
-// 0002 paired with `run_serial`: same lift-on-restore conditions apply.
-#[allow(dead_code)]
+// Reached only through `run_serial` (and this file's own tests); shares its
+// retire-or-restore fate.
 async fn process_one(
     store: &mut Store,
     fetcher: &dyn VideoFetcher,

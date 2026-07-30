@@ -22,11 +22,10 @@ pub(crate) fn unix_now() -> i64 {
 
 /// Test-only helper for verifying row state. Not part of the public API; gated
 /// to test compilation only.
-// Cfg-gated to `any(test, feature = "test-helpers")`. When clippy/clippy-style
-// tests run with `--features test-helpers`, the bin compilation also gets the
-// feature and includes this struct, but never references it — hence dead_code.
+// Cfg-gated to `any(test, feature = "test-helpers")` per 0005; read by the
+// `tests/pipeline_fakes/` and `tests/state_*.rs` suites via
+// `Store::get_video_for_test`.
 #[cfg(any(test, feature = "test-helpers"))]
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct VideoRow {
     pub video_id: String,
@@ -63,10 +62,9 @@ pub struct ParkedRow {
     /// preserve-kind-on-fallback fix made this field a live read.)
     pub last_retryable_kind: Option<String>,
     pub last_retryable_message: Option<String>,
-    // 0002: `#[allow(dead_code)]` lifted (Epic 4b Task 03) — the
-    // `status --retryable` renderer is the first bin consumer since Epic 4a
-    // T08 deleted the triage subcommand (its `run_triage` compared this
-    // against `--max-attempts`).
+    // Read by the `status --retryable` renderer (Epic 4b Task 03) — the first
+    // consumer since Epic 4a T08 deleted the triage subcommand (its
+    // `run_triage` compared this against `--max-attempts`).
     pub attempt_count: i64,
 }
 
@@ -162,10 +160,10 @@ impl Store {
         Ok(result)
     }
 
-    // No bin consumer; only the cfg(test) `pragma_journal_mode_is_wal`
-    // integration test calls this. Visibility/API decision deferred per
-    // FOLLOWUPS (`Store::pragma_string` visibility) and 0002.
-    #[allow(dead_code)]
+    // No production consumer; `tests/state_open.rs`'s
+    // `pragma_journal_mode_is_wal` is the only caller. Whether this should be
+    // `test-helpers`-gated instead of plain `pub` is deferred per FOLLOWUPS
+    // (`Store::pragma_string` visibility).
     pub fn pragma_string(&self, name: &str) -> Result<String> {
         let value: String = self
             .conn
@@ -189,21 +187,14 @@ impl Store {
         &self.conn
     }
 
-    // T9 (store-ingest) and T10 (store-claims) are the first consumers.
-    #[allow(dead_code)]
-    pub(crate) fn conn_mut(&mut self) -> &mut Connection {
-        &mut self.conn
-    }
-
     /// Returns the number of rows actually inserted (1 for new, 0 for an
     /// idempotent re-upsert of an existing row). Symmetric with
     /// `upsert_watch_history`.
     ///
     /// Single-statement convenience wrapper retained for the integration tests
     /// (`tests/state_ingest.rs`); the production `ingest` walk uses the batched
-    /// transaction path ([`Store::transaction`] + [`upsert_video_tx`]). The tests
-    /// link the lib, but the bin no longer calls this, hence `dead_code` per 0002.
-    #[allow(dead_code)]
+    /// transaction path ([`Store::transaction`] + [`upsert_video_tx`]), so
+    /// `tests/state_ingest.rs` and `tests/pipeline_fakes/` are its only callers.
     pub fn upsert_video(
         &mut self,
         video_id: &str,
@@ -221,8 +212,8 @@ impl Store {
         Ok(changed)
     }
 
-    /// Convenience sibling of [`Store::upsert_video`]; see its note re: 0002.
-    #[allow(dead_code)]
+    /// Convenience sibling of [`Store::upsert_video`]; see its note on the
+    /// production path. Called only by `tests/state_ingest.rs`.
     pub fn upsert_watch_history(
         &mut self,
         respondent_id: &str,
@@ -423,16 +414,14 @@ pub struct Claim {
     /// "SensitiveLoginGated" (ADR 0035); the start-of-batch sweep's requeue
     /// normalizes historical placeholder kinds before the row becomes
     /// claimable again.
-    // 0002: `#[allow(dead_code)]` lifted here (Task 08) — now read by
-    // `pipeline::cookie_opts_for`'s kind-gated cookie routing.
+    // Read by `pipeline::cookie_opts_for`'s kind-gated cookie routing.
     pub last_retryable_kind: Option<String>,
 }
 
 /// Outcome of `record_fetch_failure`'s one-transaction decision (Epic 4a):
 /// where did the failed row land, and did anything change at all.
-// 0002: `#[allow(dead_code)]` lifted in Epic 4a T06 — the pipelined workers
-// (via the shared record-failure helper) and `record_fetch_failure_serial`
-// match on every variant.
+// The pipelined workers (via the shared record-failure helper) and
+// `record_fetch_failure_serial` match on every variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureRecordOutcome {
     /// Row went back to 'pending' (end of queue via T05 ordering).
@@ -606,9 +595,7 @@ impl Store {
     /// Callers treat failures as best-effort (log + continue): metadata
     /// must never change a video's pipeline outcome.
     ///
-    /// Task 03 wired both pipeline paths (`fetch_worker` and
-    /// `process_one`) as the first real callers, lifting the placeholder
-    /// `#[allow(dead_code)]` per 0002.
+    /// Both pipeline paths (`fetch_worker` and `process_one`) call this.
     pub fn upsert_metadata_raw(&mut self, video_id: &str, envelope_json: &str) -> Result<usize> {
         let now = unix_now();
         let changed = self
@@ -715,14 +702,12 @@ impl Store {
     // ("FetchOrTranscribe" per 0023); Epic 3 T07 replaced the placeholder
     // with typed classifier dispatch (`RetryableKind::tag()`).
     //
-    // 0002: Epic 4a T06 switched every pipeline caller (fetch_worker,
-    // transcribe_worker, run_serial) to `record_fetch_failure`, so the bin
-    // no longer reaches this mutator. Integration tests
-    // (`tests/state_claims.rs`, `tests/state_sweep.rs`) still exercise it
-    // directly as a failed_retryable seeding helper, hence dead_code-suppressed
-    // rather than deleted. (Epic 4a T08 checked at triage retirement: retained —
-    // the direct-mutator tests still depend on it.)
-    #[allow(dead_code)]
+    // Epic 4a T06 switched every pipeline caller (fetch_worker,
+    // transcribe_worker, run_serial) to `record_fetch_failure`, so no
+    // production path reaches this mutator. Integration tests
+    // (`tests/state_claims.rs`, `tests/state_sweep.rs`) exercise it directly
+    // as a failed_retryable seeding helper — retained for them, re-checked at
+    // Epic 4a T08's triage retirement and again in the Epic 5b allow purge.
     pub fn mark_retryable_failure(
         &mut self,
         video_id: &str,
@@ -794,8 +779,7 @@ impl Store {
     /// 0006 note: the `Result<usize>` row-count contract is honored
     /// internally — each UPDATE's row count drives the outcome; the typed
     /// enum IS the row-count information, made unambiguous for the caller.
-    // 0002: `#[allow(dead_code)]` lifted in Epic 4a T06 — first callers:
-    // fetch_worker + transcribe_worker (via the shared pipelined
+    // Callers: fetch_worker + transcribe_worker (via the shared pipelined
     // record-failure helper) and run_serial's `record_fetch_failure_serial`.
     #[allow(clippy::too_many_arguments)] // one logical decision; every arg participates
     pub fn record_fetch_failure(
@@ -902,8 +886,7 @@ impl Store {
     /// returns `ClassifiedFailure::Unavailable` (ADR 0033 write-off classes:
     /// `IpBlockedMessage`, `VideoNotAvailable10231`) — a row that will never
     /// succeed on retry. Epic 2 landed the surface with no caller so Epic 3's
-    /// diff would be a classifier-add task, not a mutator-add task; the
-    /// `#[allow(dead_code)]` that held that placement is lifted here per 0002.
+    /// diff would be a classifier-add task, not a mutator-add task.
     ///
     /// The `last_retryable_kind`/`last_retryable_message` columns are NOT
     /// cleared on this flip — they're retained as diagnostic history so an
@@ -1180,8 +1163,8 @@ impl Store {
     /// identity-creating INSERT — there is no predicate to miss, and the
     /// product the caller needs is the generated run_id itself, not a count
     /// that would always be 1.
-    // 0002: `#[allow(dead_code)]` lifted in Epic 4a T07 — main()'s Process
-    // arm calls this before engine construction (fail fast on policy).
+    // The Process dispatch arm calls this before engine construction (fail
+    // fast on policy).
     pub fn open_batch_run(&mut self, params_json: &str, policy_toml: &str) -> Result<i64> {
         let now = unix_now();
         self.conn
@@ -1197,8 +1180,8 @@ impl Store {
     /// Close a batch-run record with its census. Returns the row-change
     /// count per 0006 (0 = unknown run_id or already closed by predicate
     /// miss — callers log, never panic).
-    // 0002: `#[allow(dead_code)]` lifted in Epic 4a T07 — main()'s Process
-    // arm calls this after run_pipelined resolves, via `shared.try_lock()`.
+    // The Process dispatch arm calls this after run_pipelined resolves, via
+    // `shared.try_lock()`.
     pub fn close_batch_run(&mut self, run_id: i64, census_json: &str) -> Result<usize> {
         let now = unix_now();
         self.conn
@@ -1260,10 +1243,9 @@ impl Store {
 }
 
 impl Store {
-    // Cfg-gated test helper; same bin-firing dynamic as `VideoRow` above when
-    // `--features test-helpers` is enabled at the workspace level.
+    // Cfg-gated test helper per 0005; called by `tests/pipeline_fakes/` and
+    // the `tests/state_*.rs` suites.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(dead_code)]
     pub fn get_video_for_test(&self, video_id: &str) -> Result<Option<VideoRow>> {
         let row = self
             .conn
@@ -1291,9 +1273,8 @@ impl Store {
 }
 
 /// A row from `video_events`, returned by `get_events_for_test`.
-// Cfg-gated test helper per 0005; fires dead_code in bin compilation when --features test-helpers is enabled.
+// Cfg-gated test helper per 0005.
 #[cfg(any(test, feature = "test-helpers"))]
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct EventRow {
     pub event_type: String,
@@ -1303,8 +1284,8 @@ pub struct EventRow {
 #[cfg(any(test, feature = "test-helpers"))]
 impl Store {
     /// Retrieve all `video_events` rows for a given video_id, ordered by id.
-    // Cfg-gated test helper per 0005; same bin-firing dynamic as EventRow above.
-    #[allow(dead_code)]
+    // Cfg-gated test helper per 0005; called by `tests/state_retry.rs` and
+    // `tests/state_claims.rs`.
     pub fn get_events_for_test(&self, video_id: &str) -> Result<Vec<EventRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT event_type, worker_id FROM video_events WHERE video_id = ?1 ORDER BY id",

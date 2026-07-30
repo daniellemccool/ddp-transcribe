@@ -168,13 +168,9 @@ fn build_yt_dlp_args(
 /// to simulation (same as the fetch argv). Deliberately takes no
 /// cookies parameter — the backfill cohort is succeeded videos, and
 /// cookies ride only SensitiveLoginGated retries (ADR-0035).
-// 0002: consumed by `src/backfill.rs`, which is bin-only (`mod backfill;`
-// lives in main.rs, not lib.rs) — so the lib compilation never sees a
-// caller and fires dead_code on this `pub(crate)` item. Permanent for as
-// long as the backfill loop stays bin-only; nothing lifts it. (Widening
-// to `pub` would silence the lint via the pub-item exemption, but that
-// trades an honest allow for a wider library API.)
-#[allow(dead_code)]
+// Consumed by `backfill::run_backfill_metadata`. 0045 made `lib.rs` the
+// single module root, so the lib compilation now sees that caller and the
+// item stays `pub(crate)` with no suppression.
 pub(crate) fn build_metadata_only_args(source_url: &str) -> Vec<String> {
     vec![
         "--no-playlist".to_string(),

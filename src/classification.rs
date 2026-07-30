@@ -54,19 +54,15 @@ struct RawTable {
 }
 
 /// Immutable, validated classification policy. Shared with workers via Arc.
-// 0002: lifted in Epic 4a T03 — constructed by `main()`'s Process arm and
-// consumed throughout `failure::classify_fetch_error` /
-// `pipeline::cookie_opts_for`.
+// Constructed by the Process dispatch arm and consumed throughout
+// `failure::classify_fetch_error` / `pipeline::cookie_opts_for`.
 #[derive(Debug)]
 pub struct ClassificationTable {
     rules: Vec<RawRule>,
     fallback: RawFallback,
     by_label: HashMap<String, Disposition>,
-    // 0002: populated for every table but only read by `source_toml()`,
-    // which nothing calls yet — Epic 4a T07 will read it to snapshot the
-    // active policy into `batch_runs.policy_toml`. Still genuinely dead
-    // from main()'s perspective; lift alongside `source_toml` then.
-    #[allow(dead_code)]
+    // Populated for every table; read by `source_toml()`, which the status
+    // renderer and the `batch_runs.policy_toml` snapshot both call.
     source: String,
 }
 
@@ -177,16 +173,14 @@ impl ClassificationTable {
         self.by_label.get(label).copied()
     }
 
-    // 0002: consumed by Epic 4a T07 (`batch_runs.policy_toml` snapshot);
-    // lift when it lands. Exercised today only by classification.rs's own
-    // `#[cfg(test)]` module.
-    #[allow(dead_code)]
+    // Consumed by `status.rs`'s policy render and the
+    // `batch_runs.policy_toml` snapshot (`tests/batch_census.rs`).
     pub fn source_toml(&self) -> &str {
         &self.source
     }
 
-    // 0002: `#[allow(dead_code)]` lifted in Epic 4a T06 — main()'s Process
-    // arm logs `rule_count()` on the "classification policy active" line.
+    // The Process dispatch arm logs `rule_count()` on the "classification
+    // policy active" line.
     pub fn rule_count(&self) -> usize {
         self.rules.len()
     }
@@ -195,8 +189,7 @@ impl ClassificationTable {
 /// The compiled-in default policy. Every rule carries its evidence citation;
 /// this text is also what lands in `batch_runs.policy_toml` when no
 /// `--classification` override is given.
-// 0002: `#[allow(dead_code)]` lifted in Epic 4a T06 — `compiled_default()`
-// (bin-live after CLI wiring) parses this const.
+// `compiled_default()` parses this const.
 pub const DEFAULT_TABLE_TOML: &str = r#"# ddp-transcribe classification policy (compiled default)
 # Ordered, first-match-wins, exact case-sensitive substrings. Evidence:
 # 65k pilot corpus + oEmbed probe census 2026-07-07 (n=7,087); ADR 0033

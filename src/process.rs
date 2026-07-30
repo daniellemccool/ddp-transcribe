@@ -47,7 +47,10 @@ pub struct CommandOutcome {
     /// (`ExitStatus::code() == None`). Distinguishes OOM-kill (SIGKILL)
     /// from segfault (SIGSEGV) from operator interrupt (SIGINT).
     pub signal: Option<i32>,
-    #[allow(dead_code)]
+    /// Wall-clock duration of the child run. Populated on every outcome but
+    /// currently read back only through `Debug` — the fetch/backfill call
+    /// sites log their own spans. Kept as part of the outcome record so a
+    /// per-tool timing report needs no signature change.
     pub elapsed: Duration,
 }
 
