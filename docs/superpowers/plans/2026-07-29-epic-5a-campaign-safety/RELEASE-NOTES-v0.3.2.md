@@ -57,10 +57,11 @@ catalog pipeline_git_ref -> v0.3.2.
 
 **Verification behind these claims** (branch `feat/epic-5a-campaign-safety`,
 commits `fd54fea`, `130c8a1`, `9e61b99`, `31c18df`, `0cb20f7`, `11a2500`,
-plus this doc commit): `cargo fmt` + `cargo clippy --all-targets -- -D
-warnings` + `cargo test --features test-helpers -- --test-threads=1` — **344
-passed / 0 failed / 10 ignored** (summed across all `test result:` lines;
-+14 over v0.3.1's 330, all from this slice's new tests).
+this doc commit, and the final-review fix `d345fac`): `cargo fmt` + `cargo
+clippy --all-targets -- -D warnings` + `cargo test --features test-helpers
+-- --test-threads=1` — **345 passed / 0 failed / 10 ignored** (summed across
+all `test result:` lines; +15 over v0.3.1's 330, all from this slice's new
+tests, including the busy-timeout lock-contention proof test).
 
 **Post-tag doc pass:**
 
