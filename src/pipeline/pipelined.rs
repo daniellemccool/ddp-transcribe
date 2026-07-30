@@ -351,13 +351,21 @@ pub async fn fetch_worker(
                     // record the accurate tag instead of recomputing.
                     fetch_policy_tag: fetch_opts.format_policy.tag(),
                 };
-                if sender.send(item).await.is_err() {
+                if let Err(unsent) = sender.send(item).await {
                     // Channel closed — transcribe_worker exited (panic or
-                    // shutdown). Bug-class signal up to the orchestrator;
-                    // the attempt dir is on disk and the claim remains
-                    // in_progress until the next sweep recovers both (the
-                    // item — and with it the cleanup handle — died with the
-                    // closed channel, so the `.work` sweep is the collector).
+                    // shutdown). Bug-class signal up to the orchestrator.
+                    //
+                    // Epic 5b: `SendError` hands the un-sent item BACK, so
+                    // this branch still owns the cleanup handle — take it and
+                    // discard. This is a live-run branch, not crash residue:
+                    // whenever the transcribe worker exits first (e.g. its own
+                    // `TranscribeError::Bug`), every fetch worker with an
+                    // in-flight `send` lands here, and dropping the item
+                    // silently would leak one attempt dir apiece until the
+                    // next process start. Nothing wants those bytes — the row
+                    // stays `in_progress`, and the sweep-and-reclaim path
+                    // re-fetches into a fresh dir.
+                    unsent.0.audio.discard();
                     tracing::error!(
                         worker = %worker_id,
                         "fetch_worker: channel closed; transcribe_worker has exited"

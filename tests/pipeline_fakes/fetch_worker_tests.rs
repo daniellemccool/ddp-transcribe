@@ -850,3 +850,97 @@ async fn fetch_worker_stale_terminal_claim_not_counted_in_census() -> anyhow::Re
     assert_eq!(row.status, "failed_terminal");
     Ok(())
 }
+
+/// Epic 5b (task-07 review finding): when the transcribe worker has already
+/// exited, `sender.send(item)` fails and hands the un-sent `FetchedItem`
+/// back. That item still owns the attempt dir, so the worker must discard it
+/// before escalating — otherwise every fetch worker racing the channel close
+/// leaks one attempt dir until the next process start.
+///
+/// Deterministic without any gating: drop the receiver BEFORE the worker
+/// runs, so the very first `send` lands in the closed-channel branch.
+#[tokio::test]
+async fn fetch_worker_discards_attempt_dir_when_channel_is_closed() -> anyhow::Result<()> {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, Mutex as TokioMutex};
+    use tokio_util::sync::CancellationToken;
+
+    use ddp_transcribe::pipeline::{fetch_worker, FetchedItem, ProcessOptions, SharedStore};
+
+    let tmp = TempDir::new()?;
+    let mut store = Store::open(&tmp.path().join("state.sqlite"))?;
+    store.upsert_video("vid_a", "https://example/a", false)?;
+
+    // Staged the way the real fetcher hands one over: the wav lives in an
+    // `ytdlp-`-named dir, so the FakeFetcher reports it as the attempt dir.
+    let attempt_dir = tmp.path().join(".work/ytdlp-vid_a.4242-0");
+    std::fs::create_dir_all(&attempt_dir)?;
+    let wav = attempt_dir.join("vid_a.wav");
+    std::fs::copy(silence_fixture(), &wav)?;
+
+    let fetcher = FakeFetcher {
+        canned: Mutex::new(HashMap::from([("vid_a".to_string(), wav)])),
+        always_fails: false,
+        first_call_gate: tokio::sync::Mutex::new(None),
+        canned_stderr: std::sync::Mutex::new(None),
+        received_opts: std::sync::Mutex::new(Vec::new()),
+        fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
+        canned_metadata: std::sync::Mutex::new(None),
+    };
+
+    let shared: SharedStore = Arc::new(TokioMutex::new(store));
+    let (tx, rx) = mpsc::channel::<FetchedItem>(2);
+    drop(rx); // transcribe_worker has exited: the channel is closed.
+
+    let opts = ProcessOptions {
+        worker_id: "fetcher-1".into(),
+        transcripts_root: tmp.path().join("transcripts"),
+        max_videos: None,
+        compute_lang_probs: false,
+        transcribe_timeout: Duration::from_secs(5),
+        stale_claim_threshold: Duration::from_secs(60),
+        download_workers: 3,
+        channel_capacity: 2,
+        cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
+        retries: 1,
+        checkpoint: None,
+    };
+
+    let result = fetch_worker(
+        CancellationToken::new(),
+        Arc::clone(&shared),
+        Arc::new(fetcher),
+        tx,
+        Arc::new(AtomicUsize::new(0)), // stale_after_failure
+        Arc::new(AtomicUsize::new(0)), // requeued_for_retry
+        Arc::new(AtomicUsize::new(0)), // exhausted_retries
+        Arc::new(AtomicUsize::new(0)), // parked_for_cookies
+        Arc::new(AtomicUsize::new(0)), // failed
+        Arc::new(tokio::sync::Mutex::new(std::collections::BTreeMap::new())), // terminal_by_label
+        Arc::new(AtomicUsize::new(0)), // claims_counter
+        Arc::new(opts),
+    )
+    .await;
+
+    let err = result.expect_err("a closed channel escalates as Err");
+    assert!(
+        err.to_string().contains("channel closed"),
+        "error names the closed channel: {err:#}"
+    );
+    assert!(
+        !attempt_dir.exists(),
+        "the un-sent item's attempt dir must be discarded, not leaked to the next \
+         process start's sweep"
+    );
+
+    // The row stays `in_progress` — restart recovery re-claims and re-fetches,
+    // which is why keeping those bytes has no recovery value.
+    let (status, _) = status_and_retryable_kind(&shared, "vid_a").await;
+    assert_eq!(status, "in_progress");
+    Ok(())
+}
