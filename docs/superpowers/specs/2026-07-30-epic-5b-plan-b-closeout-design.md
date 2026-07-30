@@ -20,9 +20,11 @@ workspace can be updated for live feedback runs (e.g. the CUDA smoke below);
 the live campaign machine is never touched.
 
 **Housekeeping note:** `feat/perf-tweaks` is fully merged (tip is an
-ancestor of main) — no conflict risk; the stale worktree/branch can be
-cleaned up at any time. The stale `plan-b-epic-4b` worktree likewise, after
-the same ancestry check.
+ancestor of main) — no conflict risk. Stale-worktree removal requires BOTH
+the ancestry check AND a worktree/untracked-artifact inspection first: the
+`plan-b-epic-4b` worktree's tip is an ancestor of main but it holds an
+untracked `ddp-run-export.sqlite` that must be dispositioned (keep/move)
+before any removal.
 
 ## Approach
 
@@ -49,12 +51,17 @@ build joins the gate so it is actually exercised.
    `metadata_loader` — declared there; files do not physically move, so ADR
    `applies_to` globs and doc path references stay valid). **Public façade**
    (binary-facing API is part of the public surface — a package binary is a
-   separate crate and cannot see `pub(crate)`):
-   - `pub use cli::Cli` (re-export for parsing);
-   - `pub async fn dispatch(cli: Cli) -> Result<CommandExit>` in a lib
-     `commands` module, where `CommandExit` carries the process-exit
-     semantics currently inlined in main (`exit(3)` when a batch claims
-     zero videos, `exit(1)` on a failed pause-safety verify);
+   separate crate and cannot see `pub(crate)`), bound exactly at the crate
+   root:
+   - `pub use cli::{Cli, LogFormat};`
+   - `pub use commands::{dispatch, CommandExit};`
+     (`pub async fn dispatch(cli: Cli) -> Result<CommandExit>`, where
+     `CommandExit` carries the process-exit semantics currently inlined in
+     main: `exit(3)` when a batch claims zero videos, `exit(1)` on a failed
+     pause-safety verify);
+   - `Cli`'s `global`/`command` fields (and `GlobalArgs.log_format`) stay
+     public: main must read the log format to init tracing BEFORE handing
+     `Cli` to `dispatch`;
    - `main.rs` owns argument parsing, tracing init, error rendering, and
      the final `std::process::exit` — the library never calls `exit`.
    `run_serial` is **retained** in Phase 1 (deleting it during a
@@ -96,15 +103,24 @@ Command contract (binding content for the ADR and implementation):
 
 - **Name:** `requeue-failures` (`requeue-retryables` would be misleading
   once terminal rows are eligible).
-- **Default eligibility:** `failed_retryable`. Terminal rows require an
-  explicit `--include-terminal` **plus at least one narrowing selector**;
-  `--all` means all retryables, never terminals.
-- **Default-deny:** a bare invocation is an error — at least one selector
-  or an explicit `--all` is required.
-- **Selectors:** `--error-kinds <K,K,…>`, `--max-attempts <N>` (restored
-  from the sketch: skip rows with `attempt_count >= N`), `--older-than
-  <DUR>`, `--max <N>` (deterministic ordering specified in the ADR),
-  `--dry-run`.
+- **Default eligibility:** `failed_retryable`. `--all` means all
+  retryables, never terminals.
+- **Selector grammar (strict):**
+  - *Qualifying selectors* — `--error-kind <K>` (repeatable, one kind per
+    flag: custom classification labels may legally contain commas, so no
+    comma-splitting), `--max-attempts <N>` (skip rows with
+    `attempt_count >= N`), `--older-than <DUR>`.
+  - *Modifiers that never grant eligibility* — `--max <N>` (deterministic
+    ordering specified in the ADR), `--dry-run`.
+  - *Default-deny*: a bare invocation is an error — at least one
+    qualifying selector or an explicit `--all` is required; modifiers
+    alone never satisfy this.
+  - *Terminal rows*: `--include-terminal` requires at least one qualifying
+    terminal selector in addition; `--include-terminal --all` and
+    `--include-terminal --max N` are rejected.
+  - *Kind matching*: retryable `--error-kind` matches
+    `last_retryable_kind`; terminal matching uses `terminal_reason`, never
+    a retained retryable kind.
 - **`--older-than` source (operator ruling):** `last_failure_at :=
   MAX(video_events.at)` over the failure-event allowlist —
   `failed_retryable`, `failed_terminal`, `retry_requeued`, `cookie_parked`
@@ -115,13 +131,14 @@ Command contract (binding content for the ADR and implementation):
   not match. Tests pin the allowlist, including that `swept_terminal` does
   not reset the clock. `videos.updated_at` is not touched (preserves the
   INSERT-OR-IGNORE row-count contract, ADR-0006).
-- **State transition:** eligible rows → `pending`. `attempt_count` is never
-  reset or decremented — the command grants eligibility for another claim
-  while preserving history. `last_retryable_*` and terminal fields are
-  retained.
+- **State transition:** eligible rows → `pending`, defensively clearing
+  `claimed_by`/`claimed_at`. `attempt_count` is never reset or decremented
+  — the command grants eligibility for another claim while preserving
+  history. `last_retryable_*` and terminal fields are retained.
 - **Forensics:** one `operator_requeued` event per row carrying prior
-  status, prior kind/reason, attempt count, and operator attribution
-  (hostname-derived, consistent with 5a).
+  status, prior kind/reason, attempt count, and the exact attribution
+  value `operator:<hostname>-<pid>` (distinct from the sweep's literal
+  `worker_id = 'sweep'`).
 - **Sequencing:** the transition intentionally happens before — and
   therefore bypasses — the start-of-batch sweep; after the forced claim,
   ordinary ADR-0036 behavior resumes. Documented: additional *automatic*
@@ -129,27 +146,31 @@ Command contract (binding content for the ADR and implementation):
   existing `attempt_count`.
 - **Contract details the ADR must also fix:** transaction boundary,
   dry-run output, zero-match exit behavior, case/custom-label matching for
-  `--error-kinds`, deterministic `--max` ordering.
+  `--error-kind`, deterministic `--max` ordering.
 
 **`reset-stale-claims` is dropped as superseded** (operator ruling
 2026-07-30): the startup stale-claim sweep recovers claims at every process
-start with per-row `swept_stale` forensics since 5a. Its FOLLOWUPS entry is
-archived citing that supersession.
+start with per-row `swept_stale` forensics since 5a. It has no active
+FOLLOWUPS entry (it exists only in planning sketches) — the disposition
+matrix records it as a superseded sketch item; nothing is archived.
 
 ### Fetch hardening bundle
 
 - `YtDlpFetcher::acquire` output-discovery hardening with explicit
-  **freshness + uniqueness rules**: the fetcher reuses a persistent
-  per-video work directory, so discovery must use one of (a) a fresh
-  per-attempt directory, (b) pre-run cleanup plus exactly-one-result
-  validation, or (c) parsing yt-dlp's reported final path — chosen at plan
-  time; stale-file, zero-result, and multiple-result cases all tested.
+  **freshness + uniqueness rules**: the fetcher currently reuses a
+  persistent `ytdlp-{video_id}` work directory. A **fresh unique
+  per-acquire directory is required** (pre-run cleanup is NOT acceptable —
+  it can delete another process's live output; path-parsing alone still
+  permits reusing an old file at the same path), combined with either
+  exactly-one-WAV validation or parsing yt-dlp's reported final path;
+  stale-file, zero-result, and multiple-result cases all tested.
 - `FetchOpts` derived `Debug` cookie-path redaction; `scrub_cookie_path`
   empty-path guard.
-- Multi-fetcher provenance: **verify-and-archive, not implementation** —
-  `VideoFetcher::name`/`Transcriber::name` and pipelined item stamping
-  already exist; confirm nothing in the FOLLOWUPS body remains, archive
-  with evidence.
+- Multi-fetcher provenance: **archive-integrity check only** — already
+  implemented (`VideoFetcher::name`/`Transcriber::name`, pipelined item
+  stamping) and already recorded as resolved in the archive; confirm the
+  code still matches the archived resolution. A regression becomes a NEW
+  active finding — never a second resolution appended to the archive.
 
 ### ADR-0013 backend assertion (implementation task, not audit)
 
@@ -191,9 +212,12 @@ workspace if needed). Review rejects softening the contract to a warning
   test-hardening bundles (Epic 3 list; v0.3.1 CLI list); T5-Epic1
   closed-reply logging fix (per its matrix row); PR #23 ingest-ledger
   hardening (per its matrix rows).
-- **Verify-then-archive audit:** `--whisper-model` global flag (likely
-  resolved by v0.3.1 clap-globals), `From<RunError> for FetchError` mapping
-  (Epic 3 leftover), plus whatever the matrix marks verify-and-archive.
+- **Archive-integrity checks (not re-archiving):** `--whisper-model`
+  global flag (archived @7dfa771) and `From<RunError> for FetchError`
+  (archived @9974d69) are already resolved in the archive — verify the
+  code still matches; a regression becomes a new active finding, never a
+  second resolution. The matrix's genuine verify-and-archive rows are only
+  entries still active in the scope index.
 - **Close-out:** FOLLOWUPS lifecycle per ADR-0020; documentation pass
   covering README, the operations runbook, state-machine/orchestration
   deepdives, and CLI examples (not only bin/lib-shape statements);
