@@ -198,11 +198,18 @@ pub fn cleanup_tmp_files(transcripts_root: &Path, older_than: Duration) -> Resul
     for entry in std::fs::read_dir(transcripts_root)
         .with_context(|| format!("reading transcripts root {}", transcripts_root.display()))?
     {
-        let entry = entry?;
+        // Every inner failure carries the path it happened on: a
+        // permission-denied inside one shard dir used to reach the operator
+        // as a bare `io::Error` with nothing to act on.
+        let entry = entry
+            .with_context(|| format!("reading transcripts root {}", transcripts_root.display()))?;
         let path = entry.path();
         if path.is_dir() {
-            for shard_entry in std::fs::read_dir(&path)? {
-                let shard_entry = shard_entry?;
+            for shard_entry in std::fs::read_dir(&path)
+                .with_context(|| format!("reading shard dir {}", path.display()))?
+            {
+                let shard_entry =
+                    shard_entry.with_context(|| format!("reading shard dir {}", path.display()))?;
                 let p = shard_entry.path();
                 let is_tmp = p
                     .file_name()
@@ -265,7 +272,8 @@ pub fn cleanup_work_dirs(work_dir: &Path, older_than: Duration) -> Result<usize>
     for entry in std::fs::read_dir(work_dir)
         .with_context(|| format!("reading work dir {}", work_dir.display()))?
     {
-        let entry = entry?;
+        // Same path-context rule as `cleanup_tmp_files` above.
+        let entry = entry.with_context(|| format!("reading work dir {}", work_dir.display()))?;
         let path = entry.path();
         let is_attempt_dir = path
             .file_name()

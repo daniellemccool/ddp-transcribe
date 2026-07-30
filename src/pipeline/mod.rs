@@ -416,14 +416,36 @@ pub(crate) async fn fetch_and_decode(
     // per 0016.
     // Epic 4c: a decode failure still carries the capture — the envelope
     // was produced by the fetch that preceded it.
-    let samples = match audio::decode_wav(&fetched.wav_path) {
-        Ok(s) => s,
-        Err(e) => {
+    //
+    // Blocking-IO policy, class (c): a whole-file read plus the f32
+    // conversion is unbounded work and three fetch workers run it
+    // concurrently, so it goes to the blocking pool rather than holding a
+    // runtime thread. The handle is awaited immediately and the closure's
+    // `Result` is returned unchanged, so the error type, the message and the
+    // discard-then-return ordering below are exactly what the inline call
+    // produced. The one delta is cancellation granularity: `fetch_worker`
+    // runs this future inside its cancellation `select!`, so a shutdown can
+    // now land mid-decode and leave the attempt dir for the startup `.work`
+    // sweep — the same outcome a dropped `acquire` future already has.
+    let wav_path = fetched.wav_path.clone();
+    let decoded = tokio::task::spawn_blocking(move || audio::decode_wav(&wav_path)).await;
+    let samples = match decoded {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
             // Epic 5b: a wav we cannot decode is dead weight — the row
             // requeues and its retry re-fetches into a fresh attempt dir.
             fetched.discard();
             return (capture, Err(e.into()));
         }
+        Err(join) => match join.try_into_panic() {
+            // A panic inside the closure resumes unwinding here, so it
+            // propagates exactly as an inline `decode_wav` panic did.
+            Ok(payload) => std::panic::resume_unwind(payload),
+            // Nothing holds this handle to abort it, and a blocking task is
+            // never cancelled by the scheduler, so the non-panic JoinError
+            // has no producer.
+            Err(join) => unreachable!("spawn_blocking decode task cancelled: {join}"),
+        },
     };
 
     (capture, Ok((samples, fetched)))

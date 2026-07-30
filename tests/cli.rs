@@ -83,6 +83,10 @@ fn ingest_accepts_equal_window_start_and_end() {
     let tmp = tempfile::TempDir::new().unwrap();
     let db = tmp.path().join("state.sqlite");
     let inbox = tmp.path().join("inbox");
+    // The subject here is window parsing, not inbox tolerance: `ingest` now
+    // rejects a missing inbox root (an operator typo must not pass as an
+    // empty run), so give it a real, empty one.
+    std::fs::create_dir_all(&inbox).unwrap();
 
     Command::cargo_bin("ddp-transcribe")
         .unwrap()

@@ -606,15 +606,49 @@ pub async fn transcribe_worker(
                 // Phase 4a (0008 first half): durable artifact writes with
                 // NO store lock — the fsyncs must not serialize other
                 // workers' claim/failure dispatch behind this mutex.
-                let durable = write_artifacts_durable(
-                    &transcribe_output,
-                    &claim,
-                    samples_len,
-                    &opts,
-                    fetcher_name,
-                    transcriber.name(),
-                )
-                .with_context(|| format!("write_artifacts_durable for {}", claim.video_id));
+                //
+                // Blocking-IO policy, class (c): a mkdir plus two
+                // `atomic_write`s is three fsyncs, unbounded on a slow or
+                // networked artifacts volume, and the fetch workers are live
+                // — so the call (not the function: it stays sync and
+                // store-free per 0008) runs on the blocking pool.
+                // `transcribe_output` and `claim` are moved in and handed
+                // back out rather than cloned; the closure's `Result` is
+                // returned unchanged, so the context string, the discard, and
+                // the artifacts-before-`mark_after_artifacts` ordering are
+                // untouched. This adds no cancellation point: the
+                // orchestrator shuts workers down with `token.cancel()`, never
+                // `abort_all()`, so this future is never dropped mid-body.
+                let transcript_source = transcriber.name();
+                let opts_for_write = Arc::clone(&opts);
+                let written = tokio::task::spawn_blocking(move || {
+                    let durable = write_artifacts_durable(
+                        &transcribe_output,
+                        &claim,
+                        samples_len,
+                        &opts_for_write,
+                        fetcher_name,
+                        transcript_source,
+                    );
+                    (durable, transcribe_output, claim)
+                })
+                .await;
+                let (durable, transcribe_output, claim) = match written {
+                    Ok(t) => t,
+                    Err(join) => match join.try_into_panic() {
+                        // A panic inside the closure resumes unwinding here,
+                        // exactly as an inline `write_artifacts_durable` panic
+                        // did.
+                        Ok(payload) => std::panic::resume_unwind(payload),
+                        // Nothing holds this handle to abort it, and a
+                        // blocking task is never cancelled by the scheduler.
+                        Err(join) => {
+                            unreachable!("spawn_blocking artifact write cancelled: {join}")
+                        }
+                    },
+                };
+                let durable = durable
+                    .with_context(|| format!("write_artifacts_durable for {}", claim.video_id));
                 let duration_s = match durable {
                     Ok(d) => d,
                     Err(e) => {
@@ -639,7 +673,7 @@ pub async fn transcribe_worker(
                         &transcribe_output.language,
                         audio,
                         fetcher_name,
-                        transcriber.name(),
+                        transcript_source,
                         &opts,
                     )
                     .with_context(|| format!("mark_after_artifacts for {}", claim.video_id))?

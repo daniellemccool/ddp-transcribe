@@ -59,6 +59,7 @@ Load the ADR(s) whose filename matches the area you are touching.
 - [0027 — Orchestrator topology: 3 fetch workers feed 1 transcribe worker over a capacity-2 channel](./0027-orchestrator-topology-3-fetch-workers-feed-1-transcribe-worker-over-a-capacity-2-channel.md)
 - [0041 — status is the read-only operator surface; the 0017 done-contract lives behind --verify](./0041-status-is-the-read-only-operator-surface-the-0017-done-contract-lives-behind-verify.md)
 - [0044 — In-run checkpointing is an operator-supplied hook that can never abort the run](./0044-in-run-checkpointing-is-an-operator-supplied-hook-that-can-never-abort-the-run.md)
+- [0047 — Blocking IO on the worker hot path runs on spawn_blocking; inline only when nothing can be starved](./0047-blocking-io-on-the-worker-hot-path-runs-on-spawn-blocking-inline-only-when-nothing-can-be-starved.md)
 
 ### Failure classification
 
