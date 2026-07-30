@@ -29,6 +29,13 @@ tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
 
+# 0045: the binary is a separate crate from the library it calls into, so
+# cross-crate inlining across that boundary has to be enabled explicitly.
+# Thin LTO keeps that a non-question at a build-time cost small enough that
+# `cargo build --release` stays part of the verification gate.
+[profile.release]
+lto = "thin"
+
 [features]
 default = []
 cuda = ["whisper-rs/cuda"]

@@ -10,14 +10,23 @@ use clap::{Parser, Subcommand, ValueEnum};
 )]
 pub struct Cli {
     #[command(flatten)]
-    pub global: GlobalArgs,
+    pub(crate) global: GlobalArgs,
 
     #[command(subcommand)]
-    pub command: Command,
+    pub(crate) command: Command,
+}
+
+impl Cli {
+    /// The one field `main` needs before dispatch (0045): tracing init has to
+    /// run ahead of any library work, and this narrow accessor buys that
+    /// access without making `Cli`'s fields — or `GlobalArgs` — public API.
+    pub fn log_format(&self) -> LogFormat {
+        self.global.log_format
+    }
 }
 
 #[derive(Parser, Debug, Clone)]
-pub struct GlobalArgs {
+pub(crate) struct GlobalArgs {
     #[arg(long, value_enum, default_value_t = Profile::Dev, env = "DDP_TRANSCRIBE_PROFILE", global = true)]
     pub profile: Profile,
 
@@ -121,7 +130,7 @@ pub(crate) fn validate_window_order(
 }
 
 #[derive(Subcommand, Debug)]
-pub enum Command {
+pub(crate) enum Command {
     /// Create state.sqlite and apply schema. Idempotent.
     Init,
     /// Walk --inbox, parse DDP JSONs, upsert into videos and watch_history.
@@ -241,7 +250,7 @@ pub enum Command {
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Profile {
+pub(crate) enum Profile {
     Dev,
 }
 

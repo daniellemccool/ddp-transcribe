@@ -14,7 +14,7 @@ const PAGE_SIZE: usize = 10_000;
 
 /// Loader stats: input-side counters, verb-named (ADR-0007).
 #[derive(Debug, Default, Serialize)]
-pub struct LoadStats {
+pub(crate) struct LoadStats {
     /// Raw rows examined this pass.
     pub rows_examined: u64,
     /// Rows whose columns were written (dry-run counts them as loadable).
@@ -89,7 +89,7 @@ fn parse_envelope(video_id: &str, fetched_at: i64, raw_json: &str) -> Option<Met
 /// Idempotent and replayable: every pass overwrites the typed columns from
 /// the current blobs (last-write-wins). `dry_run` does the full
 /// examine/parse pass and reports real counts without writing.
-pub fn load_metadata(store: &mut Store, dry_run: bool) -> Result<LoadStats> {
+pub(crate) fn load_metadata(store: &mut Store, dry_run: bool) -> Result<LoadStats> {
     let mut stats = LoadStats::default();
     let mut after: Option<String> = None;
 
