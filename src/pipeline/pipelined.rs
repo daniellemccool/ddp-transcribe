@@ -17,7 +17,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    classify_fetch_phase, cookie_opts_for, fetch_and_decode, mark_after_artifacts,
+    acquire_audio, classify_fetch_phase, cookie_opts_for, decode_fetched, mark_after_artifacts,
     write_artifacts_durable, FetchedAudio, ProcessOptions, ProcessOutcome, ProcessStats,
 };
 use crate::errors::TranscribeError;
@@ -213,7 +213,7 @@ pub struct FetchedItem {
 /// already serializes the actual claim transaction at the connection
 /// level).
 ///
-/// **Cancellation latency (T16, closed out here).** The `fetch_and_decode`
+/// **Cancellation latency (T16, closed out here).** The `acquire_audio`
 /// future is wrapped in a `tokio::select!` against the `CancellationToken`,
 /// mirroring the transcribe-side wrap (a66d38b). When `token.cancel()`
 /// fires mid-fetch, the select arm wins and the in-flight `acquire` future
@@ -224,6 +224,12 @@ pub struct FetchedItem {
 /// loop top only, relying on `kill_on_drop` firing whenever the future was
 /// eventually dropped — correct but with unbounded latency during a long
 /// fetch).
+///
+/// The select covers the ACQUIRE half only (Epic 5b). Dropping that future
+/// cancels real work — a `Child` drop kills yt-dlp — whereas dropping the
+/// decode half would cancel nothing (`spawn_blocking` closures run to
+/// completion detached) while swallowing a panic the JoinSet should have
+/// seen, so `decode_fetched` is awaited unconditionally after the select.
 ///
 /// **Stale-after-failure handling (design amendment).** When a failure
 /// mutator returns `Ok(0)`, the row's claim was swept (or re-assigned)
@@ -261,7 +267,7 @@ pub async fn fetch_worker(
         }
 
         // Acquire the store guard ONLY for the claim transaction; drop it
-        // before the long-running fetch_and_decode below.
+        // before the long-running acquire + decode below.
         //
         // Honor --max-videos cap. The check, claim_next, and counter
         // increment are all inside this Mutex<Store> guard scope, so the
@@ -303,15 +309,26 @@ pub async fn fetch_worker(
         // shutdown drops the in-flight `acquire` future promptly (see the
         // docstring's Cancellation latency section) instead of relying on
         // the loop-top poll alone.
-        let fetch_result = tokio::select! {
+        //
+        // Epic 5b: the select covers `acquire_audio` ONLY, not the decode.
+        // Dropping the acquire future drops a `tokio::process::Child` and
+        // kills yt-dlp — real cancellation. Dropping the decode future would
+        // NOT cancel its `spawn_blocking` closure (tokio runs it to
+        // completion detached) and would swallow a panic that belongs to the
+        // JoinSet, so `decode_fetched` is awaited unconditionally below —
+        // which is also what the pre-wrap inline decode did.
+        let acquired = tokio::select! {
             biased;
             () = token.cancelled() => {
                 tracing::info!(worker = %worker_id, "fetch_worker: cancellation during fetch; exiting");
                 return Ok(());
             }
-            r = fetch_and_decode(fetcher.as_ref(), &claim, &fetch_opts) => r,
+            r = acquire_audio(fetcher.as_ref(), &claim, &fetch_opts) => r,
         };
-        let (metadata_capture, fetch_result) = fetch_result;
+        let (metadata_capture, fetch_result) = match acquired {
+            (capture, Ok(fetched)) => (capture, decode_fetched(fetched).await),
+            (capture, Err(e)) => (capture, Err(e)),
+        };
 
         // Epic 4c: persist the raw envelope BEFORE outcome dispatch so
         // mid-download deaths still leave metadata. Best-effort by

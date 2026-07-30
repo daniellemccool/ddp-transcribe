@@ -13,7 +13,10 @@
 //! Shared items live here so both submodules can call them without crossing
 //! a `pub(crate)` boundary twice:
 //! - [`ProcessOptions`], [`ProcessStats`], [`ProcessOutcome`], [`SharedStore`]
-//! - [`fetch_and_decode`] — phases 1+2 (acquire + decode WAV)
+//! - [`fetch_and_decode`] — phases 1+2 (acquire + decode WAV), and its two
+//!   halves [`acquire_audio`] / [`decode_fetched`], which `fetch_worker`
+//!   calls separately so its cancellation `select!` covers only the half
+//!   that a drop can actually cancel
 //! - [`transcribe_and_write`] — phases 3+4 (transcribe + write artifacts +
 //!   mark_succeeded + cleanup). 0008 invariant lives here: artifacts are
 //!   durable on disk BEFORE `mark_succeeded`.
@@ -352,14 +355,12 @@ pub(crate) fn cookie_opts_for(
     }
 }
 
-/// Phase 1+2: acquire the audio and decode it to f32 PCM samples.
+/// Phase 1: acquire the audio, no decode.
 ///
-/// Returns the owned samples + the [`FetchedAudio`] handle (the wav plus the
-/// attempt dir that holds it) — downstream owns that handle and removes the
-/// attempt dir after the DB commit, or discards it on a later failure.
-///
-/// Used by `run_serial`'s `process_one` AND (in Phase 2) by the fetch
-/// workers in `pipelined::fetch_worker`.
+/// Split out of [`fetch_and_decode`] (Epic 5b) because it is the ONLY half a
+/// caller may safely wrap in a cancellation `select!`: dropping this future
+/// mid-`acquire` drops a `tokio::process::Child`, which kills the yt-dlp
+/// subprocess. See [`decode_fetched`] for why its half must not be dropped.
 ///
 /// Returns a typed [`FetchPhaseError`] (rather than `anyhow::Result`, T15's
 /// original signature) so callers can classify the failure via
@@ -371,15 +372,15 @@ pub(crate) fn cookie_opts_for(
 /// policy, only threads the decision to `fetcher.acquire`.
 ///
 /// Epic 4c: the first tuple element is the raw metadata envelope the fetcher
-/// captured, if any. It is returned on EVERY path — including decode
-/// failures — so the caller can persist it before interpreting the outcome.
-pub(crate) async fn fetch_and_decode(
+/// captured, if any. It is returned on EVERY path so the caller can persist
+/// it before interpreting the outcome.
+pub(crate) async fn acquire_audio(
     fetcher: &dyn VideoFetcher,
     claim: &Claim,
     opts: &FetchOpts,
 ) -> (
     Option<crate::fetcher::MetadataCapture>,
-    Result<(Vec<f32>, FetchedAudio), FetchPhaseError>,
+    Result<FetchedAudio, FetchPhaseError>,
 ) {
     let (capture, acquisition) = fetcher
         .acquire(&claim.video_id, &claim.source_url, opts)
@@ -411,11 +412,26 @@ pub(crate) async fn fetch_and_decode(
         "audio acquired"
     );
 
+    (capture, Ok(fetched))
+}
+
+/// Phase 2: decode the acquired wav to f32 PCM samples.
+///
+/// **This future must NEVER be dropped — do not place it inside a
+/// cancellation `select!`.** Dropping a `spawn_blocking` `JoinHandle` does
+/// not cancel the closure: tokio runs it to completion detached, so a drop
+/// here would leave a decode reading the attempt dir with nobody to observe
+/// its outcome and would silently swallow a panic that used to propagate
+/// through the `JoinSet`. `fetch_worker` therefore selects over
+/// [`acquire_audio`] alone and awaits this half unconditionally, which is
+/// also exactly the pre-wrap behavior (an inline decode was never an await
+/// point, so cancellation could never land inside it).
+async fn decode_fetched(
+    fetched: FetchedAudio,
+) -> Result<(Vec<f32>, FetchedAudio), FetchPhaseError> {
     // Decode WAV → owned Vec<f32> samples (0014: 16 kHz mono validated
     // inside decode_wav). Owned samples cross the worker-thread boundary
     // per 0016.
-    // Epic 4c: a decode failure still carries the capture — the envelope
-    // was produced by the fetch that preceded it.
     //
     // Blocking-IO policy, class (c): a whole-file read plus the f32
     // conversion is unbounded work and three fetch workers run it
@@ -423,10 +439,7 @@ pub(crate) async fn fetch_and_decode(
     // runtime thread. The handle is awaited immediately and the closure's
     // `Result` is returned unchanged, so the error type, the message and the
     // discard-then-return ordering below are exactly what the inline call
-    // produced. The one delta is cancellation granularity: `fetch_worker`
-    // runs this future inside its cancellation `select!`, so a shutdown can
-    // now land mid-decode and leave the attempt dir for the startup `.work`
-    // sweep — the same outcome a dropped `acquire` future already has.
+    // produced.
     let wav_path = fetched.wav_path.clone();
     let decoded = tokio::task::spawn_blocking(move || audio::decode_wav(&wav_path)).await;
     let samples = match decoded {
@@ -435,20 +448,49 @@ pub(crate) async fn fetch_and_decode(
             // Epic 5b: a wav we cannot decode is dead weight — the row
             // requeues and its retry re-fetches into a fresh attempt dir.
             fetched.discard();
-            return (capture, Err(e.into()));
+            return Err(e.into());
         }
         Err(join) => match join.try_into_panic() {
             // A panic inside the closure resumes unwinding here, so it
             // propagates exactly as an inline `decode_wav` panic did.
             Ok(payload) => std::panic::resume_unwind(payload),
-            // Nothing holds this handle to abort it, and a blocking task is
-            // never cancelled by the scheduler, so the non-panic JoinError
-            // has no producer.
+            // This future is never dropped (see the docstring) and a blocking
+            // task is never cancelled by the scheduler, so the non-panic
+            // JoinError has no producer.
             Err(join) => unreachable!("spawn_blocking decode task cancelled: {join}"),
         },
     };
 
-    (capture, Ok((samples, fetched)))
+    Ok((samples, fetched))
+}
+
+/// Phase 1+2 composed: acquire the audio and decode it to f32 PCM samples.
+///
+/// Returns the owned samples + the [`FetchedAudio`] handle (the wav plus the
+/// attempt dir that holds it) — downstream owns that handle and removes the
+/// attempt dir after the DB commit, or discards it on a later failure.
+///
+/// Used by `run_serial`'s `process_one`, which has no cancellation token and
+/// wants the whole phase as one call. `pipelined::fetch_worker` calls the two
+/// halves directly so its cancellation `select!` covers [`acquire_audio`]
+/// only — see [`decode_fetched`]'s docstring for why that split is
+/// load-bearing rather than cosmetic.
+///
+/// Epic 4c: the metadata envelope is returned on EVERY path — including
+/// decode failures — so the caller can persist it before interpreting the
+/// outcome.
+pub(crate) async fn fetch_and_decode(
+    fetcher: &dyn VideoFetcher,
+    claim: &Claim,
+    opts: &FetchOpts,
+) -> (
+    Option<crate::fetcher::MetadataCapture>,
+    Result<(Vec<f32>, FetchedAudio), FetchPhaseError>,
+) {
+    match acquire_audio(fetcher, claim, opts).await {
+        (capture, Ok(fetched)) => (capture, decode_fetched(fetched).await),
+        (capture, Err(e)) => (capture, Err(e)),
+    }
 }
 
 /// Phase 3+4: transcribe → write artifacts → mark_succeeded → attempt-dir cleanup.

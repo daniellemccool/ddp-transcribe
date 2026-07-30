@@ -22,14 +22,19 @@ on `spawn_blocking` instead.
 ## Guidance
 
 - Classify a new `std::fs`/rusqlite call in an async fn before it lands.
-  **(c)** unbounded in bytes or entries (whole-file read/decode, fsync,
-  recursive delete) while `run_pipelined`'s workers are live ⇒
-  `spawn_blocking`; **(a)** nothing else runnable on the runtime (startup
-  sweep, single-task subcommand, `run_serial`) and **(b)** a bounded
-  constant-syscall unit (one `stat`/`mkdir`/`unlink`, a `read_dir` over a
-  directory only this process writes, a store call already serialized by
-  `Mutex<Store>`) ⇒ inline, with the class named in a comment. Review
-  rejects a naked class-(c) call.
+  **(c)** unbounded in bytes or entries (whole-file read/decode, fsync, a
+  `read_dir` or recursive delete over a tree whose size this process does not
+  fix) while `run_pipelined`'s workers are live ⇒ `spawn_blocking`; **(a)**
+  nothing else runnable on the runtime (startup sweep, single-task
+  subcommand, `run_serial`) and **(b)** a bounded constant-syscall unit (one
+  `stat`/`mkdir`/`unlink`, a `read_dir` or `remove_dir_all` over a directory
+  whose entire contents this process created for one video, a store call
+  already serialized by `Mutex<Store>`) ⇒ inline, with the class named in a
+  comment. Review rejects a naked class-(c) call.
+- The trigger is unboundedness, not the syscall's name. The same
+  `remove_dir_all` that is (b) over one attempt dir — depth 1, contents fixed
+  by this process, one video's worth — would be (c) over the whole `.work`
+  root, which is exactly why that sweep is startup-only.
 - A wrap is behavior-preserving or it is not a wrap: hand a large owned input
   back out of the closure's return value rather than cloning it (a `PathBuf`
   clone to keep a live struct intact is fine), `await` the handle
@@ -46,11 +51,15 @@ on `spawn_blocking` instead.
   async caller wraps the *call*, never the function. Both artifacts still
   land before `mark_after_artifacts`, and the durable writes still run
   outside the store lock.
-- A wrap adds an await point, and an await point inside a `select!` is a
-  cancellation point. `fetch_worker`'s decode is now cancellable — the
-  attempt dir is left to the startup `.work` sweep, the same outcome a
-  dropped `acquire` future already has. `transcribe_worker` is cancelled by
-  token only (never `abort_all`), so its wrap adds no new drop point.
+- A wrapped call must never sit inside a cancellation `select!`. Dropping a
+  `spawn_blocking` `JoinHandle` does NOT cancel the closure — tokio runs it to
+  completion detached and its panic is discarded instead of reaching the
+  `JoinSet` — so a "cancelled" wrap buys nothing and loses a fault signal.
+  `fetch_worker` selects over `acquire_audio` alone (dropping THAT future
+  drops a `Child` and really does kill yt-dlp) and awaits `decode_fetched`
+  unconditionally; `transcribe_worker` is cancelled by token only, never
+  `abort_all`, so it is never dropped mid-body. If a wrap cannot be kept out
+  of a `select!`, leave the call inline.
 
 ## Why
 
@@ -64,18 +73,17 @@ idle CPU, reads as a whisper problem rather than a disk one.
 
 Audit appendix (Epic 5b close-out, 2026-07-30). `main` is `#[tokio::main]`,
 so *every* blocking call in this crate is under the runtime — class (a) is
-"no other task to starve", not "outside the runtime". Line numbers are of
-that audit; the class is the durable part.
+"no other task to starve", not "outside the runtime". Sites are named by
+function rather than line so the table does not rot.
 
 | Site | Class | Rationale |
 | --- | --- | --- |
-| `pipeline/mod.rs:419` `audio::decode_wav` | **c** | whole-file read + f32 conversion, three fetch workers deep — **wrapped** |
-| `pipeline/pipelined.rs:609` `write_artifacts_durable` | **c** | mkdir + two `atomic_write`s = three fsyncs, unbounded on a slow volume — **wrapped** |
-| `pipeline/mod.rs:704` same call via `write_artifacts_and_mark` | a | `run_serial` is one task; nothing to starve |
-| `pipeline/mod.rs:626`, `pipelined.rs:271,323,398,437,634,729,898` store calls | b | rusqlite serialized by `Mutex<Store>` |
-| `fetcher/ytdlp.rs:245` `read_dir` in `find_single_wav` | b | fresh per-acquire dir, sole writer, a few entries |
-| `fetcher/ytdlp.rs:340` attempt-dir `create_dir_all` | b | one mkdir |
-| `fetcher/ytdlp.rs:288` `remove_attempt_dir`; `pipeline/mod.rs:90` wav `remove_file` | b | a handful of unlinks, best-effort, warn-logged |
-| `output/artifacts.rs:193`/`:260` sweeps via `commands.rs:99,110` | a | unbounded, but startup — no worker has spawned |
-| `commands.rs:56,96,105,122,584`; `ingest.rs:237,249,433`; `status.rs:235,256`; `Store::open`, `batch::run_sweep`, `metadata_loader` | a | single-task subcommands |
-| `transcribe.rs:795` model load; whisper inference | — | already off-runtime: dedicated OS thread + rendezvous channel |
+| `audio::decode_wav` in `pipeline::decode_fetched` | **c** | whole-file read + f32 conversion, three fetch workers deep — **wrapped**, and awaited outside the cancellation `select!` |
+| `write_artifacts_durable` call in `pipelined::transcribe_worker` | **c** | mkdir + two `atomic_write`s = three fsyncs, unbounded on a slow volume — **wrapped** |
+| same call via `pipeline::write_artifacts_and_mark` | a | `run_serial` is one task; nothing to starve |
+| `mark_after_artifacts` + the `pipelined` store calls | b | rusqlite serialized by `Mutex<Store>` |
+| `read_dir` in `ytdlp::find_single_wav`; `ytdlp::remove_attempt_dir`'s `remove_dir_all` | b | an attempt dir is bounded BY CONSTRUCTION, which is why the generic "recursive delete ⇒ (c)" reading does not reach it: the dir is created fresh per acquire, exactly one yt-dlp invocation ever writes into it, and it holds that invocation's output alone — one WAV plus its intermediates. Depth is 1 and the entry count is fixed by this process, so the scan and the delete are a handful of syscalls, not a walk of unknown size. Structurally it also cannot be wrapped: removal is reachable from `mark_after_artifacts`, which is sync and store-locked per the artifact-ordering record, so a wrap there would have to detach the task — trading a bounded inline unlink for an unobservable one racing the next acquire |
+| `ytdlp::acquire`'s attempt-dir `create_dir_all`; the wav `remove_file` in `FetchedAudio` | b | one mkdir; one unlink |
+| `artifacts::cleanup_tmp_files` / `cleanup_work_dirs` via `commands.rs` | a | genuinely unbounded (whole transcripts tree, whole `.work` root) — the reason they are startup-only, before any worker spawns |
+| `commands.rs` dir/config reads; `ingest`; `status`; `Store::open`, `batch::run_sweep`, `metadata_loader` | a | single-task subcommands |
+| whisper model load + inference | — | already off-runtime: dedicated OS thread + rendezvous channel |
