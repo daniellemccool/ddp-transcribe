@@ -1103,3 +1103,580 @@ from here.
 (`file has vanished: …/.work/…`), so until that script excludes `.work/` and
 treats exit 24 as success, `checkpoints_failed` will count benign cycles — see
 the runbook's checkpoint section.
+
+---
+
+## Resolved by Plan B Epic 5b — close-out slice / v0.4.0 (2026-07-30)
+
+Twenty-three entries closed by the Plan B close-out epic
+(`docs/superpowers/plans/2026-07-30-epic-5b-plan-b-closeout/`): twenty-one
+carried in `docs/followups/epic-5.md`, two in `docs/followups/cross-epic.md`.
+Every row's terminal disposition was fixed in advance by the epic's
+`DISPOSITION-MATRIX.md`, which also carries the five operator rulings recorded
+2026-07-30. Three rows are archived as **accepted** rather than fixed (the tmp
+sweep's TOCTOU window, and items 1–2 of the ingest file-ledger bundle) — the
+ruling, not a code change, is what makes them terminal. The remainder of the
+`T1 codex code-quality review` entry (0009, 0016, error-variant enumeration)
+was **re-routed** to `docs/followups/plan-c.md` rather than resolved, and is
+not archived here.
+
+### `Store::pragma_string` visibility is `pub`, not `pub(crate)`
+
+**Found in:** T7 code quality review (opus).
+**Disposition:** Defer to bin/lib structural reassessment (per ADR 0002).
+**Trigger to revisit:** Plan A reassessment point — when bin/lib pattern is decided.
+**Resolution:** `e3c9733`. Lowered to `pub(crate)`; the
+`pragma_journal_mode_is_wal` integration test reaches it through the
+`test-helpers` feature per ADR-0005. The blocked-on-0002 clause was discharged
+earlier in the epic: ADR-0045 settled the bin/lib question (thin binary, fat
+library, four-name façade), so "is this public library API?" now has an answer
+— it is not.
+
+`Store::pragma_string` builds `format!("PRAGMA {}", name)` because PRAGMA names
+cannot be parameterized in SQLite. Under `pub` visibility an external library
+consumer could pass an attacker-controlled or malformed name; the only caller
+was ever the integration test passing the literal `"journal_mode"`.
+
+---
+
+### `Store::read_meta` could use `OptionalExtension::optional()`
+
+**Found in:** T7 code quality review (opus).
+**Disposition:** Style improvement; defer indefinitely.
+**Trigger to revisit:** any future edit to `Store::read_meta`.
+**Resolution:** `e3c9733`. The `map_or_else` translation of
+`QueryReturnedNoRows` became the idiomatic
+`query_row(...).optional()` with the `OptionalExtension` trait. Pure refactor,
+no behavior change.
+
+---
+
+### `output::cleanup_tmp_files` minor cleanups: missing context, overcounted removals
+
+**Found in:** T8 code quality review (opus).
+**Disposition:** Cosmetic; bundle with the next real edit to this function.
+**Trigger to revisit:** any task that touches `cleanup_tmp_files`, or T15 (init-cmd) when wiring the call site.
+**Resolution:** item 2 by `964e9c2` (already recorded in the entry body below);
+item 1 and the 2026-07-29 sync-IO rider by `d55f5e0`. The inner
+`std::fs::read_dir(&path)` and the `entry?` / `shard_entry?` lines now carry
+path context, so a permission-denied inside one shard dir names the shard. The
+rider — `mark_after_artifacts` running sync rusqlite from an async fn — was
+adjudicated by the sync-IO audit that produced
+[ADR-0047](../decisions/0047-blocking-io-on-the-worker-hot-path-runs-on-spawn-blocking-inline-only-when-nothing-can-be-starved.md):
+the store call is class (b) (bounded, and the store mutex serializes it anyway),
+while the genuinely unbounded neighbour — `write_artifacts_durable`'s mkdir plus
+two `atomic_write` fsyncs — moved to `spawn_blocking`. `cleanup_tmp_files`
+itself is class (a): startup-only, before any worker spawns.
+
+Two small inconsistencies in `src/output/artifacts.rs::cleanup_tmp_files`:
+
+1. The inner `std::fs::read_dir(&path)?` and the surrounding `entry?` /
+   `shard_entry?` lines bubble up raw `io::Error` without path context. The
+   outer `read_dir(transcripts_root)` is contextualized via `with_context`.
+   On a permission-denied inside one shard dir, the operator gets a path-less
+   error.
+
+2. ~~`let _ = std::fs::remove_file(&p); removed += 1;` increments
+   unconditionally.~~ **Resolved by `964e9c2`** — `remove_file` is now
+   matched; `removed` increments only on `Ok(())`, and a failure logs
+   `tracing::warn!` without counting it. Test:
+   `cleanup_tmp_files_counts_only_real_deletions`
+   (`src/output/artifacts.rs`).
+
+**2026-07-29 triage:** carried from archived T17 ("Resolved by pre-production
+hardening — artifact write path"): `mark_after_artifacts`
+(`src/pipeline/mod.rs`) is sync rusqlite called from an async fn — include it
+when this function's sync-IO sweep is next touched.
+
+---
+
+### `output::shard_distributes_uniformly` test rationale is reversed
+
+**Found in:** T8 code quality review (opus).
+**Disposition:** Cosmetic; comment is misleading but the assertion still
+catches the stated regression.
+**Trigger to revisit:** any future edit to the test, or whenever a
+`VideoId` newtype absorbs `shard()` and the test moves with it.
+**Resolution:** `d55f5e0`. The reversed variance claim is gone: the comment now
+states that monotonic `base + i` input produces exactly 100 items per bucket
+(so the ±50% bound passes with zero margin) and that real Snowflake low bits
+would be *looser*, not tighter — Poisson-like, ~10% std dev over 10k samples.
+The load-bearing `counts.len() == 100` assertion, which is what actually catches
+a high-digits implementation, is unchanged.
+
+`src/output/mod.rs::shard_distributes_uniformly` uses monotonic counter input
+(`base + i` for `i in 0..10000`), which produces exactly 100 items per
+last-two-digits bucket. The ±50% assertion (`50..=150`) passes with a margin of
+0%, not because the bound is "lenient for synthetic input" as the comment
+claimed. The comment said "real Snowflake IDs would be tighter" — that is
+reversed.
+
+---
+
+### `videos.updated_at` is frozen at first-seen by `upsert_video`
+
+**Found in:** T9 code quality review (opus).
+**Disposition:** Accepted for T9; re-evaluate as T10/T13 land.
+**Trigger to revisit:** T10 (`claim_next` / `mark_succeeded`), T13 (ingest cmd),
+or any future Store mutator that touches a `videos` row.
+**Resolution:** `e3c9733`, under the operator ruling recorded in the epic's
+Phase-0 disposition matrix: **`updated_at` records lifecycle-mutation time, and
+a no-op ingest is clock-neutral.** `INSERT OR IGNORE` stays and the column keeps
+its name — re-ingesting the same DDP export must not rewrite the column for
+millions of unchanged rows. The contract is now written down in
+`docs/reference/architecture/state-machine.md`, which enumerates the bumpers
+(`claim_next`, `mark_succeeded`, `mark_retryable_failure`,
+`record_fetch_failure` both arms, `mark_terminal_failure`, `sweep_stale_claims`,
+`sweep_mark_terminal`, `sweep_requeue`) and the deliberate non-bumpers
+(`requeue_failures` per ADR-0046, `apply_metadata_batch`). Task 10 pinned
+re-ingest neutrality with a test and verified the lifecycle mutators bump it.
+
+`Store::upsert_video` binds the same `now` to both `first_seen_at` and
+`updated_at`; on a re-upsert neither column is written. The naming reading
+("when was this row last touched") therefore only holds for rows that have
+moved at all — which the ruling makes explicit rather than renaming the column.
+
+---
+
+### `Store::conn` / `Store::conn_mut` accessor hygiene after T10
+
+**Found in:** T9 code quality review, re-confirmed in T10 review (opus).
+**Disposition:** Cleanup commit, or fold into 0002's bin/lib reassessment.
+**Trigger to revisit:** Plan A reassessment point, or any task that genuinely
+needs `&Connection` / `&mut Connection` outside `Store`'s own `impl`.
+**Resolution:** `88c8bc2` (deletion) + `e3c9733` (comment refresh).
+`Store::conn_mut` had zero references in `src/` or `tests/` and its
+justification named Epic 1 tasks that never consumed it — deleted with its
+`#[allow(dead_code)]` during the Phase-1 allow purge (46 → 1). `Store::conn`
+survives with a comment naming its real current consumers instead of the
+factually wrong T9/T10 forward-pointer; it gained a genuine non-test consumer in
+Epic 5a.
+
+---
+
+### `ingest::walk_recursive` minor polish: silent missing-inbox + missing inner context
+
+**Found in:** T13 code quality review (opus).
+**Disposition:** Cosmetic; bundle with the next real edit to `ingest::*`.
+**Trigger to revisit:** any task that touches `walk_recursive` or `ingest`
+error-handling.
+**Resolution:** `d55f5e0`. Item 1: the `ingest()` root now `bail!`s when the
+inbox does not exist, so a typo'd `--inbox` is an error instead of a successful
+`files=0` run; deeper subdirectories vanishing mid-walk stay ignored (a race,
+and the intended behavior). The surviving inner-`entry?` half of item 2 now
+carries path context, matching what the same commit did to
+`output::cleanup_tmp_files`.
+
+---
+
+### `output::shard_dir` is unused; allow comment falsely names T13/T14 as consumers
+
+**Found in:** T15 code quality review (opus) — Plan A close-out 0002 audit.
+**Disposition:** Dead helper; delete or find a real caller.
+**Trigger to revisit:** Plan A → Plan B reassessment, or next edit to
+`src/output/mod.rs`.
+**Resolution:** `d55f5e0`. The function is deleted, along with the unit test
+that was its only caller; its `#[allow(dead_code)]` had already been removed by
+Task 04's purge (`88c8bc2`), so the branch's allow census is unchanged at 1.
+`pipeline.rs` continues to call `opts.transcripts_root.join(shard(&…))`
+directly — the join was never the duplication worth a helper, and amended
+ADR-0002 no longer accepts a suppression as the alternative to deleting.
+
+---
+
+### `YtDlpFetcher::acquire` tight coupling to yt-dlp's `{video_id}.wav` output filename
+
+**Found in:** T11 code quality review (opus); finding 3 of the original
+four-finding `YtDlpFetcher::acquire` entry. Split out at Epic 3 close:
+findings 1–2 were resolved by Epic 3 (`9974d69`, archived above), finding 4
+moved to `docs/followups/plan-c.md`.
+**Disposition:** Epic 5 fetch hardening.
+**Trigger to revisit:** Epic 5 planning; or any yt-dlp version bump that
+changes output-template behavior.
+**Resolution:** `19155c1`, plus the review fix `17d290f`. The shipped contract
+is stronger than the entry's "scan for any `.wav`" proposal. Each `acquire`
+creates a **fresh** attempt directory `{work_dir}/ytdlp-{video_id}.{pid}-{seq}`
+(nothing is reused across retries, workers, or processes), so exactly one
+yt-dlp invocation ever writes into it, and the output is **discovered** by
+scanning that directory: one `*.wav` is success, zero is
+`FetchError::MissingOutput`, more than one is the new
+`FetchError::AmbiguousOutput` — the fetcher never picks one, because guessing
+would stamp an arbitrary file as this video's transcript. The path is never
+parsed out of stdout, which is reserved for the Epic 4c metadata capture.
+Ownership is explicit and total: `acquire` removes the directory on its own
+failure returns (the caller holds no handle), and the pipeline removes it
+exactly once on every path where it does hold one — after `mark_succeeded`
+commits, or on a decode/transcribe/artifact-write failure; `StaleAfterSuccess`
+deliberately keeps its directory. `17d290f` closed the one leak the first pass
+missed: a closed fetch→transcribe channel returns the un-sent `FetchedItem`
+inside `SendError`, which was being discarded along with its live attempt dir.
+Crash and cancellation residue is collected by the age-gated `.work` sweep at
+the next `process` startup.
+
+---
+
+### Epic 3 close: test-hardening bundle (signal capture, classifier precedence, kind-string end-to-end)
+
+**Found in:** Epic 3 final whole-branch review.
+**Disposition:** Grouped opportunistic hardening; bundle into one Epic 5 pass
+rather than three separate commits.
+**Trigger to revisit:** Epic 5 test-sweep planning.
+**Resolution:** `5082474`, all three items, each shown to fail when its subject
+is broken. (1) `tests/process_bounded_capture.rs` now spawns a real child,
+signals it, and asserts `FetchError::ToolFailed { signal: Some(_), .. }` comes
+out of `process::run` — the `ExitStatus` Unix `signal()` extension path is no
+longer only exercised by hand-constructed values. (2) `src/classification.rs`
+pins `classify_message`'s match-arm precedence when two markers appear in one
+stderr blob, and its case sensitivity. (3) `tests/pipeline_fakes/` asserts the
+actual `RetryableKind` / `UnavailableReason` **tag string** written to
+`last_retryable_kind` end-to-end through `transcribe_worker`'s three-arm
+dispatch, replacing the inline worker-test audit verdicts that tracked the gap
+rather than closing it.
+
+---
+
+### `state/mod.rs` hygiene bundle (sweep mutators — formerly Epic-3 triage mutators)
+
+**Found in:** Epic 3 final whole-branch review. Items 3–4 re-pointed at the
+Epic 4a surfaces (T08: triage retired; `triage_mark_terminal`/`requeue_retryable`
+became `sweep_mark_terminal`/`sweep_requeue`, `run_triage` became
+`batch::run_sweep`).
+**Disposition:** Grouped cleanup; low risk, no behavior change expected.
+**Trigger to revisit:** next edit to `src/state/mod.rs`, or Epic 5 sweep.
+**Resolution:** `e3c9733`, all four items. `claim_next`'s empty-candidate path
+now commits with a `.context(...)` like every other transaction in the file; a
+test pins `attempt_count == 2` across the full claim→fail→requeue→reclaim
+cycle; `sweep_mark_terminal` / `sweep_requeue` gained the defensive
+`claimed_by` / `claimed_at` clear (inert under today's schema, correct if a
+future change ever lets a claimed row reach them); and `batch::run_sweep`'s
+`kept_capped` path now has a test asserting it writes **no** `video_events` row.
+Claim and status semantics (ADR-0023 / ADR-0024) are untouched.
+
+---
+
+### `run_serial` fetch/transcribe downcast asymmetry
+
+**Found in:** Epic 3 final whole-branch review. The bundle's other half —
+discarded mutator row-change counts — was resolved by Epic 4a T06 (`c7c4f1b`)
+and archived above.
+**Disposition:** Opportunistic hardening.
+**Trigger to revisit:** `run_serial` retirement decision, or Epic 5 sweep.
+**Resolution:** `b61bddb`, under the operator ruling recorded 2026-07-30:
+**keep `run_serial`, and fix the asymmetry** — not archive it as an accepted
+defect. `src/pipeline/serial.rs`'s fetch-side classification now walks the error
+chain the way the transcribe side always did, with a regression test wrapping
+`FetchPhaseError` in one and in two context layers.
+
+**Premise correction (recorded because the entry's diagnosis was wrong).** The
+entry's implied mechanism — that anyhow's `.context()` wrapping defeats
+`downcast_ref` — is false: `anyhow::Error::downcast_ref` already pierces
+context layers and finds the underlying type. The real asymmetry is narrower
+and was only found by reproducing it: a `FetchPhaseError` that is reachable
+*only* as another error's `#[source]` is invisible to `downcast_ref` (which
+inspects the error's own type, not its source chain) while `chain()` walks
+straight to it. The fix is therefore chain-walking, and it would have been
+missed by anyone testing the context-layer hypothesis alone.
+
+**`run_serial` is retained**, documented in-file as a **non-production
+reference/test path** rather than a live code path — the pipelined orchestrator
+is what `process` runs. Retirement stays a future, separately-scoped task: its
+unique tests must first be mapped onto the pipelined and shared-helper suites,
+which is why deleting it during a behavior-preserving restructure was rejected.
+
+---
+
+### `FetchOpts`'s derived `Debug` does not redact `cookies_file`
+
+**Found in:** Epic 3 final whole-branch review.
+**Disposition:** Small hardening; not exploitable today (no code path logs
+`FetchOpts` via `{:?}`) but a footgun for future callers.
+**Trigger to revisit:** any future logging/tracing call that formats a
+`FetchOpts` value, or Epic 5 sweep.
+**Resolution:** `19155c1`. `FetchOpts` carries a hand-rolled `Debug` that
+redacts `cookies_file` to `[COOKIES-REDACTED]` (and prints `None` unchanged),
+closing the gap between the derived form and `scrub_cookie_path`'s redaction of
+the same path everywhere else it can reach an error message or argv (ADR-0035).
+
+---
+
+### `scrub_cookie_path` has no guard against an empty cookie path
+
+**Found in:** Epic 3 final whole-branch review.
+**Disposition:** Small hardening; edge case, not observed in practice.
+**Trigger to revisit:** Epic 5 sweep, or if `--cookies-file ""` is ever observed
+in the wild.
+**Resolution:** `19155c1`. An empty path returns the excerpt unchanged, with a
+test pinning that `scrub_cookie_path("")` is a no-op. Without the guard,
+`str::replace` with an empty pattern inserted the replacement between every
+character of the stderr excerpt.
+
+---
+
+### Epic 4b final review: status polish + test-debt bundle
+
+**Found in:** Epic 4b final whole-branch review.
+**Disposition:** Grouped opportunistic hardening + test-debt; bundle into one
+Epic 5 pass rather than five separate commits.
+**Trigger to revisit:** Epic 5 hygiene sweep planning.
+**Resolution:** `a8bd7ac`, all five items. `render_event_detail_inline` falls
+back to the raw `detail_json` when a known key holds a non-string value; the six
+missing fixtures landed in `tests/status.rs` (malformed `detail_json`, the
+`{"reason","message"}` shape, a corrupt-JSON artifact, valid metadata without
+`raw_signals`, a single-status zero-fill, an end-only `WindowBounds`);
+`run_verify`'s per-entry `e.ok()` drop now surfaces an unreadable `DirEntry` as
+an infra fault instead of counting it missing; `status --respondent-id` with an
+unknown id errors and exits 1 like `--video-id` does, instead of printing an
+all-zeros summary; and `src/status.rs`'s mid-file `use` statements moved into
+the top-of-file block.
+
+---
+
+### Worker-side closed-reply path silently swallows the error
+
+**Found in:** T5 (engine shell) — codex-advisor code-quality review. Re-routed
+from `docs/followups/epic-2.md` (2026-07-29 triage): Epic 2 closed before this
+fix was picked up.
+**Disposition:** Operational logging improvement; ~1h fix.
+**Trigger to revisit:** Epic 5 hygiene bundle.
+**Resolution:** `a8bd7ac`, under the operator ruling recorded 2026-07-30:
+**log without a video id, centralized.** The correct site count is **seven**,
+not the six the entry named — the six error replies plus the **success** reply,
+which dropped a completed `TranscribeOutput` just as silently. All seven now
+route through one helper that logs a worker-local monotonic request sequence
+number, elapsed wallclock since processing began, the result kind, and whether
+the cancellation flag was set; transcript text is never logged.
+
+The no-id shape is the deliberate choice, not an omission: `TranscribeRequest`
+(`src/transcribe.rs`) carries `samples`, `config`, `cancel`, `deadline`,
+`reply` — no video or request id. The id exists one layer up (`FetchedItem`
+carries a `Claim`, hence `claim.video_id`) but `Transcriber::transcribe` and the
+engine's request channel drop it, so logging it at the swallow site would have
+required a trait-signature change. A worker-local sequence plus elapsed
+wallclock makes an unexplained dropped caller visible with no API change; the
+cancellation flag distinguishes the expected `CancelOnDrop` case from the
+suspicious one.
+
+---
+
+### `main.rs` re-declares the library's entire module tree
+
+**Found in:** operator review, 2026-07-28 (during Epic 4c).
+**Disposition:** Real structural debt, too broad for an Epic 4c rider — it
+touches every module declaration in the crate. Cites ADR-0002's deferred bin/lib
+reassessment, which parked exactly this question.
+**Trigger to revisit:** Epic 5 hygiene bundle, alongside `run_serial`
+retirement, the `state/mod.rs` split, and the sync-IO sweep.
+**Resolution:** the whole of Epic 5b Phase 1 — `935f5e1` + `369471b` (the ADR
+and its correction), `6bab68e` (the restructure), `88c8bc2` (the visibility and
+allow purge). `src/lib.rs` is now the crate's single module root; all 18 `mod`
+declarations are gone from `src/main.rs`, which carries argument parsing,
+tracing init, error rendering and the program's one `std::process::exit` and
+nothing else. `main`'s `match cli.command` arms moved verbatim into
+`src/commands.rs` behind `pub async fn dispatch(cli: Cli) -> Result<CommandExit>`;
+exit semantics travel back as a `CommandExit` value, so the library never calls
+`process::exit`. The façade is exactly four names —
+`pub use cli::{Cli, LogFormat};` and `pub use commands::{dispatch, CommandExit};`
+— with `#![warn(unreachable_pub)]` as the backstop and `Cli::log_format()` as
+the one narrow accessor. Recorded as
+[ADR-0045](../decisions/0045-the-crate-is-a-fat-library-with-a-thin-binary-behind-a-minimal-public-facade.md);
+ADR-0002 was amended so visibility narrowing, not suppression, is the answer to
+a `dead_code` finding.
+
+All three named consequences are discharged. **Double compilation** is gone —
+every file compiles exactly once, which removed 84 duplicated inline test
+executions (`--list` census 345 → 261 runnable). **Broadened `pub` surface** is
+gone — 27 items narrowed to `pub(crate)`/`pub(super)`, and the "is this public
+API?" question now has a written answer, which is what unblocked the
+`Store::pragma_string` entry above. **The accumulated suppressions** are gone —
+the `#[allow(dead_code)]` census went 46 → 1, and 31 of the 33 real attributes
+turned out to be already inert (they sat on reachable `pub` items, which
+`dead_code` cannot fire on) with justifications citing exactly this double
+compilation.
+
+*(One correction to the entry's reasoning, recorded because a later reader
+would otherwise inherit it: reachable `pub` items in a library are outside
+`dead_code` regardless of module-root structure. The restructure removed the
+second compilation context, not the exemption — which is why a narrow façade
+policed by `unreachable_pub`, rather than the lint, is what keeps `pub` from
+becoming a place to park unused code. `369471b` fixed the same wrong claim
+where it had reached ADR-0002 and ADR-0045.)*
+
+---
+
+### Tmp sweep's age guard has an inherent TOCTOU window
+
+**Found in:** Epic 5a Task 01 review (2026-07-30), as an observation on the
+shipped age guard (`fd54fea`).
+**Disposition:** Accepted plan-level tradeoff — recorded for completeness, not
+scheduled.
+**Trigger to revisit:** only if a run abort is ever traced to a swept tmp whose
+writer was live — i.e. evidence that the window is reachable in practice.
+**Resolution:** **accepted-archive** (operator ruling, 2026-07-30). No code
+change: the tradeoff stands exactly as the entry describes it, and archiving is
+the act of removing a standing tripwire that has produced no evidence. The
+evidence-gated trigger above is preserved verbatim and remains the condition for
+re-opening this as a **new** entry — do not append a second resolution here.
+
+The mtime read and the `remove_file` are separate syscalls, so a writer that
+stalled past the stale-claim threshold and then resumed could still have its tmp
+unlinked between the two. That window is only reachable by a writer whose
+*claim* would already have been swept out from under it, which is the case the
+sweep exists to clean up; closing it properly means an advisory lock or a
+liveness probe, both heavier than the exposure.
+
+---
+
+### `upsert_metadata_raw` is not claim-guarded
+
+**Found in:** Epic 4c Task 03 review (triaged to backlog at the time).
+**Disposition:** Accepted tradeoff, documented in the mutator and in ADR-0042.
+**Trigger to revisit:** Epic 5, or sooner if metadata ever gains a consumer for
+which snapshot freshness is load-bearing.
+**Resolution:** `e3c9733` + `217f646`, under the operator ruling recorded
+2026-07-30: **resolve — add the guard.** `upsert_metadata_raw` now carries the
+same `status = 'in_progress' AND claimed_by = ?` predicate as every other
+in-flight mutator (ADR-0023), so a worker whose claim was swept out from under it
+can no longer overwrite a newer envelope. The cost the entry named was paid
+rather than avoided: `worker_id` is threaded into a call site whose whole point
+is that it runs unconditionally on both the success and the failure path.
+ADR-0042's "last-write-wins per `video_id`" bullet is narrowed to
+last-write-wins **among claim holders**, which is what the guard makes true.
+
+---
+
+### Ingest file-ledger hardening bundle
+
+**Found in:** PR #23 review (production ingest hardening, 2026-07-29) — three
+Minors carried out of the review by agreement.
+**Disposition:** None blocks the campaign; bundle for Epic 5's ingest/sync-IO
+sweep.
+**Trigger to revisit:** Epic 5, or immediately if the inbox ever gains
+subdirectories with same-named files.
+**Resolution:** items 1 and 2 **accepted-archive**, item 3 fixed by `d55f5e0`.
+
+1. **Basename-only ledger key — accepted** (operator ruling, 2026-07-30). The
+   basename is kept: `ingested_files.file_name` is host-portable by design (the
+   inbox directory moves between hosts), today's inbox is flat, and filenames
+   embed participant+key so they are collision-proof in practice. Keying on an
+   inbox-relative path would trade that portability for a schema migration
+   against a structural risk that is not live. The re-open condition is the
+   entry's own: the inbox gaining subdirectories with same-named files.
+2. **(size, mtime) is a one-second-resolution change detector — accepted and
+   documented** (operator ruling, 2026-07-30). A same-size rewrite inside one
+   mtime tick is invisible to the ledger; row-level upserts remain the
+   correctness backstop, so the cost is the freshness of that file's rows, never
+   corruption. Strengthening the fingerprint (content hash, nanosecond mtime)
+   would put real per-file cost on every ingest scan against a freshness-only
+   exposure.
+3. **Mid-transaction rollback regression test — fixed** by `d55f5e0`. The test
+   `a_failed_row_upsert_rolls_back_the_file_and_its_ledger_row`
+   (`src/ingest.rs`) installs a `BEFORE INSERT` trigger that `RAISE(ABORT)`s on
+   the file's *second* watch-history row, so the first row is already written
+   (uncommitted) when the abort lands, then asserts post-rollback state rather
+   than merely that an `Err` came back: zero `watch_history` rows, zero `videos`
+   rows, and **no** `ingested_files` row — a ledger row here would make the next
+   run skip a file it never ingested.
+
+---
+
+### `global = true` both-position CLI test asserts parse acceptance only
+
+**Found in:** metadata-backfill branch review (v0.3.1 `global = true` rider,
+`7dfa771`), plus three more test-hardening candidates from that branch's final
+whole-branch review, bundled here.
+**Disposition:** Hardening candidate; bundle with the Epic 5 test-hardening
+sweep. The shipped test is not wrong, just shallow.
+**Trigger to revisit:** Epic 5 test-hardening bundle, or the next change to
+`GlobalArgs`.
+**Resolution:** `5082474`, all four items. `src/cli.rs` gained
+`global_flag_value_propagates_from_the_post_subcommand_position` and
+`duplicate_global_flag_takes_the_last_occurrence` — `try_parse_from` unit tests,
+no process spawn — turning the acceptance check into a behavior check and
+pinning clap's last-occurrence-wins precedence this repo had never asserted. The
+existing `tests/cli.rs` both-position test and `clap_definition_is_internally_consistent`
+are unchanged (they are also the archive-integrity surface for the `global = true`
+entry archived under v0.3.1 — the hardening added assertions, it did not weaken
+any). `backfill-metadata`'s `--dry-run` gained `conflicts_with = "limit"`, so
+clap itself rejects the combination and prints the conflict instead of relying on
+the operator having read the runbook — the one production change in the bundle.
+`tests/backfill_metadata.rs`'s dry-run test gained a sentinel-file PATH shim, so
+"invokes nothing" is a positive hermetic assertion rather than an
+absence-of-evidence inference, and its `statuses()` snapshot helper widened from
+`(video_id, status)` to also capture `claimed_by`, `claimed_at`, `attempt_count`
+and `succeeded_at`, so a regression touching lifecycle columns
+`backfill-metadata` must never write (ADR-0042's carve-out) fails a snapshot
+instead of passing silently.
+
+---
+
+### T1 codex code-quality review — deferred ADR refinements (0011, 0017, 0013 bullets)
+
+**Found in:** T1 (ADR drafts for Plan B Epic 1) — codex-advisor code-quality
+review. Three blocking findings were resolved inline via `adg comment` at the
+time (0010 schema_version-as-string; 0012 cancellation-via-abort_callback; 0016
+closed-oneshot shutdown carve-out); six non-blocking items were deferred.
+**Disposition:** Deferred, multi-epic.
+**Trigger to revisit:** per bullet.
+**Resolution:** three of the six bullets are terminal and archived here. The
+other three — **0009 fallback Engine API preservation**, **0016 multi-engine GPU
+memory**, and **error-variant enumeration** — are all gated on multi-engine or
+CUDA-fallback work that Plan B does not do, and were **re-routed to
+`docs/followups/plan-c.md`** rather than resolved. They are not archived.
+
+- **0011 pause-safe checklist references 0017 — resolved 2026-07-29** via lean
+  [ADR-0041](../decisions/0041-status-is-the-read-only-operator-surface-the-0017-done-contract-lives-behind-verify.md).
+  Epic 4's `status` subcommand shipped and the 0017 done-contract now lives
+  behind `status --verify`. *(Struck through in the entry body at the time but
+  never migrated here; migrated by the Epic 5b close-out per this file's own
+  Resolve rule, with its original 2026-07-29 provenance.)*
+- **0017 splits pause-safe vs batch-complete — resolved 2026-07-29**, same
+  record: 0017's done-contract became lean ADR-0041, and the pre-migration
+  MADR-0017 prose is frozen in `docs/madr-archive/`. *(Same migration
+  provenance as the bullet above.)*
+- **0013 global log callback invariant — resolved by `ebc4ee0` + `2788483`.**
+  The invariant this bullet stated is now the shipped mechanism and is written
+  into ADR-0013's Guidance: `whisper_log_set` (via whisper-rs's
+  `set_log_callback`) is installed exactly once behind a `Once` before any
+  context init, is never replaced per engine, routes every line through one
+  global bridge to `tracing`, and backend capture is phase-scoped behind a
+  global init mutex so concurrent engine constructions cannot interleave.
+
+---
+
+### 0013 backend assertion must be cfg(feature = "cuda")-gated
+
+**Found in:** T6 (engine init) — codex-advisor code-quality review.
+**Disposition:** Forward-pointer for T13's bake-runbook implementer. Audited
+2026-05-18: **NOT confirmed against shipped Epic 1 code** — which is why Epic 5b
+scheduled it as an implementation task rather than an audit.
+**Trigger to revisit:** Epic 5 cleanup sweep.
+**Resolution:** `ebc4ee0` + `2788483`. The assertion is implemented and gated
+exactly as this entry required. `EXPECTED_BACKEND` is a
+`const … = if cfg!(feature = "cuda")` — `ExpectedBackend::Gpu` on a CUDA build,
+`Unconstrained` otherwise — so a CPU dev build reports its backend and asserts
+nothing, while a CUDA build hard-fails engine construction with
+`WhisperInitError::BackendMismatch { expected, detected }` before any batch work
+starts. Softening to a warning was rejected, per the ADR. The `cfg!` form was
+chosen over the entry's sketched `#[cfg]`-split const pair because the latter
+leaves the unselected variant unconstructed and fires `dead_code` — it would
+have re-added an allow to a branch that had just purged 45 of them; `cfg!` is
+the same compile-time gate with both arms type-checked by every build.
+
+`2788483` closed a false-positive gap found in review and verified against the
+pinned whisper.cpp v1.8.3: `whisper_backend_init_gpu` logs `using %s backend`
+**before** it calls `ggml_backend_dev_init`, and on failure logs
+`failed to initialize %s backend` and returns nullptr while the caller falls
+silently through to CPU. The first implementation returned `Gpu` on the `using`
+line alone, so it would have certified a CUDA build that was actually running on
+CPU — precisely the failure ADR-0013 exists to catch. `detect_backend` is now an
+ordered parse: `using X backend` is a *pending claim*, retracted by a following
+device-matched `failed to initialize X backend`
+(→ `DetectedBackend::GpuInitFailed`); `no GPU found` is its own verdict; and
+`Unknown` fails closed on a CUDA build.
+
+**CUDA-gate evidence (2026-07-30):** this workstation has no CUDA toolkit, so
+the gated build was run on the paused SRC workspace at branch tip `2788483` —
+`cargo build --release --features cuda` compiled in 2m 11s and all 6 ignored
+`tests/whisper_engine_init.rs` tests passed on the GPU, including the assertion
+test. Commits after `2788483` touch no `cfg(cuda)`-gated code; there is none in
+`src/` (the feature only toggles `whisper-rs-sys`'s build).

@@ -26,6 +26,12 @@ code, and the library never calls `process::exit`.
 - `#[warn(unreachable_pub)]` is the backstop against `pub` drifting wider than the façade, and review rejects a new root-level `pub` item that arrives without a façade rationale. The fix is `pub(crate)` or one narrow accessor — `Cli::log_format()` is the pattern, serving main's pre-dispatch tracing init while `Cli`'s fields stay `pub(crate)`.
 - `[profile.release] lto = "thin"` in `Cargo.toml` exists so cross-crate inlining across the bin/lib boundary is a non-question; the release build is part of the verification gate, so keep both the profile and the gate green.
 
+## Checks
+
+- `rg -n '^\s*(pub )?mod ' src/main.rs` — must return nothing; a `mod` line in main re-creates the second module root this record exists to remove.
+- `rg -n 'process::exit' src/ --glob '!src/main.rs' | rg -v ':\s*//'` — must return nothing outside comments; the one exit lives in `main`, reached only via a `CommandExit` value.
+- `rg -n '^pub use' src/lib.rs` — the façade is exactly `cli::{Cli, LogFormat}` and `commands::{dispatch, CommandExit}`; a new name here needs a façade rationale.
+
 ## Why
 
 With one module root every file compiles once — no inline unit tests running

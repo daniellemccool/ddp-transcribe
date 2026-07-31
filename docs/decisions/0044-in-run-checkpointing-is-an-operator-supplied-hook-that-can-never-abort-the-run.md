@@ -5,10 +5,10 @@ category: Orchestration
 applies_to:
     - src/pipeline/pipelined.rs
     - src/cli.rs
+    - src/commands.rs
 priority: invariant
 companions:
     - tests/pipeline_fakes/pipelined_tests.rs
-    - src/main.rs
 ---
 
 # In-run checkpointing is an operator-supplied hook that can never abort the run

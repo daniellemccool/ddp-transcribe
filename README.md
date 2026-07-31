@@ -10,12 +10,13 @@ TikTok is the currently supported source.
 > `docs/`) use the old name and the old `UU_TIKTOK_*` env prefix; they are
 > dated records and have deliberately not been rewritten.
 
-> **Status: live-campaign codebase.** Plan B epics through 5a (campaign
-> safety) have landed: embedded whisper.cpp via `whisper-rs`, the durable
-> state machine, the pipelined orchestrator with failure classification and
-> in-batch retry, the analysis window, metadata capture, the read-only
-> `status` surface, and the in-run checkpoint hook. This is what runs the
-> production batch, not a skeleton. Two things still surprise newcomers:
+> **Status: live-campaign codebase.** Plan B is complete through the Epic 5b
+> close-out: embedded whisper.cpp via `whisper-rs`, the durable state machine,
+> the pipelined orchestrator with failure classification and in-batch retry,
+> the analysis window, metadata capture, the read-only `status` surface, the
+> in-run checkpoint hook, and the `requeue-failures` operator override. This is
+> what runs the production batch, not a skeleton. Two things still surprise
+> newcomers:
 > - Only the `Dev` profile is wired — `--profile` exists but has one value.
 > - `process` exits with code **3** when it claimed zero videos — intentional (nothing to do), not a failure.
 
@@ -140,17 +141,29 @@ dry-run alongside a running `process` can hold that lock past
 
 ### `process`
 
-The batch. On startup it clears leftover partial-write temp files older than
-`--stale-claim-threshold`, opens a `batch_runs` row snapshotting the run's
-params and the active classification policy, and re-adjudicates previously
-parked retryable failures through that policy. Then it drains: claims
-abandoned by a crashed run are swept back to `pending`, and
-`--download-workers` fetch workers claim pending videos and pull audio via
-`yt-dlp`, feeding one transcribe worker over a bounded channel. Each success writes the transcript `.txt` + `.json` under
-`<transcripts>/<shard>/` *before* the row is marked succeeded. Failures are
-classified — retryable ones requeue in-batch under the retry budget, terminal
-ones are written off. The run ends by drain (no pending work left), stamping
-a census onto the `batch_runs` row and printing it.
+The batch. On startup it clears leftover partial-write temp files **and**
+leftover fetch work directories older than `--stale-claim-threshold`, opens a
+`batch_runs` row snapshotting the run's params and the active classification
+policy, and re-adjudicates previously parked retryable failures through that
+policy. Then it drains: claims abandoned by a crashed run are swept back to
+`pending`, and `--download-workers` fetch workers claim pending videos and pull
+audio via `yt-dlp`, feeding one transcribe worker over a bounded channel. Each
+success writes the transcript `.txt` + `.json` under `<transcripts>/<shard>/`
+*before* the row is marked succeeded. Failures are classified — retryable ones
+requeue in-batch under the retry budget, terminal ones are written off. The run
+ends by drain (no pending work left), stamping a census onto the `batch_runs`
+row and printing it.
+
+Every fetch attempt gets its own directory under `<transcripts>/.work/` —
+`ytdlp-<video_id>.<pid>-<seq>`, never reused across retries, workers or
+processes. The downloaded WAV is *discovered* by scanning that directory
+(exactly one `.wav` is success; zero and more-than-one are distinct failures —
+the fetcher never guesses), and the whole directory is removed at the end of
+the attempt: after the row is marked succeeded, or on a decode/transcribe
+failure, whose retry re-fetches into a fresh one. Only crash, `kill` and
+cancellation residue survives, and the age-gated startup sweep collects it —
+the age gate is what makes a fresh directory belonging to a second live
+instance safe.
 
 | Flag | Default | Notes |
 |------|---------|-------|
@@ -178,6 +191,57 @@ full event history), `--respondent-id` (per-respondent counts), `--errors`
 `--verify` runs the done-contract checks — artifacts present at their sharded
 paths, `raw_signals.schema_version` parses, batch is pause-safe — and exits 1
 when it isn't. `--json` emits machine-readable output instead of text.
+
+### `requeue-failures`
+
+The operator escape hatch for rows no automatic mechanism can reach any more:
+failures blocked by the lifetime attempt cap, or already written off as
+terminal, whose *external* cause has since changed (fresh cookies, a region
+unblocked, a yt-dlp bump). It grants eligibility — it is not a second
+classifier, and the next fetch is still the liveness oracle.
+
+**Eligibility is default-deny.** A bare `requeue-failures` is a usage error.
+You must give at least one *qualifying* selector, or `--all`:
+
+| Selector | Effect |
+|---|---|
+| `--error-kind <K>` | Match this failure kind. Repeatable; repeats OR together. Exact byte equality — no case folding, and no comma splitting (classification labels may legally contain commas). Matches `last_retryable_kind` on retryable rows, `terminal_reason` on terminal ones. |
+| `--max-attempts <N>` | Skip rows with `attempt_count >= N`. |
+| `--older-than <DUR>` | Match rows whose last *failure* event is strictly older than this (humantime: `30d`, `12h`). |
+| `--all` | Every `failed_retryable` row — never terminals. Conflicts with every qualifying selector: `--all --older-than 30d` is a parse error, not a silent intersection. |
+| `--include-terminal` | Also consider `failed_terminal` rows. Opt-in twice over — it *requires* a qualifying selector, so `--include-terminal --all` is rejected. |
+| `--max <N>` | Cap rows moved, taken in `attempt_count ASC, video_id ASC` order. A **modifier**: never grants eligibility on its own. |
+| `--dry-run` | Read-only; prints per-kind counts plus a total. Also a modifier. |
+
+The `--older-than` clock is the newest of the row's `failed_retryable`,
+`failed_terminal`, `retry_requeued` and `cookie_parked` events. Administrative
+events (`requeued`, `swept_stale`, `swept_terminal`, `claimed`, `succeeded`)
+never reset it, and a row with no qualifying event never matches.
+
+Eligible rows go back to `pending` with `claimed_by`/`claimed_at` cleared.
+**`attempt_count` is never reset** and the failure fields are retained — the
+command grants another claim, it does not erase history. Each row gets one
+`operator_requeued` event recording prior status, prior kind/reason and attempt
+count, attributed as `operator:<hostname>-<pid>`. Zero matches exits 0 with an
+explicit `0 rows matched`.
+
+**Arithmetic, because it bites.** Requeueing does not by itself buy a *retried*
+attempt. For a row at `attempt_count = A`, the next claim bumps it to `A + 1`,
+and in-pipeline retry only fires while `attempt_count < retries + 1` — so an
+automatic retry after the forced fetch needs `--retries > A` **strictly**.
+A row exhausted at `A = 3` under `--retries 2` gets exactly one forced attempt
+unless the following `process` runs with `--retries 4` or higher.
+
+```sh
+# Preview the cap-exhausted cookie-gated cohort, then move 500 of them:
+ddp-transcribe requeue-failures --error-kind SensitiveLoginGated --dry-run
+ddp-transcribe requeue-failures --error-kind SensitiveLoginGated --max 500
+ddp-transcribe process --cookies-file ~/tiktok-cookies.txt --retries 4
+```
+
+Hand-written SQL against `videos` is unsupported emergency repair — it mutates
+status without leaving the `video_events` row every audit depends on. This
+subcommand exists so you never need it (ADR-0046).
 
 ### `recompute-window`
 
@@ -207,7 +271,9 @@ for smoke runs; `--dry-run` prints the cohort size and exits without invoking
 
 ```
 src/
-  main.rs             # binary entry + subcommand dispatch
+  lib.rs              # the crate's single module root + the four-name public facade
+  main.rs             # thin binary: parse, tracing init, dispatch, the one process::exit
+  commands.rs         # subcommand dispatch (one arm per subcommand) -> CommandExit
   cli.rs              # clap definitions (flags, subcommands)
   config.rs           # resolved runtime config (profile → values)
   canonical.rs        # TikTok URL → canonical video_id
@@ -243,6 +309,12 @@ docs/
   FOLLOWUPS.md             # scope index over followups/*.md
   madr-archive/            # the frozen pre-migration MADR corpus
 ```
+
+`lib.rs` is the only place modules are declared; `main.rs` carries no `mod`
+line at all and reaches library code through exactly four names — `Cli`,
+`LogFormat`, `dispatch`, `CommandExit`. Everything else is `pub(crate)` or
+private, and the library never calls `process::exit`: a subcommand returns a
+`CommandExit` and `main` performs the exit. See ADR-0045.
 
 ## Where to read more
 

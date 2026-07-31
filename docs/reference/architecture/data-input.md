@@ -128,7 +128,7 @@ Both streams are still drained concurrently via `tokio::try_join!` (`src/process
 
 ### Timeout policy
 
-The fetcher applies an explicit per-invocation wall-clock timeout. The default is **300 seconds** (5 minutes), set in `src/config.rs:47` (dev profile) and passed through `src/main.rs:108` to `YtDlpFetcher::new`. The timeout is stored on the `YtDlpFetcher` struct and forwarded to each `CommandSpec` (`src/fetcher/ytdlp.rs:14, 101`).
+The fetcher applies an explicit per-invocation wall-clock timeout. The default is **300 seconds** (5 minutes), set in `src/config.rs:47` (dev profile) and passed through `src/commands.rs:199` to `YtDlpFetcher::new`. The timeout is stored on the `YtDlpFetcher` struct and forwarded to each `CommandSpec` (`src/fetcher/ytdlp.rs:14, 101`).
 
 `process::run` wraps the full read-and-wait future in `tokio::time::timeout` (`src/process.rs:184`). On expiry, it calls `child.start_kill()` (immediate SIGKILL) and returns `RunError::Timeout` (`src/process.rs:220–224`). A `kill_on_drop(true)` flag set at spawn (`src/process.rs:163`) provides a backstop in case control flow changes; the two kills are intentionally redundant.
 
@@ -177,3 +177,4 @@ Every fetch also captures the video's metadata, raw-first, per [ADR 0042](../../
 | 0039 | DDP timestamps are UTC-assumed, empirically unresolved | `parse_watched_at`; `watched_at_raw` is the hedge. |
 | 0040 | Analysis window computed at ingest; `recompute-window` is the only flag mutator | `--window-start`/`--window-end`; `watch_history.in_window`. |
 | 0042 | Fetch-time metadata is captured raw-first; parsing is a replayable post-run step | The `--print` capture chain, the `video_metadata_raw` envelope, and `load-metadata`'s parse. Cross-cuts the state machine (schema v5). |
+| 0047 | Blocking IO on the worker hot path runs on `spawn_blocking` | `fetch_and_decode`'s `decode_wav` is one of the two class-(c) moves; `find_single_wav`'s `read_dir` and `remove_attempt_dir` stay inline as class (b), bounded by the per-acquire directory's construction. |

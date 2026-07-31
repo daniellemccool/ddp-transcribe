@@ -188,3 +188,39 @@ researchers who want files), and a redesign of the sync-to-storage path away
 from whole-file DB shipping. The pipelined write path's 0008 invariant
 (artifacts durable before `mark_succeeded`) would need a DB-transactional
 restatement.
+
+---
+
+### T1 codex ADR-refinement bullets gated on multi-engine / CUDA-fallback work
+
+**Found in:** T1 (ADR drafts for Plan B Epic 1) — codex-advisor code-quality
+review. Re-routed here from `cross-epic.md` by the Epic 5b close-out
+(2026-07-30): the entry's other three bullets are terminal and archived
+(`../archive/followups-resolved.md`, "Resolved by Plan B Epic 5b") — 0011 and
+0017 resolved 2026-07-29 via ADR-0041, the 0013 global-log-callback invariant
+implemented by `ebc4ee0` + `2788483`. These three are all gated on work Plan B
+deliberately does not do, which is why they move rather than close.
+**Disposition:** Deferred to Plan C (multi-engine / multi-GPU / CUDA-fallback).
+**Trigger to revisit:** per bullet, below.
+
+- **0009 fallback Engine API preservation.** If the CUDA build fallback is ever
+  invoked, the superseding ADR must preserve the public `WhisperEngine` API —
+  samples in, `TranscribeOutput` out, `Arc<AtomicBool>` cancel — so the Epic 1
+  implementations do not have to be rewritten around it. Re-surface when the
+  fallback ADR is drafted.
+- **0016 multi-engine GPU memory caution.** The "wraps a `WhisperPool` of N
+  Engines" alternative in ADR-0016 risks duplicating model loads on a single
+  GPU, since each Engine owns its own `WhisperContext`. Prefer multi-state on
+  one context for same-GPU parallelism; keep the wrapper option only for
+  multi-GPU or process isolation. Amend ADR-0016 when Plan C multi-state /
+  multi-GPU work begins.
+- **Error-variant enumeration.** ADRs 0012/0013/0014/0016 each reference typed
+  error variants (`WhisperInitError::BackendMismatch`, `AudioDecodeError::*`,
+  `TranscribeError::Cancelled`, worker-panic, closed-reply) but no record
+  enumerates the canonical set. Write a small implementation-constraint ADR if
+  the variants ever drift across files. Note the surface has already moved
+  once: `BackendMismatch` became a struct variant carrying
+  `{ expected, detected }` when the 0013 assertion shipped, and
+  `DetectedBackend::GpuInitFailed` was added alongside it — so an enumeration
+  written today would already be describing a moving target, which is part of
+  why it waits for the multi-engine work that would stabilize it.

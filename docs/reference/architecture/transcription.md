@@ -41,9 +41,9 @@ The crate embeds whisper.cpp as a native library compiled from vendored C++ sour
 
 **`WhisperContextParameters`** (set once at worker-thread startup, `src/transcribe.rs:398–402`):
 
-- `use_gpu(true)` — enables GPU acceleration; whisper.cpp falls back to CPU silently on a non-CUDA build. We declare GPU intent here; the backend-mismatch assertion (ADR 0013) is scaffolded (`WhisperInitError::BackendMismatch` exists at `src/transcribe.rs:303`) but not yet wired — see [GPU verification](#gpu-verification) below.
+- `use_gpu(true)` — enables GPU acceleration; whisper.cpp falls back to CPU silently on a non-CUDA build. We declare GPU intent here, and since Epic 5b the backend-mismatch assertion (ADR 0013) *verifies* it: on a `--features cuda` build a non-GPU verdict aborts engine construction with `WhisperInitError::BackendMismatch` — see [GPU verification](#gpu-verification) below.
 - `flash_attn(flash_attn)` — passed from `EngineConfig::flash_attn` (`src/transcribe.rs:401`). For the CUDA/Ampere case this enables FlashAttention kernels; see whisper-cpp-deepdive.md §3 and §10.
-- `gpu_device(gpu_device)` — device index from `EngineConfig::gpu_device` (`src/transcribe.rs:402`); currently hardcoded to `0` in `src/main.rs:95`.
+- `gpu_device(gpu_device)` — device index from `EngineConfig::gpu_device` (`src/transcribe.rs:402`); currently hardcoded to `0` in the `Process` arm of `commands::dispatch` (`src/commands.rs:186`).
 
 **`FullParams`** (built fresh per request, `src/transcribe.rs:533–543`):
 
@@ -67,7 +67,15 @@ Cancellation is cooperative — whisper.cpp polls the abort callback at well-def
 
 ### GPU verification
 
-The `WhisperInitError::BackendMismatch` error variant is scaffolded in `src/transcribe.rs:303` with the intent that startup would assert the GPU backend is active and exit rather than silently falling back to CPU (which would slow inference by ~50×, per [ADR 0013](../../decisions/0013-startup-asserts-the-gpu-backend-and-logs-the-device-name.md)). The comment at `src/transcribe.rs:397` notes "0013 backend-mismatch assertion lands in T13" — this assertion is not yet wired. The current code logs the *configured* `gpu_device` and `flash_attn` values at model-load time (`src/transcribe.rs:409–414`) but does not query the active backend or device name. ADR 0013 documents the intended behavior; [ADR 0002](../../decisions/0002-dead-code-is-suppressed-with-allow-dead-code-plus-a-justification-comment.md) covers the `#[allow(dead_code)]` on the variant while the wiring is deferred.
+Implemented in Epic 5b (it was scaffolded-but-unwired from Epic 1 through Epic 5a; ADR 0013 held the contract normatively the whole time). Engine construction now proves which backend whisper.cpp actually engaged, rather than logging the *configured* `gpu_device` / `flash_attn` values and hoping.
+
+**The bridge.** whisper.cpp only states its backend in its own log, so `install_log_bridge` (`src/transcribe.rs`) sets whisper-rs's `set_log_callback` — the binding for the process-global `whisper_log_set` — exactly once behind a `Once`, before any context init, and never replaces it per engine. Every whisper.cpp line is routed to `tracing` at debug. An `InitCapture` guard holds a global phase lock and buffers the lines for the duration of one engine's init, so two engines constructing concurrently cannot interleave captures. The capture window spans **both** `WhisperContext::new_with_params` **and** the primary `create_state()`: at the pinned whisper.cpp v1.8.3 the `whisper_backend_init_gpu` lines are emitted during state creation, so a window that closes at context construction detects nothing.
+
+**The parse is ordered, not a substring search.** `whisper_backend_init_gpu` logs `using <device> backend` *before* it calls `ggml_backend_dev_init`; on failure it then logs `failed to initialize <device> backend` and returns nullptr while the caller falls silently through to CPU. So `using X backend` is a **pending claim**, retracted by a following device-matched failure line. `detect_backend` resolves, in order: an unretracted claim → `Gpu`; a retracted one → `GpuInitFailed`; `no GPU found` → `Cpu`; otherwise `Unknown`. Both `_gpu`-anchored prefixes are load-bearing — `whisper_backend_init` (no suffix) logs identical wording for ACCEL backends such as BLAS, and a BLAS failure says nothing about the GPU verdict.
+
+**The verdict is build-gated.** `EXPECTED_BACKEND` is `ExpectedBackend::Gpu` when `cfg!(feature = "cuda")` and `Unconstrained` otherwise. A CUDA build rejects `Cpu`, `GpuInitFailed` and `Unknown` alike — "we could not tell" is not proof of GPU — with `WhisperInitError::BackendMismatch { expected, detected }`, at construction, before any batch work starts. A CPU dev build reports its backend and asserts nothing. Every build emits the operator audit line (`whisper_backend_init_gpu: using CUDA0 backend` is the shape the runbook tells operators to look for). Softening the assertion to a warning is rejected by ADR 0013.
+
+The GPU-gated tests live in `tests/whisper_engine_init.rs` (`--features cuda -- --ignored`, since a CPU build cannot exercise the mismatch arm); `detect_backend`'s ordered parse is pinned by in-crate `backend_assertion_tests` against real captured line shapes, and those run on every build.
 
 ### Engine-state model
 
@@ -122,7 +130,7 @@ Since Epic 4c the ordering is owned by a pair of functions in `src/pipeline/mod.
 | 0009 | whisper-rs version pin + fallback | The pinned crate version and fallback discipline. |
 | 0010 | JSON artifact schema with raw signals pass-through | Artifact schema and the raw-signals passthrough. |
 | 0012 | Cooperative cancellation via per-request Arc\<AtomicBool\> | Abort callback wiring. |
-| 0013 | GPU verification at startup | Backend assert + device-name log (scaffolded; assertion deferred). |
+| 0013 | GPU verification at startup | Backend assert + device-name log. Implemented Epic 5b: global log bridge, ordered parse, `cfg(cuda)`-gated hard-fail at construction. |
 | 0014 | Audio input invariant: float32 PCM 16kHz mono via hound | Format invariant at the audio-prep boundary. |
 | 0015 | Explicit non-use of `whisper_full_parallel` | Engine-state parallelism instead. |
 | 0016 | Engine API stable across single- and multi-state | Engine-state concurrency model. |

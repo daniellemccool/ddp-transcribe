@@ -52,28 +52,14 @@ lines 120-148.
 section "Resolved by Plan B Epic 3") or split-and-re-filed: `YtDlpFetcher::acquire`
 finding 3 → Epic 5, finding 4 → Plan C (see those groups below).
 
-**Epic 5 (Plan A → Plan B cleanup sweep)**
-- T7: `Store::pragma_string` `pub` vs `pub(crate)` → Epic 5 (lower to `pub(crate)`)
-- T7: `Store::read_meta` `OptionalExtension` → Epic 5 (refactor when touched)
-- T8: `output::cleanup_tmp_files` polish → Epic 5 (bundle with sync-IO sweep)
-- T8: `output::shard_distributes_uniformly` rationale → Epic 5 (refactor comment when touched)
-- T9: `videos.updated_at` frozen by `upsert_video` → Epic 5 (decision after Epic 2 ships)
-- T9/T10: `Store::conn`/`conn_mut` accessor hygiene → Epic 5 (delete `conn_mut`; refresh comment)
-- T13: `ingest::walk_recursive` polish → Epic 5 (bundle with sync-IO sweep)
-- T15: `output::shard_dir` unused → Epic 5 (delete)
-- T11 (split at Epic 3 close): `YtDlpFetcher::acquire` coupling to `{video_id}.wav` output filename → Epic 5 (fetch hardening)
-- Epic 3 final review: test-hardening bundle (signal-capture spawn+kill test, `classify_message` precedence/case test, `transcribe_worker` kind-string end-to-end assertion) → Epic 5
-- Epic 3 final review: `state/mod.rs` hygiene bundle — sweep mutators post-4a rename (bare `tx.commit()?`, attempt_count==2 assertion, defensive claimed_by/claimed_at clearing, sweep capped-requeue no-event assertion) → Epic 5
-- Epic 3 final review: `run_serial` fetch/transcribe downcast asymmetry (see tripwire in `src/pipeline/serial.rs`; the bundle's discarded-count half resolved by Epic 4a T06, archived) → Epic 5 (or moot if `run_serial` retires)
-- Epic 3 final review: `FetchOpts` derived `Debug` doesn't redact `cookies_file` → Epic 5
-- Epic 3 final review: `scrub_cookie_path` empty-path guard → Epic 5
-- T5-Epic1: Worker-side closed-reply path silently swallows error → Epic 5 (tracing/logging hygiene; re-routed from Epic 2, ~1h fix)
-- Epic 4b final review: status polish + test-debt bundle (`render_event_detail_inline` non-string fallback, missing test fixtures, `run_verify` `e.ok()` miscount, `--respondent-id` typo silently zero-fills, mid-file `use` in status.rs) → Epic 5 hygiene bundle
-- Epic 4c operator review: `main.rs` re-declares the library's entire module tree (double compilation, broadened `pub` surface, a driver of the accumulated `dead_code` allows) → Epic 5 hygiene bundle (cites ADR-0002's deferred bin/lib reassessment)
-- Epic 5a T01 review: tmp sweep's age guard has an inherent mtime-read → `remove_file` TOCTOU window — accepted plan-level tradeoff, recorded for completeness → Epic 5 (only if evidence appears)
-- Epic 4c T03 review: `upsert_metadata_raw` is not claim-guarded — a stale worker can overwrite a newer envelope (accepted last-write-wins tradeoff; snapshot staleness only, self-heals) → Epic 5
-- PR #23 review: ingest file-ledger hardening bundle (basename-only key collision risk, 1s-resolution change detector, no mid-tx rollback test) → Epic 5 (ingest/sync-IO sweep)
-- v0.3.1 review: CLI test-hardening bundle — `global = true` both-position test asserts parse acceptance only (no value-propagation or duplicate-precedence assertion); `backfill-metadata` `--dry-run`/`--limit` needs `conflicts_with`; dry-run test needs a PATH shim; `statuses()` snapshot needs claim/attempt columns → Epic 5 (test-hardening bundle)
+**Epic 5 (Plan A → Plan B cleanup sweep)** — closed 2026-07-30. All 21 entries
+resolved: archived with resolving SHAs in
+[archive/followups-resolved.md](archive/followups-resolved.md), section
+"Resolved by Plan B Epic 5b — close-out slice / v0.4.0". Three are archived as
+**accepted** under operator rulings rather than fixed (tmp-sweep TOCTOU window;
+ingest file-ledger items 1–2), each keeping its evidence-gated re-open
+condition in the archive.
+- (no active entries)
 - Full Epic 5 entries: [followups/epic-5.md](followups/epic-5.md)
 
 **Production run (operational milestones, not code epics)**
@@ -94,12 +80,12 @@ finding 3 → Epic 5, finding 4 → Plan C (see those groups below).
 - T11 (split at Epic 3 close): yt-dlp argv `--` separator before `source_url` → Plan C (when resolved URLs reach the fetcher)
 - Epic 3 final review: `scrub_cookie_path` canonicalized/relative path-variant hardening → Plan C (multi-engine work)
 - Transcript-storage assessment: DB-at-runtime transcript storage (schema v4 + export subcommand + sync redesign; own epic) only if the ADR-0004 ~1M-small-files ceiling approaches or SQL-queryable transcripts become a research need → Plan C (storage scale)
+- T1-Epic1: codex ADR-refinement bullets gated on multi-engine / CUDA-fallback work (0009 fallback Engine API, 0016 multi-engine GPU memory, error-variant enumeration) → Plan C (re-routed from cross-epic 2026-07-30; the entry's other three bullets are archived)
 - Full Plan C entries: [followups/plan-c.md](followups/plan-c.md)
 
 **Cross-epic / ADR maintenance / verify-then-archive**
-- T1-Epic1: codex code-quality review deferred ADR refinements (0009/0011/0013/0016/0017 + error variants) → multi-epic (Epic 4, T6/T7, Plan C)
+- Epic 5b T09: `cleanup_after_success` removes the attempt dir while the store mutex is held — bounded and best-effort (ADR-0047 class b), but needless lock-hold time; moving it touches ADR-0008's locked half, so it needs its own change → unscoped (next epic touching artifact-write/mark ordering, or contention evidence)
 - T9-Epic1: integration test only exercises empty-segment path on silence fixture → unscoped (when spoken-English fixture lands)
-- T13-Epic1: 0013 backend assertion must be `cfg(feature="cuda")`-gated → audited 2026-05-18, NOT confirmed; deferred to Epic 5 cleanup
 - T7-Epic1: Revisit `SamplingStrategy::Greedy { best_of }` after T13 bake → unscoped tuning followup (see also `bake-findings.md`)
 - T8-Epic1: Diagnostic log when `lang_detect`'s top id disagrees with primary inference → unscoped diagnostic (see also `bake-findings.md`)
 - T08-arch-docs: architecture doc-set drift detection → standing maintenance (revise matching deepdive + index.md §4 at each epic's planning time if it touches a covered surface)

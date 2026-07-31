@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 #[command(
     name = "ddp-transcribe",
     version,
-    about = "TikTok donation pipeline (Plan A walking skeleton)"
+    about = "Video-transcription pipeline for data-donation studies (TikTok DDP)"
 )]
 pub struct Cli {
     #[command(flatten)]

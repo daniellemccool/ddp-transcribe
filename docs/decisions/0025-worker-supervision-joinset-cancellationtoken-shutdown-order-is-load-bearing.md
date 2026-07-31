@@ -4,7 +4,7 @@ date: "2026-05-20"
 category: Orchestration
 applies_to:
     - src/pipeline/pipelined.rs
-    - src/main.rs
+    - src/commands.rs
 priority: invariant
 companions:
     - src/transcribe.rs
@@ -25,7 +25,7 @@ inside `run_pipelined`.
 
 ## Guidance
 
-- `engine.shutdown()` runs strictly after `run_pipelined` resolves AND after the caller drops its own `Arc<dyn Transcriber>` clone (`main.rs` `Process` arm) — shutting the engine while a worker may still hold an in-flight `engine.transcribe()` wedges that call on a dead engine.
+- `engine.shutdown()` runs strictly after `run_pipelined` resolves AND after the caller drops its own `Arc<dyn Transcriber>` clone (the `Process` arm of `commands::dispatch`, `src/commands.rs`; main itself carries no pipeline code since the thin-bin restructure) — shutting the engine while a worker may still hold an in-flight `engine.transcribe()` wedges that call on a dead engine.
 - Keep the unconditional `drop(tx)` right after the spawn loop; without it the transcribe worker parks on `recv()` forever even after all fetch workers exit.
 - The transcribe worker wraps `engine.transcribe()` in `tokio::select!` with `token.cancelled()` — channel-close alone cannot interrupt in-flight inference; the token propagates into the per-request `Arc<AtomicBool>` abort flag that whisper.cpp's `abort_callback` polls. Don't replace either half with flag-polling loops or per-worker signal channels.
 - Supervision uses `token.cancel()` only, never `join_set.abort_all()` — cancellation is cooperative so workers can finish their current row's state write. First Bug-class `Err` or panic → cancel + drain (the next bullet covers the second, error-free trigger); process exits 1 on Bug, 0 on clean drain. Workers never sequence shutdown themselves.

@@ -6,27 +6,51 @@ the scope index across all epics; `../cosmetic-followups.md`,
 categories. The unverified-hypothesis prefix rule
 (`**Hypothesis (unverified):**`) applies here per 0020.
 
-These entries do not slot cleanly into a single Epic 2-5 task; they either
-itemize multi-epic touchpoints, or they are Epic 1 forward-pointers whose
-implementation state has not yet been verified against the shipped Epic 1
-code. The controller should re-classify after Epic 2 kickoff (verifying
-forward-pointers; routing the remaining mid-epic items).
+These entries do not slot cleanly into a single Plan B epic task; they either
+itemize multi-epic touchpoints, or they are blocked on a precondition no
+scheduled epic supplies.
+
+**Plan B close-out status (2026-07-30).** The Epic 1 forward-pointers are all
+verified and terminal: the `0013` cfg-gate entry and the `0011`/`0017`/`0013`
+bullets of the T1 codex review are archived (`../archive/followups-resolved.md`,
+"Resolved by Plan B Epic 5b"), and that review's remaining bullets — 0009
+fallback Engine API, 0016 multi-engine GPU memory, error-variant enumeration —
+were re-routed to `plan-c.md`, since all three are gated on multi-engine or
+CUDA-fallback work. What is left below is **not Plan-B scope by decision**, not
+by omission: two bake-dependent items and one fixture-dependent one, the
+standing architecture-doc drift obligation, and one entry filed by Epic 5b
+itself that needs its own change rather than a rider.
 
 ---
 
-### T1 codex code-quality review — deferred ADR refinements
+### `cleanup_after_success` removes the attempt dir while the store mutex is held
 
-**Found in:** T1 (ADR drafts for Plan B Epic 1) — codex-advisor code-quality review.
-**Disposition:** Deferred. Three blocking findings were resolved inline via `adg comment` (0010 schema_version-as-string; 0012 cancellation-via-abort_callback; 0016 closed-oneshot shutdown carve-out). The six items below are non-blocking for Epic 1.
+**Found in:** Epic 5b Task 09 fix round (2026-07-30), while classifying blocking
+IO for [ADR-0047](../decisions/0047-blocking-io-on-the-worker-hot-path-runs-on-spawn-blocking-inline-only-when-nothing-can-be-starved.md).
+**Disposition:** Not a defect and not a starvation risk — the removal is
+class (b) under 0047 (an attempt dir is bounded by construction: depth 1,
+contents written by exactly one yt-dlp invocation), and 0047's table records the
+reasoning. What is left is needless lock-hold time: the `remove_dir_all` runs
+inside the critical section that only needs to cover the DB acknowledgement, so
+every other worker's `claim_next` waits behind an unlink that has nothing to do
+with the store. Deliberately **not** folded into Epic 5b — moving the removal
+outside the lock touches the ordering half of
+[ADR-0008](../decisions/0008-artifacts-are-durable-on-disk-before-mark-succeeded.md)
+(removal must still follow the `mark_succeeded` commit, and `StaleAfterSuccess`
+must still keep its directory), so it needs its own change with its own
+argument, not a rider on a hygiene sweep.
+**Trigger to revisit:** the next epic that touches the artifact-write / mark
+ordering, or contention evidence — a `claim_next` latency profile showing waits
+attributable to the post-commit unlink.
 
-**Trigger to revisit:**
-
-- **0009 fallback Engine API preservation:** if the CUDA build fallback is ever invoked, the superseding ADR must preserve the public `WhisperEngine` API (samples in, `TranscribeOutput` out, `Arc<AtomicBool>` cancel) so T2–T12 implementations don't have to rewrite. Re-surface when the fallback ADR is drafted. **Stands.**
-- ~~**0011 pause-safe checklist references 0017:** 0011's "before pause" checklist mentions only "no in_progress rows," but 0017 defines a stricter pause-safe contract (counts by status + artifact existence + schema-version check). Tighten 0011 to point at 0017's contract once Epic 4's `status` subcommand exists.~~ **Resolved (2026-07-29 triage):** Epic 4's `status` subcommand shipped; the 0017 done-contract now lives behind `status --verify` per lean [ADR-0041](../decisions/0041-status-is-the-read-only-operator-surface-the-0017-done-contract-lives-behind-verify.md).
-- ~~**0017 splits pause-safe vs batch-complete:** 0017 currently conflates "every row terminal" with pause-safety. `failed_retryable` rows are pause-safe (no active work) but not batch-complete.~~ **Resolved (2026-07-29 triage):** 0017's done-contract is now lean ADR-0041 (`status --verify`); the pre-migration MADR-0017 prose is frozen in `docs/madr-archive/`.
-- **0013 global log callback invariant:** whisper.cpp's `whisper_log_set` is process-global, not per-engine. The invariant should be: install the callback once before any context init; route all whisper.cpp logs through one global bridge; do not replace per engine; backend capture must be scoped by init phase or protected by synchronization. Address in T6 implementation or amend 0013 when Plan C multi-engine surfaces. **Stands.**
-- **0016 multi-engine GPU memory caution:** the "wraps `WhisperPool` of N Engines" alternative in 0016 risks duplicating model loads on a single GPU (each Engine owns its own `WhisperContext`). Prefer multi-state on one context for same-GPU parallelism; keep the wrapper option only for multi-GPU or process isolation. Amend 0016 when Plan C multi-state/multi-GPU work begins. **Stands.**
-- **Error variants enumeration:** 0012/0013/0014/0016 reference typed error variants (`WhisperInitError::BackendMismatch`, `AudioDecodeError::*`, `TranscribeError::Cancelled`, worker-panic, closed-reply) but no ADR enumerates the canonical variant set. Add to T6/T7 implementation tasks (or write a small implementation-constraint ADR if the variants drift across files). Re-surface during T6 dispatch. **Stands.**
+`cleanup_after_success` (`src/pipeline/mod.rs`) is reached from
+`mark_after_artifacts`, which is sync and holds the store mutex per ADR-0008's
+ordering contract. The unlink is therefore inside the lock. The fix is not to
+wrap it in `spawn_blocking` at the same point — that would have to detach the
+task, trading a bounded inline unlink for an unobservable one racing the next
+`acquire` (0047 rejects exactly this) — but to move the removal *after* the
+lock is released, which is a change to where the ordering contract's boundary
+sits.
 
 ---
 
@@ -46,35 +70,6 @@ exercised only implicitly via successful inference.
 When a spoken-English fixture (say 5-10 seconds, CC0-licensed) is added to
 `tests/fixtures/audio/`, this test gains real coverage. Until then, T13's
 A10 bake against real TikTok audio is the integration check.
-
----
-
-### 0013 backend assertion must be cfg(feature = "cuda")-gated
-
-**Found in:** T6 (engine init) — codex-advisor code-quality review.
-**Disposition:** Forward-pointer for T13's bake-runbook implementer. **Status unverified against shipped Epic 1 code** — confirm before archiving.
-**Trigger to revisit:** During T13 dispatch.
-
-**Audit (2026-05-18): NOT confirmed against shipped Epic 1 code. Re-investigate during Epic 5 cleanup sweep (dead-code reassessment per 0002).** The `WhisperInitError::BackendMismatch` enum variant exists in `src/transcribe.rs:303` with `#[allow(dead_code)]` and a forward-pointing comment at line 292 ("BackendMismatch is constructed by T13's backend-assertion path; suppress dead_code until then"). No `whisper_log_set` callback bridge, no construction site, no backend check are present in shipped Epic 1. Plan B Epic 1's T13 (bake runbook) shipped without the assertion. **Re-confirmed during the 2026-07-10 lean-ADR migration:** the lean 0013 record now states the contract normatively and flags the gap in its first Guidance bullet, so "remove the dead variant" is off the table — wire the assertion (cfg-gated per this entry) when engine init is next touched, likely the Epic 5 cleanup sweep.
-
-T6 currently calls `ctx_params.use_gpu(true)` unconditionally. On non-CUDA
-builds, whisper.cpp's CUDA backend is not compiled in and the load silently
-falls back to CPU — which is what we want for local dev. T13 adds the
-backend-mismatch assertion via `whisper_log_set`; the assertion must NOT
-fire on non-CUDA builds where CPU is the expected backend. Gate it via
-`cfg(feature = "cuda")` or an explicit `expected_backend` field on
-`EngineConfig`, e.g.:
-
-```rust
-#[cfg(feature = "cuda")]
-const EXPECTED_BACKEND: &str = "CUDA";
-#[cfg(not(feature = "cuda"))]
-const EXPECTED_BACKEND: &str = "CPU";
-```
-
-Then the log-callback bridge compares the captured backend string against
-`EXPECTED_BACKEND` and returns `WhisperInitError::BackendMismatch` only on
-mismatch.
 
 ---
 
@@ -126,3 +121,19 @@ Known forward-touch points:
 
 - **Epic 3 (failure-classification taxonomy)** will reshape `state-machine.md` and `orchestration.md`: typed `RetryableKind`/`UnavailableReason`/`ClassifiedFailure`, terminal-failure routing, and the `failed_retryable` retry path. Revise both deepdives and update `index.md` §4 (ADR map) for any ADRs added.
 - **Epic 4 (operator status subcommand)** will reshape `orchestration.md` §Batch validation contract: the ADR 0017 done-predicate is currently represented only by `compute_process_stats`; the Epic 4 `status` subcommand expands it. Revise `orchestration.md` and update `index.md` §4 accordingly.
+
+**Discharged instances** (the entry itself is standing maintenance and is never
+archived — only its per-epic instances close):
+
+- **Epic 5b (Plan B close-out), discharged 2026-07-30.** All four deepdives plus
+  `index.md` revised: `index.md` §4 gained ADR 0045/0046/0047 rows and the 0002
+  amendment note, §6's in-flight-stamp paragraph re-attributed to Epic 5b;
+  `data-input.md` gained per-acquire attempt directories, exactly-one-WAV
+  discovery, the `.work` sweep and the 0047 row; `state-machine.md` gained the
+  `updated_at` lifecycle-mutation contract, `requeue_failures` +
+  `operator_requeued` + the ADR-0046 row, and the `upsert_metadata_raw` claim
+  guard; `orchestration.md` gained the startup `.work` sweep and the 0047 row;
+  `transcription.md`'s GPU-verification section was rewritten from
+  "scaffolded, not yet wired" to the shipped assertion. Every `src/main.rs:N`
+  citation across the set was repointed to `src/commands.rs` after the thin-bin
+  restructure moved those call sites.
