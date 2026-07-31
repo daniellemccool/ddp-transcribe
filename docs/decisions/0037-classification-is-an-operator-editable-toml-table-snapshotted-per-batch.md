@@ -4,7 +4,7 @@ date: "2026-07-08"
 category: Failure classification
 applies_to:
     - src/classification.rs
-priority: default
+priority: invariant
 companions:
     - src/batch.rs
 ---

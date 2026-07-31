@@ -22,7 +22,10 @@ narrowing visibility, not by an allow.
 - Reach for visibility before suppression: with `lib.rs` the single module root, an unused item is `pub(crate)` or private rather than `pub`-plus-allow, and `#[warn(unreachable_pub)]` is the backstop that stops `pub` being used as a dead-code dodge.
 - Every surviving `#[allow(dead_code)]` carries a comment saying why it exists and which change removes it; review rejects bare allows, allows with no named consumer, and changes that start consuming an item without deleting its now-stale allow.
 - Don't switch to `#[expect(dead_code)]`: deadness here is configuration-dependent — an item consumed only by `test-helpers`-gated code is dead in a plain build and live under `--features test-helpers`, so an expectation fulfilled in one configuration is unfulfilled in the other and `unfulfilled_lint_expectations` is fatal under `-D warnings`.
-- Periodic audit backstop: `rg 'allow\(dead_code\)' src/` — the census should shrink, and an allow whose comment still cites double compilation is stale by definition.
+
+## Checks
+
+- Periodic audit (a trend, not a pass/fail assertion — justified allows may legitimately exist): `rg 'allow\(dead_code\)' src/` — the census should shrink, and an allow whose comment still cites double compilation is stale by definition.
 
 ## Why
 

@@ -8,6 +8,11 @@ applies_to:
     - src/lib.rs
     - Cargo.toml
 priority: invariant
+checks:
+    - desc: main.rs declares no modules — lib.rs is the single module root
+      grep: '^\s*(pub )?mod '
+      in: ["src/main.rs"]
+      expect: absent
 ---
 
 # The crate is a fat library with a thin binary behind a minimal public facade
@@ -28,8 +33,7 @@ code, and the library never calls `process::exit`.
 
 ## Checks
 
-- `rg -n '^\s*(pub )?mod ' src/main.rs` — must return nothing; a `mod` line in main re-creates the second module root this record exists to remove.
-- `rg -n 'process::exit' src/ --glob '!src/main.rs' | rg -v ':\s*//'` — must return nothing outside comments; the one exit lives in `main`, reached only via a `CommandExit` value.
+- `rg -n 'process::exit' src/ --glob '!src/main.rs' | rg -v ':\s*//'` — must return nothing outside comments (not grep-assertable: comments legitimately mention it); the one exit lives in `main`, reached only via a `CommandExit` value.
 - `rg -n '^pub use' src/lib.rs` — the façade is exactly `cli::{Cli, LogFormat}` and `commands::{dispatch, CommandExit}`; a new name here needs a façade rationale.
 
 ## Why

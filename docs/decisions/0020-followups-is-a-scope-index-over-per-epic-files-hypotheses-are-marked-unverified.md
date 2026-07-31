@@ -25,9 +25,8 @@ recording an unverified hypothesis prefixes it `**Hypothesis
 
 ## Guidance
 
-- Add an entry by appending the body to the right `docs/followups/<group>.md` and a one-line pointer to the FOLLOWUPS.md scope index; review rejects full entry bodies accumulating in the index file.
+- Add an entry by appending the body to the right `docs/followups/<group>.md` plus a one-line pointer in the FOLLOWUPS.md scope index, and never record a guess as a finding — an unverified hypothesis is prefixed `**Hypothesis (unverified):**` so the next operator verifies before acting; review rejects full entry bodies accumulating in the index file and unmarked hypotheses (they have been applied as confirmed fixes before, producing wrong-direction commits).
 - At epic close, move resolved entries to the archive **with the resolving commit SHA** — never just delete.
-- Never record a guess as a finding: unmarked hypotheses have been applied as confirmed fixes before, producing wrong-direction commits. The marker is what tells the next operator to verify first.
 - Cosmetic and bake-finding items go to their own files, not the active index — planning-time ingestion cost is the budget this structure protects.
 
 ## Why

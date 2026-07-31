@@ -4,6 +4,7 @@ date: "2026-04-17"
 category: Artifacts
 applies_to:
     - src/pipeline/mod.rs
+    - src/pipeline/pipelined.rs
     - src/output/artifacts.rs
 priority: invariant
 ---

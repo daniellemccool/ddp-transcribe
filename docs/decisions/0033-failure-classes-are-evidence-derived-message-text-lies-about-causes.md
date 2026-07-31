@@ -5,7 +5,7 @@ category: Failure classification
 applies_to:
     - src/failure.rs
     - src/classification.rs
-priority: default
+priority: invariant
 ---
 
 # Failure classes are evidence-derived; message text lies about causes

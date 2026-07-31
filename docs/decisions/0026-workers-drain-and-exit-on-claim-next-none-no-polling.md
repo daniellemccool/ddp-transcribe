@@ -21,7 +21,7 @@ Fetch workers exit on the first `claim_next() == None` (drain semantics).
 
 - Review rejects sleep/poll/backoff loops around `claim_next` and condvar-style work signals; a worker that sees `None` returns.
 - The drain signal is structural: `JoinSet::join_next()` returning `None` after all workers exit IS batch completion — don't add a separate completion channel.
-- A `process` run with zero pending rows exits immediately (claimed=0 → exit 3 per `main.rs`).
+- A `process` run with zero pending rows exits immediately (claimed=0 → exit 3 via `CommandExit::NoClaims` in `src/commands.rs`).
 - If a daemon mode (continuous ingest while draining) ever lands, polling policy is a new decision, not a tweak to this one — and claim-ordering starvation (see the in-pipeline retry record) must be revisited with it.
 
 ## Why

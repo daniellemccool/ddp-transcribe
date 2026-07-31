@@ -4,6 +4,8 @@ date: "2026-07-14"
 category: Ingest
 applies_to:
     - src/ingest.rs
+    - src/state/schema.rs
+    - src/state/mod.rs
 priority: invariant
 ---
 

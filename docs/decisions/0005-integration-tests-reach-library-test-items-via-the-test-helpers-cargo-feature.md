@@ -5,6 +5,9 @@ category: Code conventions
 applies_to:
     - Cargo.toml
     - tests/**/*.rs
+    - src/fetcher/mod.rs
+    - src/state/mod.rs
+    - src/transcribe.rs
 priority: default
 ---
 

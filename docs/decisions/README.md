@@ -54,10 +54,10 @@ Load the ADR(s) whose filename matches the area you are touching.
 
 ### Orchestration
 
-- [0025 — Worker supervision: JoinSet + CancellationToken; shutdown order is load-bearing](./0025-worker-supervision-joinset-cancellationtoken-shutdown-order-is-load-bearing.md)
+- [0025 — Shutdown order is load-bearing: cancel, drain the JoinSet, then shut down the engine](./0025-shutdown-order-is-load-bearing-cancel-drain-the-joinset-then-shut-down-the-engine.md)
 - [0026 — Workers drain and exit on claim_next None — no polling](./0026-workers-drain-and-exit-on-claim-next-none-no-polling.md)
 - [0027 — Orchestrator topology: 3 fetch workers feed 1 transcribe worker over a capacity-2 channel](./0027-orchestrator-topology-3-fetch-workers-feed-1-transcribe-worker-over-a-capacity-2-channel.md)
-- [0041 — status is the read-only operator surface; the 0017 done-contract lives behind --verify](./0041-status-is-the-read-only-operator-surface-the-0017-done-contract-lives-behind-verify.md)
+- [0041 — status is the read-only operator surface; the archived done-contract lives behind --verify](./0041-status-is-the-read-only-operator-surface-the-archived-done-contract-lives-behind-verify.md)
 - [0044 — In-run checkpointing is an operator-supplied hook that can never abort the run](./0044-in-run-checkpointing-is-an-operator-supplied-hook-that-can-never-abort-the-run.md)
 - [0047 — Blocking IO on the worker hot path runs on spawn_blocking; inline only when nothing can be starved](./0047-blocking-io-on-the-worker-hot-path-runs-on-spawn-blocking-inline-only-when-nothing-can-be-starved.md)
 
@@ -68,7 +68,7 @@ Load the ADR(s) whose filename matches the area you are touching.
 
 ### Fetcher
 
-- [0035 — Cookies ride only SensitiveLoginGated retries, with argv redaction](./0035-cookies-ride-only-sensitivelogingated-retries-with-argv-redaction.md)
+- [0035 — Cookies ride only requires-cookie retries, with argv redaction](./0035-cookies-ride-only-requires-cookie-retries-with-argv-redaction.md)
 - [0038 — Fetch format is download-first; the frugal selector runs only on NoDataBlocks retries](./0038-fetch-format-is-download-first-the-frugal-selector-runs-only-on-nodatablocks-retries.md)
 - [0042 — Fetch-time metadata is captured raw-first; parsing is a replayable post-run step](./0042-fetch-time-metadata-is-captured-raw-first-parsing-is-a-replayable-post-run-step.md)
 
