@@ -309,7 +309,11 @@ pub(crate) enum Command {
         #[arg(long)]
         limit: Option<u64>,
         /// Print the cohort size and exit without invoking yt-dlp.
-        #[arg(long)]
+        /// Conflicts with --limit: dry-run invokes nothing, so a cap on
+        /// attempts has nothing to cap. Previously the pair parsed and
+        /// --limit was silently ignored (documented only in the runbook);
+        /// clap now says so itself.
+        #[arg(long, conflicts_with = "limit")]
         dry_run: bool,
     },
 }
@@ -333,5 +337,88 @@ mod tests {
     fn clap_definition_is_internally_consistent() {
         use clap::CommandFactory;
         Cli::command().debug_assert();
+    }
+
+    /// v0.3.1 CLI hardening bundle: `tests/cli.rs`'s both-position test
+    /// proves only that clap ACCEPTS a `GlobalArgs` flag after the
+    /// subcommand. These pin the two behaviors that acceptance leaves
+    /// unproven, and they live here rather than in `tests/cli.rs` because
+    /// `Cli::global` is `pub(crate)` (0045) — reading the parsed field is
+    /// only possible in-crate. `try_parse_from` also means no process spawn.
+    ///
+    /// 1. VALUE PROPAGATION: the value given after the subcommand actually
+    ///    reaches `GlobalArgs`, rather than the field keeping its default.
+    #[test]
+    fn global_flag_value_propagates_from_the_post_subcommand_position() {
+        let cli = Cli::try_parse_from([
+            "ddp-transcribe",
+            "status",
+            "--state-db",
+            "/after/state.sqlite",
+            "--transcripts",
+            "/after/transcripts",
+            "--inbox",
+            "/after/inbox",
+            "--download-workers",
+            "7",
+            "--stale-claim-threshold",
+            "45s",
+        ])
+        .expect("post-subcommand globals must parse");
+        assert_eq!(cli.global.state_db, PathBuf::from("/after/state.sqlite"));
+        assert_eq!(
+            cli.global.transcripts,
+            PathBuf::from("/after/transcripts"),
+            "the post-subcommand value must not be shadowed by the default"
+        );
+        assert_eq!(cli.global.inbox, PathBuf::from("/after/inbox"));
+        assert_eq!(cli.global.download_workers, Some(7));
+        assert_eq!(
+            cli.global.stale_claim_threshold,
+            Some(std::time::Duration::from_secs(45))
+        );
+        // Untouched globals still hold their declared defaults — the
+        // assertions above are about propagation, not about the whole
+        // struct being rebuilt from the subcommand's matches.
+        assert!(matches!(cli.global.profile, Profile::Dev));
+        assert!(matches!(cli.global.log_format, LogFormat::Human));
+    }
+
+    /// 2. DUPLICATE PRECEDENCE: the same global flag given both before AND
+    ///    after the subcommand. Clap resolves this last-occurrence-wins;
+    ///    this repo has never pinned that inherited behavior, so an operator
+    ///    who writes `--state-db A ... process --state-db B` gets B.
+    #[test]
+    fn duplicate_global_flag_takes_the_last_occurrence() {
+        let cli = Cli::try_parse_from([
+            "ddp-transcribe",
+            "--state-db",
+            "/before/state.sqlite",
+            "--download-workers",
+            "1",
+            "status",
+            "--state-db",
+            "/after/state.sqlite",
+            "--download-workers",
+            "9",
+        ])
+        .expect("a duplicated global is not a usage error");
+        assert_eq!(
+            cli.global.state_db,
+            PathBuf::from("/after/state.sqlite"),
+            "the post-subcommand occurrence wins"
+        );
+        assert_eq!(cli.global.download_workers, Some(9));
+
+        // Pre-subcommand-only still reaches the field (the baseline the
+        // duplicate case is measured against).
+        let cli = Cli::try_parse_from([
+            "ddp-transcribe",
+            "--state-db",
+            "/before/state.sqlite",
+            "status",
+        ])
+        .expect("pre-subcommand globals must parse");
+        assert_eq!(cli.global.state_db, PathBuf::from("/before/state.sqlite"));
     }
 }

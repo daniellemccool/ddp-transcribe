@@ -25,10 +25,16 @@ use ddp_transcribe::transcribe::{PerCallConfig, TranscribeOutput, Transcriber};
 /// - `AlwaysFailsBug`: returns `Err(TranscribeError::Bug { .. })` — drives
 ///   the Bug-escalation dispatch arm (T07 review fix: `run_serial` must
 ///   return `Err` for a transcribe-side Bug, not mark the row retryable).
+/// - `AlwaysFailsTimeout`: returns `Err(TranscribeError::Timeout { .. })` —
+///   also retryable, but `classify_transcribe_error` gives it a DIFFERENT
+///   label (`ToolTimeout`) than the catch-all's `TranscribeOther`. Epic 5b:
+///   the kind-string end-to-end assertion needs two distinguishable tags,
+///   or a constant would pass it.
 pub(crate) enum FakeBehavior {
     Scripted(TranscribeOutput),
     AlwaysFailsRetryable,
     AlwaysFailsBug,
+    AlwaysFailsTimeout,
 }
 
 pub(crate) struct FakeTranscriber {
@@ -74,6 +80,15 @@ impl FakeTranscriber {
             behavior: FakeBehavior::AlwaysFailsBug,
         }
     }
+
+    /// Always fails with `TranscribeError::Timeout` — retryable like
+    /// [`Self::always_fails_retryable`], but classified under the
+    /// `ToolTimeout` label rather than the `TranscribeOther` catch-all.
+    pub(crate) fn always_fails_timeout() -> Self {
+        Self {
+            behavior: FakeBehavior::AlwaysFailsTimeout,
+        }
+    }
 }
 
 #[async_trait]
@@ -89,6 +104,9 @@ impl Transcriber for FakeTranscriber {
             FakeBehavior::AlwaysFailsRetryable => Err(TranscribeError::EmptyOutput),
             FakeBehavior::AlwaysFailsBug => Err(TranscribeError::Bug {
                 detail: "FakeTranscriber::always_fails_bug synthetic invariant breach".into(),
+            }),
+            FakeBehavior::AlwaysFailsTimeout => Err(TranscribeError::Timeout {
+                duration: Duration::from_secs(1),
             }),
         }
     }

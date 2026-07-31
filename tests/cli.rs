@@ -244,6 +244,49 @@ fn requeue_failures_accepts_qualified_invocations() {
 }
 
 #[test]
+fn backfill_metadata_rejects_dry_run_with_limit() {
+    // `--dry-run` never invoked yt-dlp, so `--limit` was silently ignored —
+    // documented in the runbook and nowhere else. clap now rejects the pair
+    // outright, so the operator learns it from the tool (v0.3.1 CLI bundle).
+    Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args(["backfill-metadata", "--dry-run", "--limit", "5"])
+        .assert()
+        .code(2)
+        .stderr(contains("--limit"));
+    // Order-independent: clap must reject it whichever flag comes first.
+    Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args(["backfill-metadata", "--limit", "5", "--dry-run"])
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn backfill_metadata_accepts_dry_run_and_limit_separately() {
+    // The conflict must be exactly the PAIR: each flag alone still parses
+    // (these get past clap and fail later on the missing state DB).
+    let cases: &[&[&str]] = &[
+        &["backfill-metadata", "--dry-run"],
+        &["backfill-metadata", "--limit", "5"],
+    ];
+    for args in cases {
+        let mut argv = vec!["--state-db", "/nonexistent/x.sqlite"];
+        argv.extend_from_slice(args);
+        let assert = Command::cargo_bin("ddp-transcribe")
+            .unwrap()
+            .args(&argv)
+            .assert()
+            .failure();
+        assert_ne!(
+            assert.get_output().status.code(),
+            Some(2),
+            "clap rejected {args:?}"
+        );
+    }
+}
+
+#[test]
 fn config_echo_omits_model_path_for_non_model_subcommands() {
     let tmp = tempfile::TempDir::new().unwrap();
     let db = tmp.path().join("state.sqlite");

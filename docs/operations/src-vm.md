@@ -350,9 +350,11 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite load-metadata
 - **The printed cohort count is an advisory snapshot**, taken once before the
   pass starts. If a `process` run is working concurrently it can drift from the
   run's own `examined` count — that divergence is expected, not a miscount.
-- **`--dry-run` reports the FULL cohort and ignores `--limit`**: it prints the
-  cohort size and exits without invoking yt-dlp at all. Use `--limit N` (without
-  `--dry-run`) for the smoke run.
+- **`--dry-run` reports the FULL cohort and rejects `--limit`**: it prints the
+  cohort size and exits without invoking yt-dlp at all, so a cap on attempts has
+  nothing to cap. Since v0.4.0 clap rejects the pair as a usage error (exit 2)
+  rather than silently ignoring `--limit`. Use `--limit N` (without `--dry-run`)
+  for the smoke run.
 - **The stats line** is `examined / captured / capture-failed / already-filled /
   insert-failed`. Every examined video increments exactly one of the four
   outcomes. `capture-failed` is *expected*, not an error signal: the cohort is
