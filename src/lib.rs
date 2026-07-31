@@ -19,6 +19,7 @@ mod backfill;
 mod cli;
 mod commands;
 mod config;
+mod failure;
 mod metadata_loader;
 mod status;
 
@@ -27,7 +28,6 @@ pub mod batch;
 pub mod canonical;
 pub mod classification;
 pub mod errors;
-pub mod failure;
 pub mod fetcher;
 pub mod ingest;
 pub mod output;

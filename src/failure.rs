@@ -13,34 +13,30 @@ use crate::errors::{FetchError, TranscribeError};
 /// operator-editable classification table. Same bare-variant spelling the
 /// retired enums used; DB columns are TEXT throughout, so nothing stored
 /// changes shape.
-pub mod labels {
-    pub const TOOL_TIMEOUT: &str = "ToolTimeout";
-    pub const NETWORK_TRANSIENT: &str = "NetworkTransient";
-    pub const YTDLP_OTHER: &str = "YtDlpOther";
-    pub const TRANSCRIBE_OTHER: &str = "TranscribeOther";
+pub(crate) mod labels {
+    pub(crate) const TOOL_TIMEOUT: &str = "ToolTimeout";
+    pub(crate) const NETWORK_TRANSIENT: &str = "NetworkTransient";
+    pub(crate) const YTDLP_OTHER: &str = "YtDlpOther";
+    pub(crate) const TRANSCRIBE_OTHER: &str = "TranscribeOther";
 }
 
 // Constructed within classify_fetch_error/classify_transcribe_error, both
 // reached from the pipeline dispatch.
+//
+// 0002 (final-review fix): this struct carried `tool`/`exit_code`/`signal`
+// fields that were populated on every verdict but never read outside the
+// derived `Debug`/`Clone` impls. While `failure` was `pub`, external
+// reachability shielded them from `dead_code`; narrowing the module to
+// `pub(crate)` (finding 2) exposed the dead fields, and they were removed
+// rather than suppressed per the ADR — no named consumer was landing for
+// them. If a raw tool/exit_code/signal view is ever needed (e.g. an
+// operator-facing detail beyond the label string), reintroduce the fields
+// alongside that reader rather than reserving them speculatively.
 #[derive(Debug, Clone)]
-pub struct FailureContext {
-    // `tool`/`exit_code`/`signal` are populated for every verdict but only
-    // read back through `Debug`. Nothing reconstructs a `FailureContext` to
-    // display them: the start-of-batch sweep classifies the *stored* message
-    // text directly via the classification table's `classify`, and both the
-    // sweep and run censuses aggregate on the label string only — there is no
-    // raw tool/exit_code/signal display anywhere. Retained as the structured
-    // diagnostic payload behind `Debug`; an operator-facing raw-context view
-    // would be their first non-`Debug` reader.
-    pub tool: &'static str,
-    pub exit_code: Option<i32>,
-    /// Unix signal that killed the tool, when applicable. Not read by the
-    /// classifiers themselves or by the start-of-batch sweep/run census
-    /// (see note above).
-    pub signal: Option<i32>,
-    pub stderr_excerpt: String,
+pub(crate) struct FailureContext {
+    pub(crate) stderr_excerpt: String,
     /// Which rule matched — audit trail for "why was this row written off".
-    pub classification_reason: &'static str,
+    pub(crate) classification_reason: &'static str,
 }
 
 impl FailureContext {
@@ -49,7 +45,7 @@ impl FailureContext {
     /// excerpt so nothing is lost.
     // Dispatch calls this to build the message/reason text persisted to
     // state columns.
-    pub fn message(&self) -> String {
+    pub(crate) fn message(&self) -> String {
         format!("[{}] {}", self.classification_reason, self.stderr_excerpt)
     }
 }
@@ -62,7 +58,7 @@ impl FailureContext {
 /// failure-time decision in `record_fetch_failure` (T04) parks them when
 /// no cookies are configured.
 #[derive(Debug)]
-pub enum ClassifiedFailure {
+pub(crate) enum ClassifiedFailure {
     Retryable {
         label: String,
         // Populated by every Retryable arm (classify_fetch_error's ToolFailed
@@ -86,15 +82,13 @@ pub enum ClassifiedFailure {
 // dispatch path via `fetch_worker`/`run_serial`. Epic 4a T03: the `ToolFailed`
 // arm's message classification consults the operator-editable
 // `ClassificationTable` instead of a hardcoded `classify_message` chain.
-pub fn classify_fetch_error(e: &FetchError, table: &ClassificationTable) -> ClassifiedFailure {
-    let ctx = |exit_code: Option<i32>, signal: Option<i32>, excerpt: &str, reason: &'static str| {
-        FailureContext {
-            tool: "yt-dlp",
-            exit_code,
-            signal,
-            stderr_excerpt: excerpt.to_string(),
-            classification_reason: reason,
-        }
+pub(crate) fn classify_fetch_error(
+    e: &FetchError,
+    table: &ClassificationTable,
+) -> ClassifiedFailure {
+    let ctx = |excerpt: &str, reason: &'static str| FailureContext {
+        stderr_excerpt: excerpt.to_string(),
+        classification_reason: reason,
     };
     let retryable = |label: &str, ctx: FailureContext| ClassifiedFailure::Retryable {
         label: label.to_string(),
@@ -104,38 +98,24 @@ pub fn classify_fetch_error(e: &FetchError, table: &ClassificationTable) -> Clas
     match e {
         FetchError::ToolTimeout { duration, .. } => retryable(
             labels::TOOL_TIMEOUT,
-            ctx(
-                None,
-                None,
-                &format!("timed out after {duration:?}"),
-                "tool timeout",
-            ),
+            ctx(&format!("timed out after {duration:?}"), "tool timeout"),
         ),
         FetchError::ToolNotFound { detail, .. } => ClassifiedFailure::Bug {
-            ctx: ctx(
-                None,
-                None,
-                detail,
-                "tool binary missing: configuration broken",
-            ),
+            ctx: ctx(detail, "tool binary missing: configuration broken"),
         },
         FetchError::WorkDirCreate { path, detail } => ClassifiedFailure::Bug {
             ctx: ctx(
-                None,
-                None,
                 &format!("{}: {detail}", path.display()),
                 "work dir creation failed: environment broken",
             ),
         },
         FetchError::SystemIo { detail, .. } => retryable(
             labels::NETWORK_TRANSIENT,
-            ctx(None, None, detail, "system io reading subprocess output"),
+            ctx(detail, "system io reading subprocess output"),
         ),
         FetchError::MissingOutput { path } => retryable(
             labels::YTDLP_OTHER,
             ctx(
-                Some(0),
-                None,
                 &format!("{} missing after exit 0", path.display()),
                 "yt-dlp exit 0 but expected wav missing",
             ),
@@ -147,30 +127,19 @@ pub fn classify_fetch_error(e: &FetchError, table: &ClassificationTable) -> Clas
         FetchError::AmbiguousOutput { dir, count } => retryable(
             labels::YTDLP_OTHER,
             ctx(
-                Some(0),
-                None,
                 &format!("{count} wav files in {} after exit 0", dir.display()),
                 "yt-dlp exit 0 but attempt dir holds more than one wav",
             ),
         ),
-        FetchError::NetworkError(detail) => retryable(
-            labels::NETWORK_TRANSIENT,
-            ctx(None, None, detail, "network error"),
-        ),
+        FetchError::NetworkError(detail) => {
+            retryable(labels::NETWORK_TRANSIENT, ctx(detail, "network error"))
+        }
         FetchError::ParseError(detail) => retryable(
             labels::YTDLP_OTHER,
-            ctx(None, None, detail, "fetcher output parse failure"),
+            ctx(detail, "fetcher output parse failure"),
         ),
-        FetchError::ToolFailed {
-            exit_code,
-            signal,
-            stderr_excerpt,
-            ..
-        } => {
+        FetchError::ToolFailed { stderr_excerpt, .. } => {
             let base = FailureContext {
-                tool: "yt-dlp",
-                exit_code: Some(*exit_code),
-                signal: *signal,
                 stderr_excerpt: stderr_excerpt.clone(),
                 classification_reason: "stderr message class",
             };
@@ -199,11 +168,8 @@ pub fn classify_fetch_error(e: &FetchError, table: &ClassificationTable) -> Clas
 // reached from `main()` via `run_pipelined`. Transcribe errors are
 // structural (no yt-dlp stderr to classify), so this keeps its unchanged
 // signature — no `ClassificationTable` argument (Epic 4a T03 brief).
-pub fn classify_transcribe_error(e: &TranscribeError) -> ClassifiedFailure {
+pub(crate) fn classify_transcribe_error(e: &TranscribeError) -> ClassifiedFailure {
     let ctx = |excerpt: String, reason: &'static str| FailureContext {
-        tool: "whisper-rs",
-        exit_code: None,
-        signal: None,
         stderr_excerpt: excerpt,
         classification_reason: reason,
     };
@@ -334,7 +300,6 @@ mod tests {
         match classify_fetch_error(&e, &table) {
             ClassifiedFailure::Unavailable { label, ctx } => {
                 assert_eq!(label, "IpBlockedMessage");
-                assert_eq!(ctx.exit_code, Some(1));
                 assert!(!ctx.classification_reason.is_empty());
             }
             other => panic!("expected Unavailable(IpBlockedMessage), got {other:?}"),

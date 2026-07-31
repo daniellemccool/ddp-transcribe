@@ -265,7 +265,7 @@ pub enum FetchPhaseError {
 /// (the classification-table-driven classifier); `Decode` is always
 /// `Retryable` — a corrupt/truncated WAV on disk doesn't indict the source
 /// video, and a refetch may produce a decodable file.
-pub fn classify_fetch_phase(
+pub(crate) fn classify_fetch_phase(
     e: &FetchPhaseError,
     table: &crate::classification::ClassificationTable,
 ) -> crate::failure::ClassifiedFailure {
@@ -276,9 +276,6 @@ pub fn classify_fetch_phase(
             label: labels::TRANSCRIBE_OTHER.to_string(),
             requires_cookie: false,
             ctx: FailureContext {
-                tool: "hound",
-                exit_code: None,
-                signal: None,
                 stderr_excerpt: de.to_string(),
                 classification_reason: "wav decode failure: refetch may repair a corrupt download",
             },

@@ -47,8 +47,10 @@ test-helpers = []
 # lints that protect correctness or that we want mechanically normalized. Doc-prose
 # lints (doc_markdown, missing_errors_doc, missing_panics_doc) and must_use_candidate
 # are deliberately NOT enabled. `unwrap_used`/`expect_used` are scoped away from test
-# code via crate-root `cfg_attr(any(test, feature="test-helpers"), allow(...))` in
-# lib.rs/main.rs and an unconditional `allow` header in each tests/*.rs.
+# code via a crate-root `cfg_attr(test, allow(...))` in lib.rs ONLY — narrower than
+# `--features test-helpers` would allow, so unwrap/expect stay denied on production
+# code even under that feature; main.rs carries no such allow. Each tests/*.rs
+# carries its own unconditional `allow` header.
 [lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"

@@ -67,11 +67,11 @@ The `status` column is CHECK-constrained to five string values (`src/state/schem
 - **`in_progress`** — actively claimed by a worker; not eligible for claim until the worker finishes or the stale-claim sweep recovers it.
 - **`succeeded`** — terminal success; transcript artifact on disk, never re-attempted.
 - **`failed_retryable`** — a recoverable error was parked here; `last_retryable_kind` and `last_retryable_message` are populated. **Not a sink** (since Epic 3): `claim_next` selects only `pending` rows. Epic 4a ([ADR 0036](../../decisions/0036-retry-is-in-pipeline-capped-failure-time-requeue-the-re-fetch-is-the-liveness-oracle.md)) gives the state two in-pipeline exits at failure time via `record_fetch_failure` — `retry_requeued` (retryable and `attempt_count` under the lifetime cap → `pending`) and `cookie_parked` (a requires-cookie class with no cookies configured → stays `failed_retryable`, awaiting a cookie run) — plus the exhaust case that parks here when the cap is hit. The start-of-batch sweep ([ADR 0036](../../decisions/0036-retry-is-in-pipeline-capped-failure-time-requeue-the-re-fetch-is-the-liveness-oracle.md)) re-adjudicates every parked row through the classification table: `sweep_requeue` (retryable under cap → `pending`) and `sweep_mark_terminal` (a terminal-dispositioned class → `failed_terminal`). What no automatic mechanism reaches is the **cap-exhausted** residue — and, from `failed_terminal`, anything at all: since Epic 5b the operator `requeue-failures` subcommand is the one sanctioned exit for both, a default-deny eligibility override rather than a second classifier ([ADR 0046](../../decisions/0046-requeue-failures-is-a-forensic-default-deny-override-of-retry-eligibility.md)).
-- **`failed_terminal`** — a non-recoverable failure was recorded by `mark_terminal_failure` (inline pipeline write-off per [ADR 0033](../../decisions/0033-failure-classes-are-evidence-derived-message-text-lies-about-causes.md)) or by `sweep_mark_terminal` (start-of-batch sweep write-off); `terminal_reason` and `terminal_message` are populated. Sink; not re-attempted.
+- **`failed_terminal`** — a non-recoverable failure was recorded by `mark_terminal_failure` (inline pipeline write-off per [ADR 0033](../../decisions/0033-failure-classes-are-evidence-derived-message-text-lies-about-causes.md)) or by `sweep_mark_terminal` (start-of-batch sweep write-off); `terminal_reason` and `terminal_message` are populated. Sink for every automatic mechanism; not re-attempted by the pipeline or the sweep — its one sanctioned exit is the operator `requeue-failures` override (Epic 5b, [ADR 0046](../../decisions/0046-requeue-failures-is-a-forensic-default-deny-override-of-retry-eligibility.md)), see below.
 
 ### State-transition diagram
 
-Edges are drawn only for transitions that exist in current code. Since Epic 4a the `failed_retryable` exits are taken by the pipeline itself (`record_fetch_failure` at failure time) and by the start-of-batch sweep — there is no operator subcommand in the loop.
+Edges are drawn only for transitions that exist in current code. Since Epic 4a the `failed_retryable` exits at failure time are taken by the pipeline itself (`record_fetch_failure`) and by the start-of-batch sweep. Since Epic 5b a third edge exists out of both failure states: the operator `requeue-failures` subcommand (`Store::requeue_failures`, [ADR 0046](../../decisions/0046-requeue-failures-is-a-forensic-default-deny-override-of-retry-eligibility.md)) moves matched `failed_retryable` rows back to `pending` unconditionally, and matched `failed_terminal` rows back to `pending` under `--include-terminal` — the one sanctioned exit from `failed_terminal`. It is drawn separately below rather than folded into the sweep box because it is operator-invoked, not automatic.
 
 ```
                               +------------+
@@ -92,9 +92,11 @@ Edges are drawn only for transitions that exist in current code. Since Epic 4a t
                   v                 v                 v
           +------------+  +-------------------+  +------------------+
           | succeeded  |  | failed_retryable  |  | failed_terminal  |
-          | (terminal) |  | (retry exits      |  | (terminal, sink) |
-          +------------+  |  below, ADR 0036) |  +------------------+
-                          +-------------------+
+          | (terminal) |  | (retry exits      |  | (sink for every  |
+          +------------+  |  below, ADR 0036) |  |  automatic path, |
+                          +-------------------+  |  operator exit   |
+                                                  |  below, ADR 0046)|
+                                                  +------------------+
 
    record_fetch_failure (in-pipeline, at failure time, ADR 0036): one
    transaction decides where the failed claim lands —
@@ -113,6 +115,18 @@ Edges are drawn only for transitions that exist in current code. Since Epic 4a t
     |                   |   attempt_count < cap)     |     pending      |
     |                   +--------------------------> +------------------+
     +-------------------+
+
+   Operator override (Epic 5b; requeue-failures -> Store::requeue_failures,
+   ADR 0046) — worker_id = 'operator:{hostname}-{pid}'; writes one
+   operator_requeued event per row:
+
+    +-------------------+  requeue-failures          +------------------+
+    | failed_retryable  +--------------------------> |     pending      |
+    +-------------------+  (unconditional)           +------------------+
+
+    +-------------------+  requeue-failures          +------------------+
+    | failed_terminal   +--------------------------> |     pending      |
+    +-------------------+  (--include-terminal only) +------------------+
 ```
 
 Key code references:
@@ -122,6 +136,7 @@ Key code references:
 - `mark_terminal_failure` sets `status = 'failed_terminal'` (`src/state/mod.rs`); callers are the pipeline's inline write-off dispatch arms (`fetch_worker` in `src/pipeline/pipelined.rs` and `run_serial`'s error arm in `src/pipeline/serial.rs`)
 - `sweep_mark_terminal` sets `status = 'failed_terminal'` from `failed_retryable` (`src/state/mod.rs`)
 - `sweep_requeue` sets `status = 'pending'` from `failed_retryable`, gated by `attempt_count < ?` in the predicate (`src/state/mod.rs`)
+- `requeue_failures` sets `status = 'pending'` from `failed_retryable` (always) or `failed_terminal` (only under `--include-terminal`), writing one `operator_requeued` event per row; the operator-invoked `requeue-failures` subcommand's `Store` half (`src/state/mod.rs`)
 
 ## Claim contention
 

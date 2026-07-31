@@ -191,8 +191,10 @@ pub struct FetchedItem {
 /// pushes a [`FetchedItem`] onto the channel. Exits cleanly on
 /// `claim_next == None` (drain semantics per 0026 — no polling).
 ///
-/// **Error classification (Epic 3 T07; Epic 4a T06).** `fetch_and_decode`'s
-/// [`super::FetchPhaseError`] is run through [`classify_fetch_phase`]:
+/// **Error classification (Epic 3 T07; Epic 4a T06).** The
+/// [`super::FetchPhaseError`] from [`super::acquire_audio`] /
+/// [`super::decode_fetched`] (the split halves this worker calls directly —
+/// see *Cancellation latency* below) is run through [`classify_fetch_phase`]:
 /// - `Bug`: returns `Err` — the orchestrator reacts per 0025 (cancel all +
 ///   drain).
 /// - `Unavailable`: write-off class (ADR 0033) — calls
@@ -207,11 +209,13 @@ pub struct FetchedItem {
 /// ADR-0007 input-side accounting.
 ///
 /// **Mutex hold-time discipline.** The shared store guard is acquired
-/// briefly for `claim_next` and the failure mutators only; it is
-/// dropped before the multi-second `fetch_and_decode().await` so other
-/// fetch workers can claim concurrently (SQLite's BEGIN IMMEDIATE
-/// already serializes the actual claim transaction at the connection
-/// level).
+/// briefly for `claim_next` and the failure mutators only; it is dropped
+/// before the multi-second `acquire_audio().await` / `decode_fetched().await`
+/// pair so other fetch workers can claim concurrently (SQLite's BEGIN
+/// IMMEDIATE already serializes the actual claim transaction at the
+/// connection level). Only the acquire half is cancellable (wrapped in the
+/// `select!` below); decode is always awaited to completion once acquire
+/// succeeds — see *Cancellation latency* below for why.
 ///
 /// **Cancellation latency (T16, closed out here).** The `acquire_audio`
 /// future is wrapped in a `tokio::select!` against the `CancellationToken`,
