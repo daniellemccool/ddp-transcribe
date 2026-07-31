@@ -24,7 +24,7 @@ const PAGE_SIZE: usize = 1_000;
 /// Backfill stats: input-side counters, verb-named (ADR-0007). Every
 /// examined video increments exactly one outcome counter.
 #[derive(Debug, Default, Serialize)]
-pub struct BackfillStats {
+pub(crate) struct BackfillStats {
     /// Cohort videos attempted this run.
     pub videos_examined: u64,
     /// Envelopes captured and inserted.
@@ -60,7 +60,7 @@ impl std::fmt::Display for BackfillStats {
 /// Deliberately serial — one yt-dlp invocation at a time is the rate
 /// limit toward TikTok for a ~10K-row cohort; a worker pool here would
 /// buy nothing but a block.
-pub async fn backfill_metadata(
+pub(crate) async fn backfill_metadata(
     store: &mut Store,
     ytdlp_timeout: Duration,
     limit: Option<u64>,

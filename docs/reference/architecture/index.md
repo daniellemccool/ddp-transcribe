@@ -68,13 +68,14 @@ Every ADR currently in `docs/decisions/`, grouped by the subsystem it governs. C
 | ADR | Title | Notes |
 |-----|-------|-------|
 | 0001 | Per-task file split for plans | Why this plan is a directory, not a single file. |
-| 0002 | Dead-code suppression strategy | Build-time conventions. |
+| 0002 | Dead-code suppression strategy | Build-time conventions. Amended Epic 5b: visibility narrowing, not suppression, is the answer to a `dead_code` finding. |
 | 0003 | Test discipline + brief-deviation honesty | Commit-message conventions. |
 | 0005 | `test-helpers` Cargo feature | Why integration tests need this feature flag. |
 | 0007 | Stats structs use input-side counters | Reporting conventions. |
 | 0018 | Three-tier review with codex-advisor | Code-review protocol. Architecture doc is not subject to this tier. |
 | 0019 | Subagent report format + phase restart | Plan-execution conventions. |
 | 0020 | FOLLOWUPS four-file split | How active follow-up debt is tracked. |
+| 0045 | Fat library, thin binary, four-name public façade | Epic 5b. `lib.rs` is the crate's single module root; `main.rs` declares no modules and owns the one `process::exit`; subcommands return `CommandExit`. Cross-cuts every subsystem's visibility. |
 
 ### Data input (ingest + fetcher)
 
@@ -97,6 +98,7 @@ Every ADR currently in `docs/decisions/`, grouped by the subsystem it governs. C
 | 0036 | In-batch capped retry + end-of-queue claim ordering; fetcher is the liveness oracle | `record_fetch_failure`; `claim_next` `attempt_count ASC` ordering; start-of-batch sweep mutators + audit events; `batch_runs` lifecycle. Cross-cuts orchestration. |
 | 0037 | Operator-editable TOML classification table + compiled default + batch provenance | Labels/dispositions written by the failure mutators; `batch_runs.policy_toml` snapshot. Cross-cuts orchestration (classifier dispatch). |
 | 0040 | Analysis window is computed at ingest; `recompute-window` is the only flag mutator | `watch_history.in_window` + `watched_at_raw`; day-granularity absorbs 0039's unresolved ambiguity. |
+| 0046 | `requeue-failures` is a forensic default-deny override of retry eligibility | Epic 5b. The operator escape hatch for cap-exhausted and terminalized rows; `Store::requeue_failures`, `operator_requeued` events, the failure-event clock. Grants eligibility without resetting `attempt_count`; carve-out under 0036, which was amended to name it. |
 
 ### Transcription (audio + whisper-rs + output)
 
@@ -123,6 +125,7 @@ Every ADR currently in `docs/decisions/`, grouped by the subsystem it governs. C
 | 0035 | Cookies scoped to SensitiveLoginGated retries with argv redaction | Kind-gated `cookie_opts_for` fetch opts. Cross-cuts data input (yt-dlp invocation). |
 | 0041 | `status` is the read-only operator surface; the 0017 done-contract lives behind `--verify` | Counts/kinds/claim-ages/batch history; `--verify` pause-safe verdict, exit 1 on violation. Lean successor to archived 0017. |
 | 0044 | In-run checkpointing is an operator-supplied hook that can never abort the run | `process --checkpoint-cmd/--checkpoint-every`; supervised periodic task, failures warn and count. Cross-cuts 0025 (its cancel-on-clean-drain). |
+| 0047 | Blocking IO on the worker hot path runs on `spawn_blocking`; inline only when nothing can be starved | Epic 5b. The three-class (a/b/c) policy for sync calls reachable from an async fn, with the audit table in its Context appendix. Cross-cuts data input (`decode_wav`) and transcription (`write_artifacts_durable`). |
 
 ### Operations (out of architecture-doc scope)
 
@@ -161,5 +164,5 @@ The architecture doc itself is **not** subject to the codex-advisor / Sonnet rev
 
 - **ADR-redirect-first.** Where an ADR captures rationale, point at the ADR rather than restating it. The architecture doc owns the *what* (noun layer) and the *narrative* (donor's journey); ADRs own the *why*.
 - **Citation style.** Inline `src/path/file.rs:N` for any specific behavioral claim. Line numbers drift; the file path stays valid.
-- **In-flight stamp.** While an epic is actively reshaping the `state-machine.md` or `orchestration.md` subsystem, that file carries an "as of commit `<sha>`" stamp pointing at the active plan; the stamp is removed at epic close. No file carries one currently — Plan B Epic 5a (campaign safety), which last reshaped all three, has closed: `orchestration.md` (the startup tmp sweep and the checkpoint-hook task with its count-based clean-drain cancel), `state-machine.md` (`swept_stale` audit rows and real-hostname `{hostname}-{pid}` claim attribution), and `data-input.md` (the single-transaction, rolled-back `ingest --dry-run`). Epic 4c was the prior reshaper of the first two (schema v5 metadata columns + `video_metadata_raw`, the `write_artifacts_durable` / `mark_after_artifacts` split).
+- **In-flight stamp.** While an epic is actively reshaping the `state-machine.md` or `orchestration.md` subsystem, that file carries an "as of commit `<sha>`" stamp pointing at the active plan; the stamp is removed at epic close. No file carries one currently — Plan B Epic 5b (the Plan-B close-out), which last reshaped all four deepdives, has closed: `data-input.md` (per-acquire attempt directories, exactly-one-WAV discovery, the `.work` sweep), `state-machine.md` (the `updated_at` lifecycle-mutation contract, `requeue_failures` + `operator_requeued`, the `upsert_metadata_raw` claim guard), `orchestration.md` and `transcription.md` (the thin-bin restructure moved every `main.rs` call site into `commands.rs`; the ADR-0013 backend assertion now actually fires). Epic 5a was the prior reshaper (the startup tmp sweep and checkpoint-hook task; `swept_stale` audit rows and real-hostname claim attribution; the single-transaction rolled-back `ingest --dry-run`), and Epic 4c before it (schema v5 metadata columns + `video_metadata_raw`, the `write_artifacts_durable` / `mark_after_artifacts` split).
 - **Diagrams.** ASCII only. Currently two: a topology diagram in `orchestration.md`, a state-transition diagram in `state-machine.md`.

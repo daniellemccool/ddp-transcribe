@@ -9,7 +9,18 @@ use crate::errors::FetchError;
 #[derive(Debug)]
 pub enum Acquisition {
     /// Audio file written to disk; pipeline will hand to whisper.cpp next.
-    AudioFile(PathBuf),
+    ///
+    /// `attempt_dir` (Epic 5b) is the fetcher's per-acquire scratch directory
+    /// holding `wav` — the caller OWNS it from the moment `acquire` returns
+    /// `Ok`, and removes it at every lifecycle end (success after the DB
+    /// commit, or a decode/transcribe failure). `None` means the fetcher has
+    /// no directory to hand over (the test `FakeFetcher` serving a wav the
+    /// test staged itself); the caller then falls back to removing just the
+    /// wav on success and leaves files it did not create alone.
+    AudioFile {
+        wav: PathBuf,
+        attempt_dir: Option<PathBuf>,
+    },
 }
 
 /// Fetch-format selection policy (staged experiment, ADR 0038 — see
@@ -56,19 +67,36 @@ impl FetchPolicy {
 /// retries only. Format-policy scope is likewise policy: `Frugal` is keyed
 /// on `NoDataBlocks` retries (see `pipeline::cookie_opts_for`). This
 /// struct just carries both decisions to the tool adapter.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct FetchOpts {
     pub cookies_file: Option<PathBuf>,
     pub format_policy: FetchPolicy,
+}
+
+/// Hand-rolled so `{:?}` can never leak the cookie path (ADR 0035: the path
+/// must not reach logs, error messages, or the state DB — `scrub_cookie_path`
+/// and `CommandSpec::redact_arg_indices` cover the other two routes). The
+/// derived impl printed it verbatim; no caller formats a `FetchOpts` today,
+/// so this closes the footgun before one does. Whether cookies are attached
+/// stays visible — that's the part operators debug with.
+impl std::fmt::Debug for FetchOpts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FetchOpts")
+            .field(
+                "cookies_file",
+                &self.cookies_file.as_ref().map(|_| "[COOKIES-REDACTED]"),
+            )
+            .field("format_policy", &self.format_policy)
+            .finish()
+    }
 }
 
 /// Raw fetch-time metadata capture (Epic 4c): the versioned envelope JSON
 /// stored verbatim in `video_metadata_raw`. Produced on success AND
 /// tool-failure paths; absent on structural failures (timeout/spawn/io).
 ///
-/// Task 03 wired both pipeline paths to read the field into
-/// `Store::upsert_metadata_raw` before outcome dispatch, lifting the
-/// placeholder `#[allow(dead_code)]` per 0002.
+/// Both pipeline paths read the field into `Store::upsert_metadata_raw`
+/// before outcome dispatch (0042).
 #[derive(Debug, Clone)]
 pub struct MetadataCapture {
     pub envelope_json: String,
@@ -81,6 +109,13 @@ pub trait VideoFetcher: Send + Sync {
     /// AND classified-failure paths (the printed line lands before the
     /// media transfer), absent on structural failures. Callers persist it
     /// BEFORE interpreting the outcome (Epic 4c).
+    ///
+    /// **Attempt-dir ownership (Epic 5b).** An implementation that works in a
+    /// scratch directory reports it as [`Acquisition::AudioFile`]'s
+    /// `attempt_dir` and hands ownership to the caller; on its OWN failure
+    /// returns — where no handle reaches the caller — it removes that
+    /// directory itself. Implementations never pre-clean a previous attempt's
+    /// directory: it may belong to a live sibling worker or process.
     async fn acquire(
         &self,
         video_id: &str,
@@ -97,10 +132,8 @@ pub trait VideoFetcher: Send + Sync {
 }
 
 // Cfg-gated test fixture per 0005; consumed by the tests/pipeline_fakes/
-// test files. Bin compilation also gets the feature when --features
-// test-helpers is enabled, hence the dead_code suppression.
+// test files.
 #[cfg(any(test, feature = "test-helpers"))]
-#[allow(dead_code)]
 pub struct FakeFetcher {
     pub canned: std::sync::Mutex<std::collections::HashMap<String, std::path::PathBuf>>,
     /// When true, `acquire` always returns `FetchError::NetworkError` regardless
@@ -139,8 +172,24 @@ pub struct FakeFetcher {
     pub canned_metadata: std::sync::Mutex<Option<String>>,
 }
 
+/// Attempt dir a `FakeFetcher` reports for a canned wav: its parent, but ONLY
+/// when that parent is named like a real attempt dir
+/// ([`ytdlp::ATTEMPT_DIR_PREFIX`]). A test that wants to exercise the
+/// attempt-dir lifecycle stages its fixture at
+/// `…/ytdlp-{video_id}.{pid}-{seq}/{video_id}.wav`; every other test's canned
+/// wav sits directly in the test's `TempDir` and reports `None`, so pipeline
+/// cleanup can never delete a directory the fake did not create.
 #[cfg(any(test, feature = "test-helpers"))]
-#[allow(dead_code)]
+fn fake_attempt_dir(wav: &std::path::Path) -> Option<PathBuf> {
+    let parent = wav.parent()?;
+    let named_like_an_attempt_dir = parent
+        .file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|n| n.starts_with(ytdlp::ATTEMPT_DIR_PREFIX));
+    named_like_an_attempt_dir.then(|| parent.to_path_buf())
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
 impl FakeFetcher {
     /// Construct a `FakeFetcher` that fails every `acquire` call. Used by T9's
     /// continue-on-failure test in `tests/pipeline_fakes/serial_tests.rs`.
@@ -301,7 +350,10 @@ impl VideoFetcher for FakeFetcher {
         }
         let map = self.canned.lock().expect("canned mutex");
         let result = match map.get(video_id) {
-            Some(path) => Ok(Acquisition::AudioFile(path.clone())),
+            Some(path) => Ok(Acquisition::AudioFile {
+                wav: path.clone(),
+                attempt_dir: fake_attempt_dir(path),
+            }),
             None => Err(FetchError::ParseError(format!(
                 "FakeFetcher has no canned response for {video_id}"
             ))),
@@ -340,8 +392,68 @@ mod tests {
             .await;
         assert!(capture.is_none(), "no canned metadata configured");
         match result.unwrap() {
-            Acquisition::AudioFile(p) => assert_eq!(p, PathBuf::from("/tmp/fake.wav")),
+            Acquisition::AudioFile { wav, attempt_dir } => {
+                assert_eq!(wav, PathBuf::from("/tmp/fake.wav"));
+                assert_eq!(
+                    attempt_dir, None,
+                    "a canned wav outside an `ytdlp-` dir hands over no directory"
+                );
+            }
         }
+    }
+
+    /// Epic 5b: a canned wav staged inside an `ytdlp-`-named parent is the
+    /// fake's way of modelling a real attempt dir — the fake hands that dir
+    /// over so pipeline tests can assert the lifecycle cleanup. Anything else
+    /// reports `None` (see the sibling test above), which is what keeps the
+    /// pipeline from ever removing a `TempDir` a test owns.
+    #[tokio::test]
+    async fn fake_fetcher_reports_attempt_dir_for_conventionally_staged_wav() {
+        let dir = PathBuf::from("/tmp/work/ytdlp-vid_a.4242-0");
+        let map = HashMap::from([("vid_a".to_string(), dir.join("vid_a.wav"))]);
+        let fake = FakeFetcher {
+            canned: std::sync::Mutex::new(map),
+            always_fails: false,
+            first_call_gate: tokio::sync::Mutex::new(None),
+            canned_stderr: std::sync::Mutex::new(None),
+            received_opts: std::sync::Mutex::new(Vec::new()),
+            fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
+            canned_metadata: std::sync::Mutex::new(None),
+        };
+        let (_, result) = fake.acquire("vid_a", "url", &FetchOpts::default()).await;
+        match result.unwrap() {
+            Acquisition::AudioFile { attempt_dir, .. } => assert_eq!(attempt_dir, Some(dir)),
+        }
+    }
+
+    /// Epic 5b (FOLLOWUPS: "`FetchOpts`'s derived `Debug` does not redact
+    /// `cookies_file`"): the derived impl printed the raw path, inconsistent
+    /// with `scrub_cookie_path`'s redaction everywhere else the path could
+    /// reach a message or argv (ADR 0035). No caller formats a `FetchOpts`
+    /// today — this closes the footgun before one does.
+    #[test]
+    fn fetch_opts_debug_redacts_cookie_path() {
+        let opts = FetchOpts {
+            cookies_file: Some(PathBuf::from("/secret/tiktok-cookies.txt")),
+            format_policy: FetchPolicy::Frugal,
+        };
+        let rendered = format!("{opts:?}");
+        assert!(
+            !rendered.contains("/secret/tiktok-cookies.txt"),
+            "cookie path must never appear in debug output: {rendered}"
+        );
+        assert!(
+            rendered.contains("[COOKIES-REDACTED]"),
+            "presence of a cookie file stays observable: {rendered}"
+        );
+        assert!(
+            rendered.contains("Frugal"),
+            "the non-secret fields still render: {rendered}"
+        );
+        // Absent cookies render as `None`, not as the redaction placeholder.
+        let bare = format!("{:?}", FetchOpts::default());
+        assert!(bare.contains("None"), "no cookies ⇒ None: {bare}");
+        assert!(!bare.contains("[COOKIES-REDACTED]"));
     }
 
     /// Epic 4c: `canned_metadata` rides every outcome the other knobs

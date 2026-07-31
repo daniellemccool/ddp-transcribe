@@ -483,6 +483,152 @@ async fn fetch_persists_metadata_raw_row_on_success() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Drive one video through `run_pipelined` with a fetch that always
+/// succeeds (real WAV fixture) and the supplied transcriber, `retries: 0`
+/// so the first failure exhausts immediately and the kind lands on the row.
+/// Returns the run result plus `(status, last_retryable_kind,
+/// last_retryable_message)` read straight from sqlite.
+#[allow(clippy::type_complexity)]
+async fn run_pipelined_with_transcriber(
+    transcriber: std::sync::Arc<dyn Transcriber>,
+) -> anyhow::Result<(
+    anyhow::Result<ddp_transcribe::pipeline::ProcessStats>,
+    (String, Option<String>, Option<String>),
+)> {
+    use std::sync::Arc;
+    use tokio::sync::Mutex as TokioMutex;
+
+    use ddp_transcribe::pipeline::{run_pipelined, ProcessOptions, SharedStore};
+
+    let tmp = TempDir::new()?;
+    std::fs::create_dir_all(tmp.path().join("transcripts"))?;
+    let db = tmp.path().join("state.sqlite");
+
+    let mut store = Store::open(&db)?;
+    store.upsert_video("vid_a", "https://example/a", false)?;
+    let wav = tmp.path().join("vid_a.wav");
+    std::fs::copy(silence_fixture(), &wav)?;
+    drop(store);
+
+    let shared: SharedStore = Arc::new(TokioMutex::new(Store::open(&db)?));
+    let fetcher = Arc::new(FakeFetcher {
+        canned: Mutex::new(HashMap::from([("vid_a".to_string(), wav)])),
+        always_fails: false,
+        first_call_gate: tokio::sync::Mutex::new(None),
+        canned_stderr: std::sync::Mutex::new(None),
+        received_opts: std::sync::Mutex::new(Vec::new()),
+        fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
+        canned_metadata: std::sync::Mutex::new(None),
+    });
+
+    let opts = ProcessOptions {
+        worker_id: "orchestrator".into(),
+        transcripts_root: tmp.path().join("transcripts"),
+        max_videos: None,
+        compute_lang_probs: false,
+        transcribe_timeout: Duration::from_secs(5),
+        stale_claim_threshold: Duration::from_secs(60),
+        download_workers: 1,
+        channel_capacity: 2,
+        cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
+        // retries: 0 → the first failure exhausts, isolating the kind string
+        // written by the dispatch under test from any requeue bookkeeping.
+        retries: 0,
+        checkpoint: None,
+    };
+
+    let result = run_pipelined(Arc::clone(&shared), fetcher, transcriber, opts).await;
+
+    let conn = rusqlite::Connection::open(&db)?;
+    let row = conn.query_row(
+        "SELECT status, last_retryable_kind, last_retryable_message
+         FROM videos WHERE video_id = 'vid_a'",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    Ok((result, row))
+}
+
+/// Epic 3 close-out bundle: `transcribe_worker`'s three-arm dispatch,
+/// asserted end-to-end on the TAG STRING it persists — the gap the Epic 3
+/// review flagged (worker-test audit verdicts tracked it rather than
+/// closing it, and `serial_tests.rs` pins only the serial path).
+///
+/// Two retryable variants that classify to DIFFERENT labels, so a dispatch
+/// that wrote a constant — or that lost the classifier's label on the way
+/// to `record_fetch_failure` — fails here:
+/// - `EmptyOutput` → `classify_transcribe_error`'s catch-all → `TranscribeOther`
+/// - `Timeout`     → the named arm                            → `ToolTimeout`
+///
+/// The `classification_reason` prefix of `last_retryable_message` is
+/// asserted too: kind and reason come from the same `FailureContext`, so a
+/// mismatched pair would mean the label and the message were built from
+/// different verdicts.
+#[tokio::test]
+async fn transcribe_worker_persists_the_classified_kind_string() -> anyhow::Result<()> {
+    let cases: &[(&str, &str)] = &[
+        (
+            "TranscribeOther",
+            "[unmatched transcribe error: default-cautious]",
+        ),
+        ("ToolTimeout", "[transcribe timeout]"),
+    ];
+    let transcribers: [std::sync::Arc<dyn Transcriber>; 2] = [
+        std::sync::Arc::new(FakeTranscriber::always_fails_retryable()),
+        std::sync::Arc::new(FakeTranscriber::always_fails_timeout()),
+    ];
+
+    for (transcriber, (expected_kind, expected_reason)) in transcribers.into_iter().zip(cases) {
+        let (result, (status, kind, message)) = run_pipelined_with_transcriber(transcriber).await?;
+        let stats = result?;
+        assert_eq!(stats.succeeded, 0);
+        assert_eq!(stats.failed, 1, "one failure-dispatched attempt");
+        assert_eq!(stats.exhausted_retries, 1, "retries: 0 → exhausted");
+
+        assert_eq!(status, "failed_retryable");
+        assert_eq!(
+            kind.as_deref(),
+            Some(*expected_kind),
+            "last_retryable_kind must be the classifier's label, not a constant"
+        );
+        let message = message.expect("last_retryable_message populated");
+        assert!(
+            message.starts_with(expected_reason),
+            "message must lead with the matching classification reason; got {message:?}"
+        );
+    }
+    Ok(())
+}
+
+/// The Bug arm of the same dispatch: a `TranscribeError::Bug` escalates as
+/// `Err` (0025 — the orchestrator cancels the batch) and must NOT write a
+/// retryable kind. Pins that "escalate" and "classify" stay mutually
+/// exclusive at the pipelined level, as `serial_tests.rs` does serially.
+#[tokio::test]
+async fn transcribe_worker_bug_escalates_without_writing_a_kind() -> anyhow::Result<()> {
+    let (result, (status, kind, _message)) =
+        run_pipelined_with_transcriber(std::sync::Arc::new(FakeTranscriber::always_fails_bug()))
+            .await?;
+    let err = result.expect_err("a transcribe Bug must abort the run");
+    assert!(
+        format!("{err:#}").contains("transcribe Bug for vid_a"),
+        "the Bug must surface with row context; got {err:#}"
+    );
+    assert_eq!(
+        status, "in_progress",
+        "an escalated Bug leaves the claim for the next sweep, not a failure flip"
+    );
+    assert_eq!(
+        kind, None,
+        "the Bug arm returns before any record_fetch_failure — no kind is written"
+    );
+    Ok(())
+}
+
 /// Epic 4c: the raw metadata envelope is persisted on the FAILURE path too
 /// — the insert happens before outcome dispatch, so a video whose fetch
 /// produced an envelope and then failed still leaves a row. The failure

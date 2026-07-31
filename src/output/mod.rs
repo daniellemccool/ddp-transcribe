@@ -1,7 +1,5 @@
 pub mod artifacts;
 
-use std::path::{Path, PathBuf};
-
 /// Returns the shard segment for a video_id: the last two characters.
 /// Snowflake low digits are essentially random, giving uniform 100-bucket
 /// distribution. The single source of truth for path layout — no other
@@ -14,17 +12,9 @@ pub fn shard(video_id: &str) -> &str {
     &video_id[len - 2..]
 }
 
-/// Returns `{transcripts_root}/{shard}/` (does NOT create the directory).
-// consumed by T13/T14 (ingest-cmd, process-cmd)
-#[allow(dead_code)]
-pub fn shard_dir(transcripts_root: &Path, video_id: &str) -> PathBuf {
-    transcripts_root.join(shard(video_id))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn shard_uses_last_two_chars() {
@@ -36,15 +26,6 @@ mod tests {
     fn shard_handles_short_ids() {
         assert_eq!(shard("7"), "7");
         assert_eq!(shard("12"), "12");
-    }
-
-    #[test]
-    fn shard_dir_joins_correctly() {
-        let root = PathBuf::from("/data/transcripts");
-        assert_eq!(
-            shard_dir(&root, "7234567890123456789"),
-            PathBuf::from("/data/transcripts/89")
-        );
     }
 
     /// Distribution test — synthesise IDs and verify no shard is wildly under
@@ -62,9 +43,15 @@ mod tests {
             *counts.entry(shard(&id).to_string()).or_default() += 1;
         }
 
-        // 10000 / 100 buckets = 100 mean. Each bucket should be within ±50% of mean
-        // (i.e., 50..=150). Lenient bound for synthetic counter input; real Snowflake
-        // IDs would be tighter.
+        // 10000 / 100 buckets = 100 mean, and a monotonic counter hits every
+        // bucket EXACTLY 100 times — so the ±50% band (50..=150) passes with
+        // a 0% margin here and is decorative for this input, not "lenient".
+        // Real Snowflake low bits are pseudorandom, so their per-bucket counts
+        // are Poisson-like (~10% sd over 10k samples): looser than this input,
+        // not tighter. The load-bearing assertion is `counts.len() == 100`
+        // below — a high-digits implementation is time-clustered and would
+        // collapse to one or two buckets. Swapping this input for a PRNG
+        // sample is what would make the band mean something.
         for (bucket, n) in &counts {
             assert!(
                 (50..=150).contains(n),

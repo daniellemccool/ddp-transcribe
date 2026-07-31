@@ -29,6 +29,13 @@ tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
 
+# 0045: the binary is a separate crate from the library it calls into, so
+# cross-crate inlining across that boundary has to be enabled explicitly.
+# Thin LTO keeps that a non-question at a build-time cost small enough that
+# `cargo build --release` stays part of the verification gate.
+[profile.release]
+lto = "thin"
+
 [features]
 default = []
 cuda = ["whisper-rs/cuda"]
@@ -40,8 +47,10 @@ test-helpers = []
 # lints that protect correctness or that we want mechanically normalized. Doc-prose
 # lints (doc_markdown, missing_errors_doc, missing_panics_doc) and must_use_candidate
 # are deliberately NOT enabled. `unwrap_used`/`expect_used` are scoped away from test
-# code via crate-root `cfg_attr(any(test, feature="test-helpers"), allow(...))` in
-# lib.rs/main.rs and an unconditional `allow` header in each tests/*.rs.
+# code via a crate-root `cfg_attr(test, allow(...))` in lib.rs ONLY — narrower than
+# `--features test-helpers` would allow, so unwrap/expect stay denied on production
+# code even under that feature; main.rs carries no such allow. Each tests/*.rs
+# carries its own unconditional `allow` header.
 [lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
@@ -62,6 +71,12 @@ needless_raw_string_hashes = "warn"
 
 [[test]]
 name = "state_ingest"
+required-features = ["test-helpers"]
+
+# `pragma_string` is test-helpers-gated (it interpolates a PRAGMA name into
+# SQL and has no production caller), so this file opts in per 0005.
+[[test]]
+name = "state_open"
 required-features = ["test-helpers"]
 
 [[test]]

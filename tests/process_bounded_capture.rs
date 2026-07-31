@@ -119,6 +119,71 @@ async fn exit_code_passes_through_bounded_capture() {
     assert_ne!(outcome.exit_code, 0);
 }
 
+/// Epic 3 close-out bundle: the real kill→capture path. Every other test
+/// that touches `CommandOutcome::signal` constructs the value by hand; this
+/// one spawns a child that signals ITSELF and asserts the number `run`
+/// reports came from `ExitStatus`'s Unix `signal()` extension.
+///
+/// Two signals, not one: a single SIGKILL case would also pass against an
+/// implementation that hardcoded `Some(9)`. SIGTERM (15) pins that the
+/// captured value is the actual signal number.
+#[tokio::test]
+async fn signal_killed_child_reports_the_killing_signal() {
+    // `kill -s N $$` from inside the shell: the child is its own killer, so
+    // no race with a test-side kill and no dependency on the child's pid
+    // escaping the runner.
+    for (name, number) in [("KILL", 9), ("TERM", 15)] {
+        let spec = CommandSpec {
+            program: "sh".to_string(),
+            // `trap '' TERM` is NOT set, so the default disposition applies
+            // and the shell dies from the signal rather than exiting 143.
+            args: vec!["-c".into(), format!("kill -s {name} $$; sleep 5")],
+            timeout: Duration::from_secs(10),
+            stderr_capture_bytes: 1024,
+            stdout_capture_bytes: 0,
+            redact_arg_indices: &[],
+        };
+        let outcome = run(spec).await.expect("sh runs");
+        assert_eq!(
+            outcome.signal,
+            Some(number),
+            "SIG{name} must surface as signal Some({number}), got {:?}",
+            outcome.signal
+        );
+        // A signal-killed child has no exit code (`ExitStatus::code() ==
+        // None`), which `run` normalizes to -1 — the sentinel that makes
+        // `ytdlp::acquire`'s `exit_code != 0` branch build the
+        // `FetchError::ToolFailed { signal, .. }` this signal rides into.
+        assert_eq!(
+            outcome.exit_code, -1,
+            "signal death must normalize to the -1 sentinel, not 0"
+        );
+    }
+}
+
+/// Control for the test above: a child that exits normally must report
+/// `signal: None`. Without this, an implementation that returned
+/// `Some(<anything>)` unconditionally would still pass the kill test for
+/// one of its two cases.
+#[tokio::test]
+async fn normally_exiting_child_reports_no_signal() {
+    let spec = CommandSpec {
+        program: "sh".to_string(),
+        args: vec!["-c".into(), "exit 3".into()],
+        timeout: Duration::from_secs(5),
+        stderr_capture_bytes: 1024,
+        stdout_capture_bytes: 0,
+        redact_arg_indices: &[],
+    };
+    let outcome = run(spec).await.expect("sh runs");
+    assert_eq!(outcome.exit_code, 3);
+    assert_eq!(
+        outcome.signal, None,
+        "a normal exit carries no signal, got {:?}",
+        outcome.signal
+    );
+}
+
 #[tokio::test]
 async fn read_bounded_peak_len_never_exceeds_cap() {
     // Use `tokio::io::duplex` to pair an in-memory writer and reader.

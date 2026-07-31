@@ -13,6 +13,11 @@ tag-and-relaunch (ADR-0043), after an incident where the workspace's pinned
 (v0.3.2, campaign-safety slice):** in-run checkpointing (`--checkpoint-cmd` /
 `--checkpoint-every`), an actually-dry `ingest --dry-run`, an age-guarded
 startup tmp sweep, and `swept_stale` forensic events — all covered below.
+**2026-07-30 (v0.4.0, Plan B close-out — tag not yet cut):** the
+`requeue-failures` operator override, per-attempt `.work/` fetch directories
+with an age-gated startup sweep, and the ADR-0013 backend assertion actually
+firing on CUDA builds. Anything marked "v0.4.0" below is not on the workspace
+until that tag is cut and `pipeline_git_ref` is bumped.
 
 **Version state:** the workspace still runs **v0.3.0**. v0.3.1 was tagged but
 never deployed, so the next upgrade jumps **0.3.0 → 0.3.2** in one step and
@@ -227,7 +232,22 @@ file has vanished: ".../.work/ytdlp-<id>/<id>.wav"
 
 Those warnings are **expected and benign** — `.work/` holds per-fetch
 transients that yt-dlp and the pipeline delete as they go, so rsync races them
-by design. But rsync **exits 24** ("some files vanished before they could be
+by design. As of **v0.4.0** (the Epic 5b close-out; tag not yet cut at the time
+of writing — this behavior ships with that tag, not with v0.3.2), each fetch
+attempt gets its own directory
+(`.work/ytdlp-<id>.<pid>-<seq>/`) and the pipeline removes the **whole
+directory** at the end of that attempt — after the DB commit on success, or on
+a decode/transcribe failure — so mid-sync `file has vanished` (and
+`directory has vanished`) warnings for `.work/` remain expected, and the
+example path above now carries the `.<pid>-<seq>` suffix. What is left behind
+is only crash/`kill`/cancellation residue, and `process` sweeps that at
+startup: any `.work/ytdlp-*` directory older than `--stale-claim-threshold` is
+removed (`cleaned up leftover fetch work dirs` in the startup log). The age gate
+is what makes a two-instance deployment safe — a fresh directory may belong to
+the other instance's in-flight fetch — so a dir left by a crash **one minute**
+before a restart survives that restart and goes on the next one.
+
+But rsync **exits 24** ("some files vanished before they could be
 transferred"), which has two operational consequences:
 
 1. Manually, exit 24 breaks any `&&` chain after the sync — the sync itself
@@ -337,9 +357,11 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite load-metadata
 - **The printed cohort count is an advisory snapshot**, taken once before the
   pass starts. If a `process` run is working concurrently it can drift from the
   run's own `examined` count — that divergence is expected, not a miscount.
-- **`--dry-run` reports the FULL cohort and ignores `--limit`**: it prints the
-  cohort size and exits without invoking yt-dlp at all. Use `--limit N` (without
-  `--dry-run`) for the smoke run.
+- **`--dry-run` reports the FULL cohort and rejects `--limit`**: it prints the
+  cohort size and exits without invoking yt-dlp at all, so a cap on attempts has
+  nothing to cap. Since v0.4.0 clap rejects the pair as a usage error (exit 2)
+  rather than silently ignoring `--limit`. Use `--limit N` (without `--dry-run`)
+  for the smoke run.
 - **The stats line** is `examined / captured / capture-failed / already-filled /
   insert-failed`. Every examined video increments exactly one of the four
   outcomes. `capture-failed` is *expected*, not an error signal: the cohort is
@@ -356,6 +378,66 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite load-metadata
   are schema-identical to fetch-time ones, so the loader fills the same typed
   columns with no special handling. Running it early and again later costs
   nothing (it is replayable by design).
+
+### Requeueing failures after an external change (v0.4.0)
+
+`batch::run_sweep` already re-adjudicates *parked* retryables through the
+classification table at the start of every run, so the automatic machinery
+handles the ordinary case. What it cannot reach is the **cap-exhausted** tail
+and rows already written off as `failed_terminal`. When the *external* condition
+that failed them changes — fresh cookies for the login-gated cohort, a region
+unblocked, a yt-dlp bump — `requeue-failures` is the sanctioned way to give
+those rows another claim.
+
+The live case is the cap-exhausted cookie-gated cohort. Preview first — the
+command is default-deny, but `--dry-run` is what tells you the size of what you
+are about to re-drive:
+
+```bash
+ddp-transcribe --state-db ~/ddp-state/state.sqlite \
+    requeue-failures --error-kind SensitiveLoginGated --dry-run
+ddp-transcribe --state-db ~/ddp-state/state.sqlite \
+    requeue-failures --error-kind SensitiveLoginGated --max 500
+CUDA_VISIBLE_DEVICES=0 ddp-transcribe --state-db ~/ddp-state/state.sqlite \
+    … process --cookies-file ~/tiktok-cookies.txt --retries 4
+```
+
+- **A bare `requeue-failures` is a usage error** (exit 2). You must pass a
+  *qualifying* selector — `--error-kind <K>` (repeatable, exact byte match, no
+  case folding, no comma splitting), `--max-attempts <N>`, `--older-than <DUR>`
+  — or an explicit `--all`. `--max <N>` and `--dry-run` are **modifiers**: they
+  never grant eligibility on their own. `--all` means every `failed_retryable`
+  row and *conflicts* with the qualifying selectors, so `--all --older-than 30d`
+  is a parse error, never a silent intersection.
+- **Terminal rows are opt-in twice over.** `--include-terminal` requires a
+  qualifying selector alongside it, so `--include-terminal --all` is rejected.
+  On terminal rows `--error-kind` matches `terminal_reason`, never a retained
+  retryable kind.
+- **`--retries` must be strictly greater than the row's `attempt_count`, or you
+  get exactly one attempt.** Requeueing does not reset `attempt_count` (by
+  design — the cap stays auditable). The next claim bumps `A` to `A + 1`, and
+  in-pipeline retry only fires while `attempt_count < retries + 1`, so an
+  *automatic* retry needs `--retries > A`. The 301 cookie-parked pilot rows
+  exhausted at `A = 3` under `--retries 2` get one forced attempt each unless
+  the following `process` runs `--retries 4` or higher. Check the cohort's
+  `attempt_count` with `status --retryable --json` before picking the number.
+- **The `--older-than` clock is failure events only** — the newest of
+  `failed_retryable`, `failed_terminal`, `retry_requeued`, `cookie_parked`.
+  `swept_terminal` and the other administrative events do **not** reset it, and
+  a row with no qualifying event never matches. `videos.updated_at` is not
+  touched.
+- **It is auditable by construction.** Every moved row gets one
+  `operator_requeued` event carrying its prior status, prior kind/reason and
+  attempt count, attributed as `worker_id = operator:<hostname>-<pid>` —
+  distinct from the sweep's literal `worker_id = 'sweep'`. A later
+  "why is this row pending again?" is answerable from the state DB alone.
+- **Hand-written SQL against `videos` is unsupported emergency repair.** It
+  mutates status without leaving the `video_events` row the state machine and
+  every audit depend on. This subcommand exists precisely so that reaching for
+  `sqlite3` is never the only option (ADR-0046, ADR-0036).
+- Safe to run beside a live `process`: it takes one short `BEGIN IMMEDIATE`
+  transaction and claims nothing. Rows it moves are picked up by ordinary
+  claiming, behind fresh work (`claim_next` orders `attempt_count ASC`).
 
 ### Status quickstart (Epic 4b)
 

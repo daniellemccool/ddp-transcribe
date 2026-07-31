@@ -13,7 +13,10 @@
 //! Shared items live here so both submodules can call them without crossing
 //! a `pub(crate)` boundary twice:
 //! - [`ProcessOptions`], [`ProcessStats`], [`ProcessOutcome`], [`SharedStore`]
-//! - [`fetch_and_decode`] — phases 1+2 (acquire + decode WAV)
+//! - [`fetch_and_decode`] — phases 1+2 (acquire + decode WAV), and its two
+//!   halves [`acquire_audio`] / [`decode_fetched`], which `fetch_worker`
+//!   calls separately so its cancellation `select!` covers only the half
+//!   that a drop can actually cancel
 //! - [`transcribe_and_write`] — phases 3+4 (transcribe + write artifacts +
 //!   mark_succeeded + cleanup). 0008 invariant lives here: artifacts are
 //!   durable on disk BEFORE `mark_succeeded`.
@@ -54,6 +57,56 @@ pub use pipelined::{fetch_worker, run_pipelined, transcribe_worker, FetchedItem,
 #[allow(unused_imports)]
 pub use serial::run_serial;
 
+/// The fetched audio plus the attempt directory that holds it — the pipeline's
+/// handle on everything one acquire put on disk (Epic 5b).
+///
+/// **Lifecycle.** The caller owns this from the moment `acquire` returns `Ok`
+/// until exactly one of the two consumers below runs:
+/// - [`FetchedAudio::cleanup_after_success`] — after `mark_succeeded` commits
+///   (0008 ordering: never before the DB acknowledges the artifacts).
+/// - [`FetchedAudio::discard`] — decode failure, transcribe failure, or any
+///   other path where this attempt's bytes are dead. The row is either
+///   requeued (the retry re-fetches into a FRESH dir) or terminal, so nothing
+///   downstream can want them.
+///
+/// The deliberate non-consumer is `ProcessOutcome::StaleAfterSuccess`: a
+/// concurrent sweep cleared the claim, the row will be re-claimed, and
+/// deleting bytes the next claim might want stays forbidden.
+///
+/// `attempt_dir: None` (test fakes serving a wav the test staged) degrades to
+/// the pre-5b behavior: success removes the wav alone, failures remove
+/// nothing — a file this pipeline did not create is not its to delete.
+#[derive(Debug)]
+pub struct FetchedAudio {
+    pub wav_path: PathBuf,
+    pub attempt_dir: Option<PathBuf>,
+}
+
+impl FetchedAudio {
+    /// Remove this attempt's bytes after the DB commit. Best-effort by
+    /// design: the success is already durable, and a leftover dir is disk
+    /// churn the startup sweep collects — never a reason to fail the video.
+    fn cleanup_after_success(&self) {
+        match &self.attempt_dir {
+            Some(dir) => crate::fetcher::ytdlp::remove_attempt_dir(dir),
+            None => {
+                if let Err(e) = std::fs::remove_file(&self.wav_path) {
+                    tracing::warn!(path = %self.wav_path.display(), error = %e, "could not remove wav after success");
+                }
+            }
+        }
+    }
+
+    /// Drop this attempt's bytes on a failure path. Same best-effort
+    /// contract; a `None` attempt dir leaves the wav alone (see the struct
+    /// docs).
+    fn discard(&self) {
+        if let Some(dir) = &self.attempt_dir {
+            crate::fetcher::ytdlp::remove_attempt_dir(dir);
+        }
+    }
+}
+
 /// Operator checkpoint hook (Epic 5a): run `cmd` every `every` for as long
 /// as the batch is running, so a long uncapped run syncs artifacts mid-run
 /// instead of only at run boundaries.
@@ -92,14 +145,10 @@ pub struct ProcessOptions {
     /// main.rs and consumed below.
     pub stale_claim_threshold: Duration,
     /// 0027: default 3; flag-tunable via --download-workers. Consumed by
-    /// T15-T18 when the pipelined orchestrator is wired; suppressed until
-    /// then per 0002.
-    #[allow(dead_code)]
+    /// `run_pipelined` when sizing the fetch-worker pool.
     pub download_workers: usize,
     /// 0027: default 2; flag-tunable via --channel-capacity. Consumed by
-    /// T15-T18 when the pipelined orchestrator is wired; suppressed until
-    /// then per 0002.
-    #[allow(dead_code)]
+    /// `run_pipelined` when sizing the fetch→transcribe channel.
     pub channel_capacity: usize,
     /// Netscape-format cookie file, flag-tunable via `--cookies-file`
     /// (Epic 3 T08). Threaded to `fetcher.acquire` ONLY on claims whose
@@ -200,9 +249,9 @@ pub enum ProcessOutcome {
 /// `fetch_and_decode` converts without an explicit `.map_err`; the anyhow
 /// boundary (where a caller needs `anyhow::Result`) is crossed via the
 /// blanket `From<E: std::error::Error + Send + Sync + 'static> for
-/// anyhow::Error` impl, which does NOT attach context — required so
-/// `serial.rs`'s `downcast_ref::<FetchPhaseError>()` can recover the typed
-/// error from the anyhow chain.
+/// anyhow::Error` impl, which does NOT attach context. `serial.rs` recovers
+/// the typed error from that chain via `classify_fetch_phase_in_chain`,
+/// which walks it (E12) rather than downcasting the top-level error.
 #[derive(Debug, thiserror::Error)]
 pub enum FetchPhaseError {
     #[error(transparent)]
@@ -216,7 +265,7 @@ pub enum FetchPhaseError {
 /// (the classification-table-driven classifier); `Decode` is always
 /// `Retryable` — a corrupt/truncated WAV on disk doesn't indict the source
 /// video, and a refetch may produce a decodable file.
-pub fn classify_fetch_phase(
+pub(crate) fn classify_fetch_phase(
     e: &FetchPhaseError,
     table: &crate::classification::ClassificationTable,
 ) -> crate::failure::ClassifiedFailure {
@@ -227,9 +276,6 @@ pub fn classify_fetch_phase(
             label: labels::TRANSCRIBE_OTHER.to_string(),
             requires_cookie: false,
             ctx: FailureContext {
-                tool: "hound",
-                exit_code: None,
-                signal: None,
                 stderr_excerpt: de.to_string(),
                 classification_reason: "wav decode failure: refetch may repair a corrupt download",
             },
@@ -306,13 +352,12 @@ pub(crate) fn cookie_opts_for(
     }
 }
 
-/// Phase 1+2: acquire the audio and decode it to f32 PCM samples.
+/// Phase 1: acquire the audio, no decode.
 ///
-/// Returns the owned samples + the WAV path on disk (needed downstream so
-/// `transcribe_and_write` can remove the WAV after the DB commit).
-///
-/// Used by `run_serial`'s `process_one` AND (in Phase 2) by the fetch
-/// workers in `pipelined::fetch_worker`.
+/// Split out of [`fetch_and_decode`] (Epic 5b) because it is the ONLY half a
+/// caller may safely wrap in a cancellation `select!`: dropping this future
+/// mid-`acquire` drops a `tokio::process::Child`, which kills the yt-dlp
+/// subprocess. See [`decode_fetched`] for why its half must not be dropped.
 ///
 /// Returns a typed [`FetchPhaseError`] (rather than `anyhow::Result`, T15's
 /// original signature) so callers can classify the failure via
@@ -324,20 +369,23 @@ pub(crate) fn cookie_opts_for(
 /// policy, only threads the decision to `fetcher.acquire`.
 ///
 /// Epic 4c: the first tuple element is the raw metadata envelope the fetcher
-/// captured, if any. It is returned on EVERY path — including decode
-/// failures — so the caller can persist it before interpreting the outcome.
-pub(crate) async fn fetch_and_decode(
+/// captured, if any. It is returned on EVERY path so the caller can persist
+/// it before interpreting the outcome.
+pub(crate) async fn acquire_audio(
     fetcher: &dyn VideoFetcher,
     claim: &Claim,
     opts: &FetchOpts,
 ) -> (
     Option<crate::fetcher::MetadataCapture>,
-    Result<(Vec<f32>, PathBuf), FetchPhaseError>,
+    Result<FetchedAudio, FetchPhaseError>,
 ) {
     let (capture, acquisition) = fetcher
         .acquire(&claim.video_id, &claim.source_url, opts)
         .await;
     let acquisition = match acquisition {
+        // A failed acquire hands over no attempt dir: the fetcher removed
+        // whatever it created before returning (see `VideoFetcher::acquire`'s
+        // ownership contract), so there is nothing to clean up here.
         Ok(a) => a,
         Err(e) => return (capture, Err(e.into())),
     };
@@ -346,32 +394,103 @@ pub(crate) async fn fetch_and_decode(
     // and `ReadyTranscript`, at which point the `match` becomes load-bearing.
     // Keeping it now means Plan B's diff is additive arms, not a syntax flip.
     #[allow(clippy::infallible_destructuring_match)]
-    let wav_path = match acquisition {
-        Acquisition::AudioFile(p) => p,
+    let fetched = match acquisition {
+        Acquisition::AudioFile { wav, attempt_dir } => FetchedAudio {
+            wav_path: wav,
+            attempt_dir,
+        },
     };
     // Tracing hygiene (Epic 3 T08, ADR 0035): log ONLY whether cookies were
     // attached, never the path — the path must not reach logs or the state DB.
     tracing::info!(
         video_id = claim.video_id.as_str(),
-        wav = %wav_path.display(),
+        wav = %fetched.wav_path.display(),
         cookies = opts.cookies_file.is_some(),
         "audio acquired"
     );
 
+    (capture, Ok(fetched))
+}
+
+/// Phase 2: decode the acquired wav to f32 PCM samples.
+///
+/// **This future must NEVER be dropped — do not place it inside a
+/// cancellation `select!`.** Dropping a `spawn_blocking` `JoinHandle` does
+/// not cancel the closure: tokio runs it to completion detached, so a drop
+/// here would leave a decode reading the attempt dir with nobody to observe
+/// its outcome and would silently swallow a panic that used to propagate
+/// through the `JoinSet`. `fetch_worker` therefore selects over
+/// [`acquire_audio`] alone and awaits this half unconditionally, which is
+/// also exactly the pre-wrap behavior (an inline decode was never an await
+/// point, so cancellation could never land inside it).
+async fn decode_fetched(
+    fetched: FetchedAudio,
+) -> Result<(Vec<f32>, FetchedAudio), FetchPhaseError> {
     // Decode WAV → owned Vec<f32> samples (0014: 16 kHz mono validated
     // inside decode_wav). Owned samples cross the worker-thread boundary
     // per 0016.
-    // Epic 4c: a decode failure still carries the capture — the envelope
-    // was produced by the fetch that preceded it.
-    let samples = match audio::decode_wav(&wav_path) {
-        Ok(s) => s,
-        Err(e) => return (capture, Err(e.into())),
+    //
+    // Blocking-IO policy, class (c): a whole-file read plus the f32
+    // conversion is unbounded work and three fetch workers run it
+    // concurrently, so it goes to the blocking pool rather than holding a
+    // runtime thread. The handle is awaited immediately and the closure's
+    // `Result` is returned unchanged, so the error type, the message and the
+    // discard-then-return ordering below are exactly what the inline call
+    // produced.
+    let wav_path = fetched.wav_path.clone();
+    let decoded = tokio::task::spawn_blocking(move || audio::decode_wav(&wav_path)).await;
+    let samples = match decoded {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            // Epic 5b: a wav we cannot decode is dead weight — the row
+            // requeues and its retry re-fetches into a fresh attempt dir.
+            fetched.discard();
+            return Err(e.into());
+        }
+        Err(join) => match join.try_into_panic() {
+            // A panic inside the closure resumes unwinding here, so it
+            // propagates exactly as an inline `decode_wav` panic did.
+            Ok(payload) => std::panic::resume_unwind(payload),
+            // This future is never dropped (see the docstring) and a blocking
+            // task is never cancelled by the scheduler, so the non-panic
+            // JoinError has no producer.
+            Err(join) => unreachable!("spawn_blocking decode task cancelled: {join}"),
+        },
     };
 
-    (capture, Ok((samples, wav_path)))
+    Ok((samples, fetched))
 }
 
-/// Phase 3+4: transcribe → write artifacts → mark_succeeded → cleanup wav.
+/// Phase 1+2 composed: acquire the audio and decode it to f32 PCM samples.
+///
+/// Returns the owned samples + the [`FetchedAudio`] handle (the wav plus the
+/// attempt dir that holds it) — downstream owns that handle and removes the
+/// attempt dir after the DB commit, or discards it on a later failure.
+///
+/// Used by `run_serial`'s `process_one`, which has no cancellation token and
+/// wants the whole phase as one call. `pipelined::fetch_worker` calls the two
+/// halves directly so its cancellation `select!` covers [`acquire_audio`]
+/// only — see [`decode_fetched`]'s docstring for why that split is
+/// load-bearing rather than cosmetic.
+///
+/// Epic 4c: the metadata envelope is returned on EVERY path — including
+/// decode failures — so the caller can persist it before interpreting the
+/// outcome.
+pub(crate) async fn fetch_and_decode(
+    fetcher: &dyn VideoFetcher,
+    claim: &Claim,
+    opts: &FetchOpts,
+) -> (
+    Option<crate::fetcher::MetadataCapture>,
+    Result<(Vec<f32>, FetchedAudio), FetchPhaseError>,
+) {
+    match acquire_audio(fetcher, claim, opts).await {
+        (capture, Ok(fetched)) => (capture, decode_fetched(fetched).await),
+        (capture, Err(e)) => (capture, Err(e)),
+    }
+}
+
+/// Phase 3+4: transcribe → write artifacts → mark_succeeded → attempt-dir cleanup.
 ///
 /// **0008 invariant** lives here: txt + json are durable on disk BEFORE
 /// `store.mark_succeeded` is called. A crash between artifact writes and
@@ -396,17 +515,14 @@ pub(crate) async fn fetch_and_decode(
 /// ([`write_artifacts_durable`] then [`mark_after_artifacts`] — the 0008
 /// ordering owner) directly, so it can keep the store lock off the
 /// durable writes; after T18 the pipelined worker no longer routes
-/// through this outer wrapper. Kept for `run_serial` (integration tests).
-///
-/// 0002: paired with `run_serial`'s suppression; bin doesn't reach
-/// this after T18.
-#[allow(dead_code)]
+/// through this outer wrapper. Kept for `run_serial` (integration tests),
+/// which reaches it through `process_one`.
 pub(crate) async fn transcribe_and_write(
     store: &mut Store,
     transcriber: &dyn Transcriber,
     claim: &Claim,
     samples: Vec<f32>,
-    wav_path: PathBuf,
+    audio: FetchedAudio,
     fetcher_name: &'static str,
     opts: &ProcessOptions,
 ) -> Result<ProcessOutcome> {
@@ -424,10 +540,18 @@ pub(crate) async fn transcribe_and_write(
         ..PerCallConfig::default()
     };
 
-    let transcribe_output = transcriber
+    // Epic 5b: a failed transcribe ends this attempt — drop its bytes before
+    // propagating (the row requeues and re-fetches into a fresh attempt dir).
+    let transcribe_output = match transcriber
         .transcribe(samples, per_call, opts.transcribe_timeout)
         .await
-        .with_context(|| format!("transcribing {}", claim.video_id))?;
+    {
+        Ok(o) => o,
+        Err(e) => {
+            audio.discard();
+            return Err(anyhow::Error::new(e).context(format!("transcribing {}", claim.video_id)));
+        }
+    };
     tracing::info!(
         video_id = claim.video_id.as_str(),
         chars = transcribe_output.text.len(),
@@ -436,7 +560,7 @@ pub(crate) async fn transcribe_and_write(
     );
 
     // T17 refactor (Path A): the post-transcribe artifact write + DB
-    // mark + wav cleanup lives in `write_artifacts_and_mark`, which composes
+    // mark + attempt-dir cleanup lives in `write_artifacts_and_mark`, which composes
     // [`write_artifacts_durable`] and [`mark_after_artifacts`] — the same
     // 0008-ordering halves `pipelined::transcribe_worker` calls directly
     // (see the doc comment above). Since the Task 05 split this composed
@@ -448,7 +572,7 @@ pub(crate) async fn transcribe_and_write(
         transcribe_output,
         claim,
         samples_len,
-        wav_path,
+        audio,
         fetcher_name,
         transcript_source,
         opts,
@@ -519,7 +643,7 @@ pub(crate) fn write_artifacts_durable(
     Ok(duration_s)
 }
 
-/// Phase 4b — DB acknowledgement (0008 second half) + wav cleanup,
+/// Phase 4b — DB acknowledgement (0008 second half) + attempt-dir cleanup,
 /// extracted from [`write_artifacts_and_mark`] (Epic 4c).
 ///
 /// The ONLY part of phase 4 that needs the store: pipelined callers lock
@@ -539,7 +663,7 @@ pub(crate) fn write_artifacts_durable(
 /// `samples_len`.
 ///
 /// Sync (not async): every operation here is a blocking syscall
-/// (`mark_succeeded` via rusqlite, `remove_file`). The caller holds the
+/// (`mark_succeeded` via rusqlite, the attempt-dir removal). The caller holds the
 /// store mutex around this call and serializes against other workers —
 /// making this `async` would only add a `.await` that never yields, since
 /// there's no I/O wait point.
@@ -554,7 +678,7 @@ pub(crate) fn mark_after_artifacts(
     claim: &Claim,
     duration_s: Option<f64>,
     language: &str,
-    wav_path: PathBuf,
+    audio: FetchedAudio,
     fetcher_name: &'static str,
     transcript_source: &'static str,
     opts: &ProcessOptions,
@@ -584,28 +708,27 @@ pub(crate) fn mark_after_artifacts(
             worker_id = opts.worker_id.as_str(),
             "stale claim after success — row will be re-claimed; artifacts are durable per 0008"
         );
-        // Skip wav cleanup: leave it for the next claim's retry path (the
-        // re-claimed run will re-fetch and overwrite). Diverges from the
-        // happy-path cleanup below, but symmetry isn't worth the risk of
-        // deleting bytes the next claim might want.
+        // Skip the attempt-dir cleanup: leave it for the next claim's retry
+        // path (the re-claimed run will re-fetch and overwrite). Diverges
+        // from the happy-path cleanup below, but symmetry isn't worth the
+        // risk of deleting bytes the next claim might want.
         return Ok(ProcessOutcome::StaleAfterSuccess);
     }
 
-    // Cleanup the wav file after the DB commit. If this fails, the success
-    // is already durable; the leftover wav is just disk churn an operator
-    // can sweep. (Plan A removed the wav before mark_succeeded, which left
-    // a window where a crashed mark_succeeded had no audio to retry from.
-    // Reversed here.)
-    if let Err(e) = std::fs::remove_file(&wav_path) {
-        tracing::warn!(path = %wav_path.display(), error = %e, "could not remove wav after success");
-    }
+    // Cleanup after the DB commit — the WHOLE attempt dir since Epic 5b, not
+    // just the wav (the leftover dir was the "disk churn" this comment used
+    // to concede). Same point in the order: if it fails, the success is
+    // already durable and the startup sweep collects the residue. (Plan A
+    // removed the wav BEFORE mark_succeeded, which left a window where a
+    // crashed mark_succeeded had no audio to retry from. Reversed here.)
+    audio.cleanup_after_success();
 
     tracing::info!(video_id = claim.video_id.as_str(), "succeeded");
     Ok(ProcessOutcome::Succeeded)
 }
 
 /// Phase 4 helper extracted from [`transcribe_and_write`] (T17, Path A):
-/// write artifacts → mark_succeeded → cleanup wav.
+/// write artifacts → mark_succeeded → attempt-dir cleanup.
 ///
 /// **0008 invariant (load-bearing), revised owner (Epic 4c).** The
 /// invariant is now owned by the PAIR
@@ -634,25 +757,35 @@ pub(crate) fn write_artifacts_and_mark(
     transcribe_output: TranscribeOutput,
     claim: &Claim,
     samples_len: usize,
-    wav_path: PathBuf,
+    audio: FetchedAudio,
     fetcher_name: &'static str,
     transcript_source: &'static str,
     opts: &ProcessOptions,
 ) -> Result<ProcessOutcome> {
-    let duration_s = write_artifacts_durable(
+    let duration_s = match write_artifacts_durable(
         &transcribe_output,
         claim,
         samples_len,
         opts,
         fetcher_name,
         transcript_source,
-    )?;
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            // Artifact write failed (disk full / permissions): the row stays
+            // `in_progress` for the next sweep to reclaim and re-fetch, so
+            // this attempt's bytes are dead — and on a full disk, freeing
+            // them is the friendlier failure.
+            audio.discard();
+            return Err(e);
+        }
+    };
     mark_after_artifacts(
         store,
         claim,
         duration_s,
         &transcribe_output.language,
-        wav_path,
+        audio,
         fetcher_name,
         transcript_source,
         opts,

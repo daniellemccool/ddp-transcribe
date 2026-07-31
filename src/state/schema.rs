@@ -1,6 +1,6 @@
 pub const SCHEMA_VERSION: &str = "6";
 
-pub const SCHEMA_SQL: &str = r"
+pub(super) const SCHEMA_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS videos (
     -- TEXT PRIMARY KEY does NOT imply NOT NULL in SQLite (only INTEGER PRIMARY
     -- KEY does, as a rowid alias). Declare NOT NULL explicitly. Guarded by

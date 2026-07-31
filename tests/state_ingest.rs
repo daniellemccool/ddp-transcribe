@@ -61,6 +61,46 @@ fn upsert_video_is_idempotent_first_seen_at_unchanged() {
     );
 }
 
+/// Pins the operator-ruled `updated_at` contract: the column records
+/// *lifecycle-mutation* time, so a no-op re-ingest is clock-neutral. Guards
+/// against someone "fixing" `UPSERT_VIDEO_SQL` into an
+/// `ON CONFLICT DO UPDATE SET updated_at = excluded.updated_at`, which would
+/// make every re-ingest of the (multi-million-row) inbox rewrite the column
+/// and destroy its meaning as a last-lifecycle-change marker.
+#[test]
+fn re_ingest_of_an_existing_row_does_not_change_updated_at() {
+    let (tmp, mut store) = fresh_store();
+    let db = tmp.path().join("state.sqlite");
+    store
+        .upsert_video("7234567890123456789", "url-A", true)
+        .unwrap();
+
+    let read_updated_at = || -> i64 {
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row(
+                "SELECT updated_at FROM videos WHERE video_id = '7234567890123456789'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    let first = read_updated_at();
+    assert!(first > 0);
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+
+    let changed = store
+        .upsert_video("7234567890123456789", "url-A", true)
+        .unwrap();
+    assert_eq!(changed, 0, "re-ingest changes no rows (0006)");
+    assert_eq!(
+        first,
+        read_updated_at(),
+        "a no-op ingest is clock-neutral: updated_at is lifecycle-mutation time"
+    );
+}
+
 #[test]
 fn upsert_watch_history_inserts() {
     let (_tmp, mut store) = fresh_store();

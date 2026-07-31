@@ -105,6 +105,9 @@ impl WindowBounds {
 /// store. Plan A skips short links with a WARN log; Plan C writes them to a
 /// pending_resolutions table.
 ///
+/// A missing `inbox` root is an error, not an empty run: an operator typo in
+/// `--inbox` must not report a successful `files=0` pass.
+///
 /// A file the pass cannot turn into rows — bad filename, read failure, or
 /// JSON that is not a `Vec<Section>` — is logged, counted in
 /// `files_skipped_unparseable`, and stepped over; it never aborts the run.
@@ -148,6 +151,13 @@ pub fn ingest(
     window: WindowBounds,
     dry_run: bool,
 ) -> Result<IngestStats> {
+    // A typo in `--inbox` used to be indistinguishable from an empty one: the
+    // walk returned no paths and the run reported a cheerful `files=0`. Fail
+    // here, at the root, and only here — a subdirectory that disappears
+    // mid-walk is a race the walk still steps over.
+    if !inbox.exists() {
+        anyhow::bail!("inbox {} does not exist", inbox.display());
+    }
     let mut stats = IngestStats::default();
     let mut unique_videos: HashSet<String> = HashSet::new();
     let paths = walk_json_files(inbox)?;
@@ -426,13 +436,18 @@ fn walk_json_files(inbox: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn walk_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    // Tolerated here on purpose: a subdirectory can vanish between the parent
+    // read_dir and this call. The ROOT's absence is caught by `ingest`, which
+    // is the case an operator typo produces.
     if !dir.exists() {
         return Ok(());
     }
     for entry in
         std::fs::read_dir(dir).with_context(|| format!("reading directory {}", dir.display()))?
     {
-        let entry = entry?;
+        // Path context on the inner entry too: a permission-denied inside one
+        // subdirectory otherwise reaches the operator as a bare `io::Error`.
+        let entry = entry.with_context(|| format!("reading directory {}", dir.display()))?;
         let path = entry.path();
         if path.is_dir() {
             walk_recursive(&path, out)?;
@@ -501,6 +516,70 @@ fn parse_watched_at(s: &str) -> Option<i64> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    /// PR #23 carry-forward: the ledger row rides the SAME transaction as its
+    /// file's data rows, so a failure anywhere inside a file must leave the
+    /// store exactly as it was — no half-written rows, and critically no
+    /// ledger row, which would make the next run skip a file it never
+    /// ingested. Atomicity is by construction (one `Transaction`, `?` before
+    /// `commit`), and nothing had pinned it.
+    ///
+    /// A `BEFORE INSERT` trigger that RAISEs on the file's SECOND video is the
+    /// portable way to fail mid-transaction: the first entry's `videos` +
+    /// `watch_history` rows are already written (uncommitted) when the abort
+    /// lands, so a store that still holds them after the error is exactly the
+    /// regression this pins.
+    #[test]
+    fn a_failed_row_upsert_rolls_back_the_file_and_its_ledger_row() {
+        let tmp = TempDir::new().unwrap();
+        let inbox = tmp.path().join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let name = "assignment=1_task=1_participant=p1_source=tiktok_key=1-tiktok.json";
+        std::fs::write(
+            inbox.join(name),
+            r#"[{"tiktok_watch_history":[
+                {"Date":"2026-02-03 13:20:15","Link":"https://www.tiktok.com/@a/video/7000000000000000001"},
+                {"Date":"2026-02-03 13:25:15","Link":"https://www.tiktok.com/@a/video/7000000000000000002"}
+            ]}]"#,
+        )
+        .unwrap();
+
+        let mut store = Store::open(&tmp.path().join("state.sqlite")).unwrap();
+        store
+            .conn()
+            .execute_batch(
+                "CREATE TRIGGER fail_second_row BEFORE INSERT ON watch_history
+                 WHEN NEW.video_id = '7000000000000000002'
+                 BEGIN SELECT RAISE(ABORT, 'forced mid-transaction failure'); END;",
+            )
+            .unwrap();
+
+        let err = ingest(&inbox, &mut store, WindowBounds::default(), false)
+            .expect_err("the aborting trigger must fail the ingest");
+        assert!(
+            format!("{err:#}").contains("forced mid-transaction failure"),
+            "the underlying abort should surface in the chain, got: {err:#}"
+        );
+
+        // Post-rollback state, not merely "an Err came back".
+        let count = |sql: &str| -> i64 { store.conn().query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(
+            count("SELECT COUNT(*) FROM watch_history"),
+            0,
+            "the first entry's watch_history row must have rolled back"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM videos"),
+            0,
+            "both entries' videos rows must have rolled back"
+        );
+        assert_eq!(
+            ingested_file_fingerprint(store.conn(), name).unwrap(),
+            None,
+            "a ledger row here would make the next run skip a file it never ingested"
+        );
+    }
 
     #[test]
     fn parse_respondent_from_realistic_filename() {
@@ -576,5 +655,17 @@ mod tests {
         let start_only = WindowBounds::from_dates(Some(d(2026, 2, 1)), None);
         assert!(start_only.contains(ts("2030-01-01 00:00:00")));
         assert!(!start_only.contains(ts("2026-01-31 23:59:59")));
+        // The mirror case: an end bound with no start is open-ended below
+        // and still inclusive through its own last second.
+        let end_only = WindowBounds::from_dates(None, Some(d(2026, 2, 28)));
+        assert!(
+            end_only.contains(ts("1999-01-01 00:00:00")),
+            "no lower bound"
+        );
+        assert!(
+            end_only.contains(ts("2026-02-28 23:59:59")),
+            "end date inclusive through its last second"
+        );
+        assert!(!end_only.contains(ts("2026-03-01 00:00:00")));
     }
 }

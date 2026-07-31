@@ -7,7 +7,6 @@
 //! `--pipelined` branch in `main.rs`.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -18,8 +17,8 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    classify_fetch_phase, cookie_opts_for, fetch_and_decode, mark_after_artifacts,
-    write_artifacts_durable, ProcessOptions, ProcessOutcome, ProcessStats,
+    acquire_audio, classify_fetch_phase, cookie_opts_for, decode_fetched, mark_after_artifacts,
+    write_artifacts_durable, FetchedAudio, ProcessOptions, ProcessOutcome, ProcessStats,
 };
 use crate::errors::TranscribeError;
 use crate::failure::{classify_transcribe_error, ClassifiedFailure};
@@ -149,7 +148,7 @@ pub type SharedStore = std::sync::Arc<tokio::sync::Mutex<Store>>;
 /// Channel payload from fetch workers to the transcribe worker.
 ///
 /// Per 0027: fetch workers do WAV decode in parallel so the transcribe
-/// path is lean. The `PathBuf` rides through for cleanup after
+/// path is lean. The [`FetchedAudio`] handle rides through for cleanup after
 /// `mark_succeeded` per 0008. `samples_len` is carried so the transcribe
 /// worker can compute `duration_s = samples_len as f64 / 16_000.0`
 /// without re-deriving from the moved `samples` Vec (which is consumed
@@ -180,7 +179,10 @@ pub struct FetchedItem {
     pub claim: Claim,
     pub samples: Vec<f32>,
     pub samples_len: usize,
-    pub wav_path: PathBuf,
+    /// Epic 5b: the wav AND the attempt dir that holds it. The transcribe
+    /// worker owns this handle and ends its lifecycle exactly once — cleanup
+    /// after the DB commit, or discard on a transcribe failure.
+    pub audio: FetchedAudio,
     pub fetcher_name: &'static str,
     pub fetch_policy_tag: &'static str,
 }
@@ -189,8 +191,10 @@ pub struct FetchedItem {
 /// pushes a [`FetchedItem`] onto the channel. Exits cleanly on
 /// `claim_next == None` (drain semantics per 0026 — no polling).
 ///
-/// **Error classification (Epic 3 T07; Epic 4a T06).** `fetch_and_decode`'s
-/// [`super::FetchPhaseError`] is run through [`classify_fetch_phase`]:
+/// **Error classification (Epic 3 T07; Epic 4a T06).** The
+/// [`super::FetchPhaseError`] from [`super::acquire_audio`] /
+/// [`super::decode_fetched`] (the split halves this worker calls directly —
+/// see *Cancellation latency* below) is run through [`classify_fetch_phase`]:
 /// - `Bug`: returns `Err` — the orchestrator reacts per 0025 (cancel all +
 ///   drain).
 /// - `Unavailable`: write-off class (ADR 0033) — calls
@@ -205,13 +209,15 @@ pub struct FetchedItem {
 /// ADR-0007 input-side accounting.
 ///
 /// **Mutex hold-time discipline.** The shared store guard is acquired
-/// briefly for `claim_next` and the failure mutators only; it is
-/// dropped before the multi-second `fetch_and_decode().await` so other
-/// fetch workers can claim concurrently (SQLite's BEGIN IMMEDIATE
-/// already serializes the actual claim transaction at the connection
-/// level).
+/// briefly for `claim_next` and the failure mutators only; it is dropped
+/// before the multi-second `acquire_audio().await` / `decode_fetched().await`
+/// pair so other fetch workers can claim concurrently (SQLite's BEGIN
+/// IMMEDIATE already serializes the actual claim transaction at the
+/// connection level). Only the acquire half is cancellable (wrapped in the
+/// `select!` below); decode is always awaited to completion once acquire
+/// succeeds — see *Cancellation latency* below for why.
 ///
-/// **Cancellation latency (T16, closed out here).** The `fetch_and_decode`
+/// **Cancellation latency (T16, closed out here).** The `acquire_audio`
 /// future is wrapped in a `tokio::select!` against the `CancellationToken`,
 /// mirroring the transcribe-side wrap (a66d38b). When `token.cancel()`
 /// fires mid-fetch, the select arm wins and the in-flight `acquire` future
@@ -223,6 +229,12 @@ pub struct FetchedItem {
 /// eventually dropped — correct but with unbounded latency during a long
 /// fetch).
 ///
+/// The select covers the ACQUIRE half only (Epic 5b). Dropping that future
+/// cancels real work — a `Child` drop kills yt-dlp — whereas dropping the
+/// decode half would cancel nothing (`spawn_blocking` closures run to
+/// completion detached) while swallowing a panic the JoinSet should have
+/// seen, so `decode_fetched` is awaited unconditionally after the select.
+///
 /// **Stale-after-failure handling (design amendment).** When a failure
 /// mutator returns `Ok(0)`, the row's claim was swept (or re-assigned)
 /// between this worker's `claim_next` and the mutator call — the predicate
@@ -231,10 +243,8 @@ pub struct FetchedItem {
 /// `stats_stale_after_failure` and continue, do NOT return Err. T18
 /// merges this counter into `ProcessStats` after worker drain.
 ///
-/// T18: `run_pipelined` is the in-bin caller; the prior
-/// `#[allow(dead_code)]` placeholder is lifted as part of this wiring
-/// per 0002. Integration tests in `tests/pipeline_fakes/fetch_worker_tests.rs`
-/// continue to exercise it directly.
+/// `run_pipelined` is the production caller (T18). Integration tests in
+/// `tests/pipeline_fakes/fetch_worker_tests.rs` also exercise it directly.
 #[allow(clippy::too_many_arguments)] // one worker; each Arc counter/handle is a distinct sink
 pub async fn fetch_worker(
     token: CancellationToken,
@@ -261,7 +271,7 @@ pub async fn fetch_worker(
         }
 
         // Acquire the store guard ONLY for the claim transaction; drop it
-        // before the long-running fetch_and_decode below.
+        // before the long-running acquire + decode below.
         //
         // Honor --max-videos cap. The check, claim_next, and counter
         // increment are all inside this Mutex<Store> guard scope, so the
@@ -303,15 +313,26 @@ pub async fn fetch_worker(
         // shutdown drops the in-flight `acquire` future promptly (see the
         // docstring's Cancellation latency section) instead of relying on
         // the loop-top poll alone.
-        let fetch_result = tokio::select! {
+        //
+        // Epic 5b: the select covers `acquire_audio` ONLY, not the decode.
+        // Dropping the acquire future drops a `tokio::process::Child` and
+        // kills yt-dlp — real cancellation. Dropping the decode future would
+        // NOT cancel its `spawn_blocking` closure (tokio runs it to
+        // completion detached) and would swallow a panic that belongs to the
+        // JoinSet, so `decode_fetched` is awaited unconditionally below —
+        // which is also what the pre-wrap inline decode did.
+        let acquired = tokio::select! {
             biased;
             () = token.cancelled() => {
                 tracing::info!(worker = %worker_id, "fetch_worker: cancellation during fetch; exiting");
                 return Ok(());
             }
-            r = fetch_and_decode(fetcher.as_ref(), &claim, &fetch_opts) => r,
+            r = acquire_audio(fetcher.as_ref(), &claim, &fetch_opts) => r,
         };
-        let (metadata_capture, fetch_result) = fetch_result;
+        let (metadata_capture, fetch_result) = match acquired {
+            (capture, Ok(fetched)) => (capture, decode_fetched(fetched).await),
+            (capture, Err(e)) => (capture, Err(e)),
+        };
 
         // Epic 4c: persist the raw envelope BEFORE outcome dispatch so
         // mid-download deaths still leave metadata. Best-effort by
@@ -321,7 +342,7 @@ pub async fn fetch_worker(
         if let Some(capture) = metadata_capture {
             let insert = {
                 let mut guard = store.lock().await;
-                guard.upsert_metadata_raw(&claim.video_id, &capture.envelope_json)
+                guard.upsert_metadata_raw(&claim.video_id, &worker_id, &capture.envelope_json)
             };
             if let Err(e) = insert {
                 tracing::warn!(
@@ -334,13 +355,13 @@ pub async fn fetch_worker(
         }
 
         match fetch_result {
-            Ok((samples, wav_path)) => {
+            Ok((samples, audio)) => {
                 let samples_len = samples.len();
                 let item = FetchedItem {
                     claim,
                     samples,
                     samples_len,
-                    wav_path,
+                    audio,
                     // T18 Decision B: stamp the fetcher's identifier onto
                     // the item so the transcribe worker can pass it to
                     // the phase-4 helpers (instead of a hardcoded
@@ -351,11 +372,21 @@ pub async fn fetch_worker(
                     // record the accurate tag instead of recomputing.
                     fetch_policy_tag: fetch_opts.format_policy.tag(),
                 };
-                if sender.send(item).await.is_err() {
+                if let Err(unsent) = sender.send(item).await {
                     // Channel closed — transcribe_worker exited (panic or
-                    // shutdown). Bug-class signal up to the orchestrator;
-                    // the WAV is on disk and the claim remains in_progress
-                    // until the next sweep recovers it.
+                    // shutdown). Bug-class signal up to the orchestrator.
+                    //
+                    // Epic 5b: `SendError` hands the un-sent item BACK, so
+                    // this branch still owns the cleanup handle — take it and
+                    // discard. This is a live-run branch, not crash residue:
+                    // whenever the transcribe worker exits first (e.g. its own
+                    // `TranscribeError::Bug`), every fetch worker with an
+                    // in-flight `send` lands here, and dropping the item
+                    // silently would leak one attempt dir apiece until the
+                    // next process start. Nothing wants those bytes — the row
+                    // stays `in_progress`, and the sweep-and-reclaim path
+                    // re-fetches into a fresh dir.
+                    unsent.0.audio.discard();
                     tracing::error!(
                         worker = %worker_id,
                         "fetch_worker: channel closed; transcribe_worker has exited"
@@ -456,7 +487,8 @@ pub async fn fetch_worker(
 /// Phase 2 transcribe worker. 1 instance per 0027. Drains
 /// [`FetchedItem`]s emitted by N fetch workers and runs phases 3+4 per
 /// item: transcribe (NO store lock) → write artifacts (NO store lock) →
-/// mark_succeeded (store lock, sub-50ms critical section) → cleanup wav.
+/// mark_succeeded (store lock, sub-50ms critical section) → attempt-dir
+/// cleanup.
 ///
 /// **Loop structure.** A `biased` `tokio::select!` at the loop top
 /// prefers the cancellation arm when both are ready — without `biased`,
@@ -512,11 +544,9 @@ pub async fn fetch_worker(
 /// worker increments `stats_stale_after_success` and continues — this
 /// is the success-side counterpart to `stats_stale_after_failure`.
 ///
-/// T18: `run_pipelined` is the in-bin caller; the prior
-/// `#[allow(dead_code)]` placeholder is lifted as part of this wiring
-/// per 0002. Integration tests in
-/// `tests/pipeline_fakes/transcribe_worker_tests.rs` continue to exercise
-/// it directly.
+/// `run_pipelined` is the production caller (T18). Integration tests in
+/// `tests/pipeline_fakes/transcribe_worker_tests.rs` also exercise it
+/// directly.
 #[allow(clippy::too_many_arguments)] // one worker; each Arc counter is a distinct sink
 pub async fn transcribe_worker(
     token: CancellationToken,
@@ -557,7 +587,7 @@ pub async fn transcribe_worker(
             claim,
             samples,
             samples_len,
-            wav_path,
+            audio,
             fetcher_name,
             fetch_policy_tag,
         } = item;
@@ -597,15 +627,61 @@ pub async fn transcribe_worker(
                 // Phase 4a (0008 first half): durable artifact writes with
                 // NO store lock — the fsyncs must not serialize other
                 // workers' claim/failure dispatch behind this mutex.
-                let duration_s = write_artifacts_durable(
-                    &transcribe_output,
-                    &claim,
-                    samples_len,
-                    &opts,
-                    fetcher_name,
-                    transcriber.name(),
-                )
-                .with_context(|| format!("write_artifacts_durable for {}", claim.video_id))?;
+                //
+                // Blocking-IO policy, class (c): a mkdir plus two
+                // `atomic_write`s is three fsyncs, unbounded on a slow or
+                // networked artifacts volume, and the fetch workers are live
+                // — so the call (not the function: it stays sync and
+                // store-free per 0008) runs on the blocking pool.
+                // `transcribe_output` and `claim` are moved in and handed
+                // back out rather than cloned; the closure's `Result` is
+                // returned unchanged, so the context string, the discard, and
+                // the artifacts-before-`mark_after_artifacts` ordering are
+                // untouched. This adds no cancellation point: the
+                // orchestrator shuts workers down with `token.cancel()`, never
+                // `abort_all()`, so this future is never dropped mid-body.
+                let transcript_source = transcriber.name();
+                let opts_for_write = Arc::clone(&opts);
+                let written = tokio::task::spawn_blocking(move || {
+                    let durable = write_artifacts_durable(
+                        &transcribe_output,
+                        &claim,
+                        samples_len,
+                        &opts_for_write,
+                        fetcher_name,
+                        transcript_source,
+                    );
+                    (durable, transcribe_output, claim)
+                })
+                .await;
+                let (durable, transcribe_output, claim) = match written {
+                    Ok(t) => t,
+                    Err(join) => match join.try_into_panic() {
+                        // A panic inside the closure resumes unwinding here,
+                        // exactly as an inline `write_artifacts_durable` panic
+                        // did.
+                        Ok(payload) => std::panic::resume_unwind(payload),
+                        // Nothing holds this handle to abort it, and a
+                        // blocking task is never cancelled by the scheduler.
+                        Err(join) => {
+                            unreachable!("spawn_blocking artifact write cancelled: {join}")
+                        }
+                    },
+                };
+                let durable = durable
+                    .with_context(|| format!("write_artifacts_durable for {}", claim.video_id));
+                let duration_s = match durable {
+                    Ok(d) => d,
+                    Err(e) => {
+                        // Artifact write failed (disk full / permissions):
+                        // the row stays `in_progress` for the next sweep to
+                        // reclaim and re-fetch, so this attempt's bytes are
+                        // dead — and on a full disk, freeing them is the
+                        // friendlier failure.
+                        audio.discard();
+                        return Err(e);
+                    }
+                };
 
                 // Phase 4b (0008 second half): lock exactly around the DB
                 // acknowledgement.
@@ -616,9 +692,9 @@ pub async fn transcribe_worker(
                         &claim,
                         duration_s,
                         &transcribe_output.language,
-                        wav_path,
+                        audio,
                         fetcher_name,
-                        transcriber.name(),
+                        transcript_source,
                         &opts,
                     )
                     .with_context(|| format!("mark_after_artifacts for {}", claim.video_id))?
@@ -640,7 +716,11 @@ pub async fn transcribe_worker(
             Err(TranscribeError::Cancelled) => {
                 // Coordinated shutdown, not a row failure. Row stays
                 // `in_progress`; sweep recovers on next startup. Do
-                // NOT increment any failure counter.
+                // NOT increment any failure counter. The attempt dir is
+                // deliberately left alone too — same reasoning as the
+                // fetch-side cancellation arm, where the dropped `acquire`
+                // future leaves its dir behind: the startup `.work` sweep
+                // collects it once it is older than the stale-claim window.
                 tracing::info!(
                     worker = %worker_id,
                     video_id = claim.video_id.as_str(),
@@ -651,6 +731,8 @@ pub async fn transcribe_worker(
             Err(e @ TranscribeError::Bug { .. }) => {
                 // Bug-class: orchestrator reacts per 0025 (cancel all
                 // + drain). Wrap with anyhow context for the JoinSet.
+                // This attempt is over either way — drop its bytes.
+                audio.discard();
                 tracing::error!(
                     worker = %worker_id,
                     video_id = claim.video_id.as_str(),
@@ -670,6 +752,9 @@ pub async fn transcribe_worker(
                 // `Unavailable` — cannot reach either arm here. Both are
                 // `unreachable!()`; the live path is `Retryable`.
                 let video_id = claim.video_id.clone();
+                // Epic 5b: the attempt ends here — the row requeues (and
+                // re-fetches into a fresh dir) or goes terminal.
+                audio.discard();
                 // ADR-0007 input-side accounting: one failure-dispatched
                 // attempt (mirrors run_serial's per-attempt bump).
                 stats_failed.fetch_add(1, Ordering::Relaxed);

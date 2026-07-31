@@ -31,6 +31,35 @@ fn shim_path(dir: &tempfile::TempDir) -> String {
     )
 }
 
+/// Tripwire shim: a `yt-dlp` on the child's PATH that records the fact of
+/// its own invocation in `marker` and then behaves like a total failure.
+/// Returns `(PATH value, marker path)`.
+///
+/// Epic 5b bundle: the dry-run test previously asserted only that the
+/// process exited 0 and wrote no rows — "invokes nothing" was an inference
+/// from absence of evidence, and would have held equally well if dry-run
+/// had shelled out to the operator's real yt-dlp. With this shim on PATH,
+/// the marker's absence is a positive assertion.
+fn tripwire_path(dir: &tempfile::TempDir) -> (String, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.path().join("tripwire-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let marker = dir.path().join("yt-dlp-was-invoked");
+    let shim = bin.join("yt-dlp");
+    std::fs::write(
+        &shim,
+        format!("#!/bin/sh\n: > \"{}\"\nexit 1\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    (path, marker)
+}
+
 /// v1 succeeded+envelope (not in cohort), v2 succeeded (cohort),
 /// v3 succeeded with a "dead" URL (cohort), v4 pending (not in cohort).
 fn seeded_db(dir: &tempfile::TempDir) -> std::path::PathBuf {
@@ -50,27 +79,62 @@ fn seeded_db(dir: &tempfile::TempDir) -> std::path::PathBuf {
             .upsert_video("v4", "https://example/4", false)
             .unwrap();
         store
-            .upsert_metadata_raw("v1", r#"{"schema":1,"printed":"{\"id\":\"v1\"}"}"#)
+            .insert_metadata_raw_if_missing("v1", r#"{"schema":1,"printed":"{\"id\":\"v1\"}"}"#)
             .unwrap();
     }
     // Flip statuses with raw rusqlite — no public mutator sets
     // `succeeded` without a claim, and tests must not grow one.
+    // `attempt_count` / `succeeded_at` are seeded to NON-default values so
+    // the widened `statuses()` snapshot has something to lose: an all-zero
+    // baseline would pass a regression that reset them.
     let conn = rusqlite::Connection::open(&db).unwrap();
     conn.execute(
-        "UPDATE videos SET status = 'succeeded' WHERE video_id IN ('v1','v2','v3')",
+        "UPDATE videos SET status = 'succeeded', attempt_count = 2, succeeded_at = 1750000000
+         WHERE video_id IN ('v1','v2','v3')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE videos SET attempt_count = 1 WHERE video_id = 'v4'",
         [],
     )
     .unwrap();
     db
 }
 
-fn statuses(db: &std::path::Path) -> Vec<(String, String)> {
+/// One video's lifecycle columns — every column `backfill-metadata` must
+/// never write (ADR-0042's metadata-only carve-out), not just `status`.
+/// Widened in the Epic 5b test-hardening bundle: a regression that stamped
+/// a claim, bumped `attempt_count`, or rewrote `succeeded_at` used to pass
+/// the old `(video_id, status)` snapshot silently.
+type LifecycleRow = (
+    String,         // video_id
+    String,         // status
+    Option<String>, // claimed_by
+    Option<i64>,    // claimed_at
+    i64,            // attempt_count
+    Option<i64>,    // succeeded_at
+);
+
+fn statuses(db: &std::path::Path) -> Vec<LifecycleRow> {
     let conn = rusqlite::Connection::open(db).unwrap();
     let mut stmt = conn
-        .prepare("SELECT video_id, status FROM videos ORDER BY video_id")
+        .prepare(
+            "SELECT video_id, status, claimed_by, claimed_at, attempt_count, succeeded_at
+             FROM videos ORDER BY video_id",
+        )
         .unwrap();
     let rows = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -78,13 +142,15 @@ fn statuses(db: &std::path::Path) -> Vec<(String, String)> {
 }
 
 #[test]
-fn dry_run_prints_cohort_and_writes_nothing() {
+fn dry_run_prints_cohort_and_invokes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let db = seeded_db(&dir);
     let before = statuses(&db);
+    let (path, marker) = tripwire_path(&dir);
 
     let assert = AssertCommand::cargo_bin("ddp-transcribe")
         .unwrap()
+        .env("PATH", path)
         .args([
             "--state-db",
             db.to_str().unwrap(),
@@ -96,6 +162,14 @@ fn dry_run_prints_cohort_and_writes_nothing() {
     let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(out.contains("cohort 2"), "stdout was: {out}");
     assert!(out.contains("dry-run"));
+
+    // The positive assertion: the tripwire `yt-dlp` was never reached. Its
+    // shim exits 1, so had dry-run invoked it the run would also have had a
+    // capture failure to report.
+    assert!(
+        !marker.exists(),
+        "dry-run must invoke no subprocess; the tripwire yt-dlp ran"
+    );
 
     let conn = rusqlite::Connection::open(&db).unwrap();
     let raw_rows: i64 = conn

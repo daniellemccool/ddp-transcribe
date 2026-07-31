@@ -13,48 +13,39 @@ use crate::errors::{FetchError, TranscribeError};
 /// operator-editable classification table. Same bare-variant spelling the
 /// retired enums used; DB columns are TEXT throughout, so nothing stored
 /// changes shape.
-pub mod labels {
-    pub const TOOL_TIMEOUT: &str = "ToolTimeout";
-    pub const NETWORK_TRANSIENT: &str = "NetworkTransient";
-    pub const YTDLP_OTHER: &str = "YtDlpOther";
-    pub const TRANSCRIBE_OTHER: &str = "TranscribeOther";
+pub(crate) mod labels {
+    pub(crate) const TOOL_TIMEOUT: &str = "ToolTimeout";
+    pub(crate) const NETWORK_TRANSIENT: &str = "NetworkTransient";
+    pub(crate) const YTDLP_OTHER: &str = "YtDlpOther";
+    pub(crate) const TRANSCRIBE_OTHER: &str = "TranscribeOther";
 }
 
-// 0002: lifted in Epic 3 T07 — constructed within classify_fetch_error/
-// classify_transcribe_error, both reached from `main()` via the pipeline
-// dispatch this task wires.
+// Constructed within classify_fetch_error/classify_transcribe_error, both
+// reached from the pipeline dispatch.
+//
+// 0002 (final-review fix): this struct carried `tool`/`exit_code`/`signal`
+// fields that were populated on every verdict but never read outside the
+// derived `Debug`/`Clone` impls. While `failure` was `pub`, external
+// reachability shielded them from `dead_code`; narrowing the module to
+// `pub(crate)` (finding 2) exposed the dead fields, and they were removed
+// rather than suppressed per the ADR — no named consumer was landing for
+// them. If a raw tool/exit_code/signal view is ever needed (e.g. an
+// operator-facing detail beyond the label string), reintroduce the fields
+// alongside that reader rather than reserving them speculatively.
 #[derive(Debug, Clone)]
-pub struct FailureContext {
-    // 0002: `tool`/`exit_code`/`signal` are populated for every verdict but
-    // only read by `Debug` (dead-code analysis ignores derived-trait reads,
-    // per rustc's own diagnostic). Nothing reconstructs a `FailureContext`
-    // to display them: the start-of-batch sweep classifies the *stored*
-    // message text directly via the classification table's `classify`, and
-    // both the sweep and run censuses aggregate on the label string only —
-    // there is no raw tool/exit_code/signal display anywhere. Still
-    // genuinely dead; re-tagged rather than lifted. Revisit if a future task
-    // adds an operator-facing raw-context view.
-    #[allow(dead_code)]
-    pub tool: &'static str,
-    #[allow(dead_code)]
-    pub exit_code: Option<i32>,
-    /// Unix signal that killed the tool, when applicable. Not read by the
-    /// classifiers themselves or by the start-of-batch sweep/run census
-    /// (see note above).
-    #[allow(dead_code)]
-    pub signal: Option<i32>,
-    pub stderr_excerpt: String,
+pub(crate) struct FailureContext {
+    pub(crate) stderr_excerpt: String,
     /// Which rule matched — audit trail for "why was this row written off".
-    pub classification_reason: &'static str,
+    pub(crate) classification_reason: &'static str,
 }
 
 impl FailureContext {
     /// Message written to last_retryable_message / terminal_message. Leads
     /// with the matched rule so operators can grep verdicts, keeps the raw
     /// excerpt so nothing is lost.
-    // 0002: lifted in Epic 3 T07 — dispatch calls this to build the
-    // message/reason text persisted to state columns.
-    pub fn message(&self) -> String {
+    // Dispatch calls this to build the message/reason text persisted to
+    // state columns.
+    pub(crate) fn message(&self) -> String {
         format!("[{}] {}", self.classification_reason, self.stderr_excerpt)
     }
 }
@@ -67,16 +58,14 @@ impl FailureContext {
 /// failure-time decision in `record_fetch_failure` (T04) parks them when
 /// no cookies are configured.
 #[derive(Debug)]
-pub enum ClassifiedFailure {
+pub(crate) enum ClassifiedFailure {
     Retryable {
         label: String,
-        // 0002: populated by every Retryable arm (classify_fetch_error's
-        // ToolFailed match on Disposition::RequiresCookie is the only arm
-        // that sets this true) but not yet read by any dispatch site —
-        // `fetch_worker`/`transcribe_worker`/`run_serial` all bind it as
-        // `requires_cookie: _`. Epic 4a T04/T06 consume it via
-        // `record_fetch_failure`; lift then.
-        #[allow(dead_code)]
+        // Populated by every Retryable arm (classify_fetch_error's ToolFailed
+        // match on Disposition::RequiresCookie is the only arm that sets this
+        // true) and read by the pipelined workers, which thread it into
+        // `Store::record_fetch_failure` to park cookie-needing rows when no
+        // cookies are configured.
         requires_cookie: bool,
         ctx: FailureContext,
     },
@@ -89,20 +78,17 @@ pub enum ClassifiedFailure {
     },
 }
 
-// 0002: lifted in Epic 3 T07 — called by `classify_fetch_phase`
-// (`src/pipeline/mod.rs`), reached from `main()` via `fetch_worker`/
-// `run_serial`'s dispatch. Epic 4a T03: the `ToolFailed` arm's message
-// classification now consults the operator-editable `ClassificationTable`
-// instead of a hardcoded `classify_message` chain.
-pub fn classify_fetch_error(e: &FetchError, table: &ClassificationTable) -> ClassifiedFailure {
-    let ctx = |exit_code: Option<i32>, signal: Option<i32>, excerpt: &str, reason: &'static str| {
-        FailureContext {
-            tool: "yt-dlp",
-            exit_code,
-            signal,
-            stderr_excerpt: excerpt.to_string(),
-            classification_reason: reason,
-        }
+// Called by `classify_fetch_phase` (`src/pipeline/mod.rs`), reached from the
+// dispatch path via `fetch_worker`/`run_serial`. Epic 4a T03: the `ToolFailed`
+// arm's message classification consults the operator-editable
+// `ClassificationTable` instead of a hardcoded `classify_message` chain.
+pub(crate) fn classify_fetch_error(
+    e: &FetchError,
+    table: &ClassificationTable,
+) -> ClassifiedFailure {
+    let ctx = |excerpt: &str, reason: &'static str| FailureContext {
+        stderr_excerpt: excerpt.to_string(),
+        classification_reason: reason,
     };
     let retryable = |label: &str, ctx: FailureContext| ClassifiedFailure::Retryable {
         label: label.to_string(),
@@ -112,60 +98,48 @@ pub fn classify_fetch_error(e: &FetchError, table: &ClassificationTable) -> Clas
     match e {
         FetchError::ToolTimeout { duration, .. } => retryable(
             labels::TOOL_TIMEOUT,
-            ctx(
-                None,
-                None,
-                &format!("timed out after {duration:?}"),
-                "tool timeout",
-            ),
+            ctx(&format!("timed out after {duration:?}"), "tool timeout"),
         ),
         FetchError::ToolNotFound { detail, .. } => ClassifiedFailure::Bug {
-            ctx: ctx(
-                None,
-                None,
-                detail,
-                "tool binary missing: configuration broken",
-            ),
+            ctx: ctx(detail, "tool binary missing: configuration broken"),
         },
         FetchError::WorkDirCreate { path, detail } => ClassifiedFailure::Bug {
             ctx: ctx(
-                None,
-                None,
                 &format!("{}: {detail}", path.display()),
                 "work dir creation failed: environment broken",
             ),
         },
         FetchError::SystemIo { detail, .. } => retryable(
             labels::NETWORK_TRANSIENT,
-            ctx(None, None, detail, "system io reading subprocess output"),
+            ctx(detail, "system io reading subprocess output"),
         ),
         FetchError::MissingOutput { path } => retryable(
             labels::YTDLP_OTHER,
             ctx(
-                Some(0),
-                None,
                 &format!("{} missing after exit 0", path.display()),
                 "yt-dlp exit 0 but expected wav missing",
             ),
         ),
-        FetchError::NetworkError(detail) => retryable(
-            labels::NETWORK_TRANSIENT,
-            ctx(None, None, detail, "network error"),
+        // Epic 5b: same class as MissingOutput — yt-dlp exited 0 but the
+        // attempt dir's contents don't match the one-wav contract. Retryable
+        // rather than Bug: a re-fetch lands in a FRESH dir, and a Bug verdict
+        // would cancel the whole batch (0025) over one video's output shape.
+        FetchError::AmbiguousOutput { dir, count } => retryable(
+            labels::YTDLP_OTHER,
+            ctx(
+                &format!("{count} wav files in {} after exit 0", dir.display()),
+                "yt-dlp exit 0 but attempt dir holds more than one wav",
+            ),
         ),
+        FetchError::NetworkError(detail) => {
+            retryable(labels::NETWORK_TRANSIENT, ctx(detail, "network error"))
+        }
         FetchError::ParseError(detail) => retryable(
             labels::YTDLP_OTHER,
-            ctx(None, None, detail, "fetcher output parse failure"),
+            ctx(detail, "fetcher output parse failure"),
         ),
-        FetchError::ToolFailed {
-            exit_code,
-            signal,
-            stderr_excerpt,
-            ..
-        } => {
+        FetchError::ToolFailed { stderr_excerpt, .. } => {
             let base = FailureContext {
-                tool: "yt-dlp",
-                exit_code: Some(*exit_code),
-                signal: *signal,
                 stderr_excerpt: stderr_excerpt.clone(),
                 classification_reason: "stderr message class",
             };
@@ -194,11 +168,8 @@ pub fn classify_fetch_error(e: &FetchError, table: &ClassificationTable) -> Clas
 // reached from `main()` via `run_pipelined`. Transcribe errors are
 // structural (no yt-dlp stderr to classify), so this keeps its unchanged
 // signature — no `ClassificationTable` argument (Epic 4a T03 brief).
-pub fn classify_transcribe_error(e: &TranscribeError) -> ClassifiedFailure {
+pub(crate) fn classify_transcribe_error(e: &TranscribeError) -> ClassifiedFailure {
     let ctx = |excerpt: String, reason: &'static str| FailureContext {
-        tool: "whisper-rs",
-        exit_code: None,
-        signal: None,
         stderr_excerpt: excerpt,
         classification_reason: reason,
     };
@@ -329,7 +300,6 @@ mod tests {
         match classify_fetch_error(&e, &table) {
             ClassifiedFailure::Unavailable { label, ctx } => {
                 assert_eq!(label, "IpBlockedMessage");
-                assert_eq!(ctx.exit_code, Some(1));
                 assert!(!ctx.classification_reason.is_empty());
             }
             other => panic!("expected Unavailable(IpBlockedMessage), got {other:?}"),

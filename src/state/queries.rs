@@ -423,6 +423,25 @@ impl Store {
         Ok(rows)
     }
 
+    /// Does this respondent appear in `watch_history` at all?
+    ///
+    /// [`Store::respondent_summary`] is an aggregate query: it returns
+    /// exactly one row whatever the id, so an all-zeros summary cannot be
+    /// told apart from a typo'd id. Callers ask this first and error on an
+    /// unknown respondent, matching `--video-id`'s behavior. Kept as its
+    /// own query rather than a `HAVING COUNT(*) > 0` on the summary so the
+    /// existence verdict is read from `watch_history` alone — a respondent
+    /// whose video rows went missing is still *known*, just empty.
+    pub(crate) fn respondent_is_known(&self, respondent_id: &str) -> Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM watch_history WHERE respondent_id = ?1)",
+                rusqlite::params![respondent_id],
+                |r| r.get(0),
+            )
+            .context("respondent_is_known")
+    }
+
     pub fn respondent_summary(&self, respondent_id: &str) -> Result<RespondentSummary> {
         self.conn
             .query_row(

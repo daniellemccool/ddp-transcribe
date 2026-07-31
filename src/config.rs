@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::cli::{GlobalArgs, Profile};
 
 #[derive(Debug, Clone)]
-pub struct Config {
+pub(crate) struct Config {
     pub profile: Profile,
     pub state_db: PathBuf,
     pub inbox: PathBuf,
@@ -36,7 +36,7 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn from_args(args: &GlobalArgs) -> Self {
+    pub(crate) fn from_args(args: &GlobalArgs) -> Self {
         match args.profile {
             Profile::Dev => Self {
                 profile: Profile::Dev,

@@ -121,6 +121,32 @@ fn sweep_requeue_respects_attempt_cap_and_writes_kind_back() {
         .sweep_requeue("7000000000000000003", "NoDataBlocks", 1)
         .unwrap();
     assert_eq!(n2, 0);
+
+    // …and a capped miss (`batch::run_sweep`'s `kept_capped` arm) writes NO
+    // event: nothing happened to the row, so the audit trail must stay silent.
+    // Pinned so a future change cannot start emitting spurious 'requeued'
+    // events for rows the sweep declined to move.
+    let capped_events: i64 = raw
+        .query_row(
+            "SELECT COUNT(*) FROM video_events WHERE video_id = '7000000000000000003'
+             AND event_type = 'requeued'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(capped_events, 0, "kept_capped writes no event");
+
+    // The declined row also keeps its stored kind — a predicate miss writes
+    // nothing at all, not even the re-classified label.
+    let (status, kind): (String, Option<String>) = raw
+        .query_row(
+            "SELECT status, last_retryable_kind FROM videos WHERE video_id='7000000000000000003'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "failed_retryable");
+    assert_eq!(kind.as_deref(), Some("Fetch"));
 }
 
 /// Claims `video_id` for `worker_id`, then backdates `claimed_at` through a

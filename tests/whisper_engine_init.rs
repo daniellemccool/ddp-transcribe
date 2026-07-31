@@ -289,3 +289,42 @@ async fn transcribe_populates_raw_signals_segments_and_tokens() {
 
     engine.shutdown();
 }
+
+/// 0013 assertion path (T08). Engine construction now captures whisper.cpp's
+/// init log through the process-global log bridge, parses the backend out of
+/// it, and — on `--features cuda` — hard-fails with
+/// `WhisperInitError::BackendMismatch` if whisper.cpp fell back to CPU.
+///
+/// What this test pins down depends on the build:
+///   - **non-cuda** (the default local build): `EXPECTED_BACKEND` is
+///     `Unconstrained`, so a successful `new()` proves the assertion does NOT
+///     false-fire on a CPU-only build — the exact regression the cross-epic
+///     FOLLOWUPS entry warns about ("the assertion must NOT fire on non-CUDA
+///     builds where CPU is the expected backend").
+///   - **cuda**: a successful `new()` is proof the captured init log showed a
+///     GPU backend; a CPU fallback would have made this `Err`.
+///
+/// Constructing two engines in sequence also exercises the "install once,
+/// never replace per engine" bridge contract and the phase-scoped capture:
+/// the second init must be judged on its own captured lines, not the first's.
+/// The mismatch decision itself is unit-tested inline in `src/transcribe.rs`
+/// (`backend_assertion_tests`), which needs no GPU.
+#[tokio::test]
+#[ignore = "requires ./models/ggml-tiny.en.bin; run with `cargo test --features test-helpers -- --ignored`"]
+async fn engine_init_passes_the_0013_backend_assertion() {
+    let config = EngineConfig {
+        model_path: tiny_model_path(),
+        gpu_device: 0,
+        // On a cuda build this test doubles as the ADR-0013 GPU smoke, so let
+        // flash_attn follow the feature the same way `commands.rs` does.
+        flash_attn: cfg!(feature = "cuda"),
+    };
+
+    let first = WhisperEngine::new(&config)
+        .expect("engine init must not trip the 0013 backend assertion on this build");
+    first.shutdown();
+
+    let second = WhisperEngine::new(&config)
+        .expect("a second engine reuses the already-installed global log bridge");
+    second.shutdown();
+}

@@ -83,6 +83,10 @@ fn ingest_accepts_equal_window_start_and_end() {
     let tmp = tempfile::TempDir::new().unwrap();
     let db = tmp.path().join("state.sqlite");
     let inbox = tmp.path().join("inbox");
+    // The subject here is window parsing, not inbox tolerance: `ingest` now
+    // rejects a missing inbox root (an operator typo must not pass as an
+    // empty run), so give it a real, empty one.
+    std::fs::create_dir_all(&inbox).unwrap();
 
     Command::cargo_bin("ddp-transcribe")
         .unwrap()
@@ -176,6 +180,110 @@ fn process_checkpoint_cmd_with_interval_parses() {
         Some(2),
         "--checkpoint-cmd with --checkpoint-every must parse"
     );
+}
+
+#[test]
+fn requeue_failures_rejects_unqualified_invocations() {
+    // ADR-0046 default-deny: nothing but a qualifying selector (or an
+    // explicit --all) may grant eligibility, and --all never silently
+    // intersects with a selector. Every case here is a clap usage error (2),
+    // never a run that touches rows.
+    let cases: &[&[&str]] = &[
+        &["requeue-failures"],                                       // bare
+        &["requeue-failures", "--max", "5"],                         // modifier alone
+        &["requeue-failures", "--all", "--older-than", "30d"],       // conflict
+        &["requeue-failures", "--include-terminal", "--all"],        // terminal + --all
+        &["requeue-failures", "--include-terminal", "--max", "100"], // terminal + modifier
+        &["requeue-failures", "--max-attempts", "0"],                // positive range
+    ];
+    for args in cases {
+        Command::cargo_bin("ddp-transcribe")
+            .unwrap()
+            .args(*args)
+            .assert()
+            .code(2);
+    }
+}
+
+#[test]
+fn requeue_failures_accepts_qualified_invocations() {
+    // Parse-only checks: a qualified invocation gets PAST argument parsing
+    // and fails later on the missing state DB, not with a usage error (2).
+    let cases: &[&[&str]] = &[
+        &["requeue-failures", "--all"],
+        &[
+            "requeue-failures",
+            "--error-kind",
+            "timeout",
+            "--error-kind",
+            "geo_block",
+        ],
+        &[
+            "requeue-failures",
+            "--include-terminal",
+            "--error-kind",
+            "unavailable",
+            "--older-than",
+            "7d",
+        ],
+    ];
+    for args in cases {
+        let mut argv = vec!["--state-db", "/nonexistent/x.sqlite"];
+        argv.extend_from_slice(args);
+        let assert = Command::cargo_bin("ddp-transcribe")
+            .unwrap()
+            .args(&argv)
+            .assert()
+            .failure();
+        assert_ne!(
+            assert.get_output().status.code(),
+            Some(2),
+            "clap rejected {args:?}"
+        );
+    }
+}
+
+#[test]
+fn backfill_metadata_rejects_dry_run_with_limit() {
+    // `--dry-run` never invoked yt-dlp, so `--limit` was silently ignored —
+    // documented in the runbook and nowhere else. clap now rejects the pair
+    // outright, so the operator learns it from the tool (v0.3.1 CLI bundle).
+    Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args(["backfill-metadata", "--dry-run", "--limit", "5"])
+        .assert()
+        .code(2)
+        .stderr(contains("--limit"));
+    // Order-independent: clap must reject it whichever flag comes first.
+    Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args(["backfill-metadata", "--limit", "5", "--dry-run"])
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn backfill_metadata_accepts_dry_run_and_limit_separately() {
+    // The conflict must be exactly the PAIR: each flag alone still parses
+    // (these get past clap and fail later on the missing state DB).
+    let cases: &[&[&str]] = &[
+        &["backfill-metadata", "--dry-run"],
+        &["backfill-metadata", "--limit", "5"],
+    ];
+    for args in cases {
+        let mut argv = vec!["--state-db", "/nonexistent/x.sqlite"];
+        argv.extend_from_slice(args);
+        let assert = Command::cargo_bin("ddp-transcribe")
+            .unwrap()
+            .args(&argv)
+            .assert()
+            .failure();
+        assert_ne!(
+            assert.get_output().status.code(),
+            Some(2),
+            "clap rejected {args:?}"
+        );
+    }
 }
 
 #[test]

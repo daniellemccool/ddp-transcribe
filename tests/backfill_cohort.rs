@@ -23,7 +23,7 @@ fn seeded_db(dir: &tempfile::TempDir) -> std::path::PathBuf {
             store.upsert_video(id, url, false).unwrap();
         }
         store
-            .upsert_metadata_raw("v1", r#"{"schema":1,"printed":"{\"id\":\"v1\"}"}"#)
+            .insert_metadata_raw_if_missing("v1", r#"{"schema":1,"printed":"{\"id\":\"v1\"}"}"#)
             .unwrap();
     }
     // Flip statuses with raw rusqlite — no public mutator sets

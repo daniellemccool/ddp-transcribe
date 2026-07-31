@@ -42,49 +42,54 @@ pub enum FetchError {
     #[error("tool succeeded but expected output {path} is missing")]
     MissingOutput { path: std::path::PathBuf },
 
-    // 0002: no production construction sites remain after Task 02's error
-    // split (WorkDirCreate/MissingOutput/ToolNotFound/SystemIo took over the
-    // acquire-path uses), but both variants are still constructed today by
+    /// Epic 5b: the attempt directory holds MORE than one `*.wav` after a
+    /// clean exit. Distinct from [`FetchError::MissingOutput`] on purpose —
+    /// picking one of them would transcribe an arbitrary file and stamp it as
+    /// this video's transcript, so ambiguity fails instead of guessing.
+    #[error("tool succeeded but attempt dir {dir} holds {count} wav files (expected exactly 1)")]
+    AmbiguousOutput {
+        dir: std::path::PathBuf,
+        count: usize,
+    },
+
+    // No production construction sites remain after Task 02's error split
+    // (WorkDirCreate/MissingOutput/ToolNotFound/SystemIo took over the
+    // acquire-path uses), but both variants are still constructed by
     // `FakeFetcher::acquire` (src/fetcher/mod.rs, gated
     // `cfg(any(test, feature = "test-helpers"))`) — NetworkError for
     // `always_fails`, ParseError for a missing canned response — backing the
-    // T9 continue-on-failure and T16 stale-after-failure pipeline tests.
-    // dead_code fires because cfg-gated construction doesn't count for the
-    // bin's dead-code analysis. Check FakeFetcher before reshaping these.
-    #[allow(dead_code)]
+    // T9 continue-on-failure and T16 stale-after-failure pipeline tests, and
+    // both are classified in `failure.rs`. Check FakeFetcher before reshaping
+    // these.
     #[error("network error during fetch: {0}")]
     NetworkError(String),
 
-    #[allow(dead_code)]
     #[error("failed to parse fetcher output: {0}")]
     ParseError(String),
 }
 
 #[derive(Debug, Error)]
 pub enum TranscribeError {
-    // 0002: Plan A's whisper-cli subprocess constructed these (T11 deleted
-    // the legacy `transcribe()` fn). Epic 3 (ADR 0033) closed without
-    // rebuilding this enum; as of Epic 4a the failure taxonomy is label
-    // strings driven by the classification table (`src/classification.rs`),
-    // with structural errors code-mapped in `src/failure.rs` — Epic 1's
-    // whisper-rs path surfaces deadline-elapse via `Cancelled` and internal
-    // failures via `Bug`, so `Timeout`, `Failed`, `EmptyOutput` remain
-    // unconstructed by the embedded engine. The errors.rs unit test keeps
-    // `Failed` alive; `Timeout` and `EmptyOutput` need the explicit
-    // suppression. Revisit if a subprocess engine returns, or at the Epic 5
-    // dead-code sweep.
-    #[allow(dead_code)]
+    // Plan A's whisper-cli subprocess constructed these (T11 deleted the
+    // legacy `transcribe()` fn). Epic 3 (ADR 0033) closed without rebuilding
+    // this enum; as of Epic 4a the failure taxonomy is label strings driven by
+    // the classification table (`src/classification.rs`), with structural
+    // errors code-mapped in `src/failure.rs` — Epic 1's whisper-rs path
+    // surfaces deadline-elapse via `Cancelled` and internal failures via
+    // `Bug`, so `Timeout`, `Failed`, `EmptyOutput` are unconstructed by the
+    // embedded engine. `Timeout` is matched by
+    // `failure::classify_transcribe_error`; `Failed` is constructed by this
+    // file's unit test and `EmptyOutput` by `tests/pipeline_fakes/fakes.rs`.
+    // Revisit if a subprocess engine returns.
     #[error("whisper.cpp timed out after {duration:?}")]
     Timeout { duration: Duration },
 
-    #[allow(dead_code)]
     #[error("whisper.cpp exited with status {exit_code}: {stderr_excerpt}")]
     Failed {
         exit_code: i32,
         stderr_excerpt: String,
     },
 
-    #[allow(dead_code)]
     #[error("whisper.cpp produced no transcript")]
     EmptyOutput,
 

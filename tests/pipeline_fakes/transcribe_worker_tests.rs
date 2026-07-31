@@ -21,7 +21,9 @@ async fn transcribe_worker_processes_one_item_then_exits_on_channel_close() -> a
     use tokio::sync::{mpsc, Mutex as TokioMutex};
     use tokio_util::sync::CancellationToken;
 
-    use ddp_transcribe::pipeline::{transcribe_worker, FetchedItem, ProcessOptions, SharedStore};
+    use ddp_transcribe::pipeline::{
+        transcribe_worker, FetchedAudio, FetchedItem, ProcessOptions, SharedStore,
+    };
 
     let tmp = TempDir::new()?;
     std::fs::create_dir_all(tmp.path().join("transcripts"))?;
@@ -59,11 +61,14 @@ async fn transcribe_worker_processes_one_item_then_exits_on_channel_close() -> a
 
     let (tx, rx) = mpsc::channel::<FetchedItem>(2);
 
-    // Synthesize a wav file the worker can clean up. `audio::decode_wav`
-    // is NOT called by the transcribe worker — the samples are already
-    // decoded inside the FetchedItem — so the wav contents don't have to
-    // be a real WAV; just a path the worker can `std::fs::remove_file`.
-    let wav_path = tmp.path().join("synth.wav");
+    // Synthesize an attempt dir + wav the worker can clean up.
+    // `audio::decode_wav` is NOT called by the transcribe worker — the
+    // samples are already decoded inside the FetchedItem — so the wav
+    // contents don't have to be a real WAV; just bytes in a directory the
+    // worker owns (Epic 5b: the whole dir goes after the DB commit).
+    let attempt_dir = tmp.path().join(".work/ytdlp-vid_a.4242-0");
+    std::fs::create_dir_all(&attempt_dir)?;
+    let wav_path = attempt_dir.join("vid_a.wav");
     std::fs::write(&wav_path, b"not a real wav")?;
 
     let samples = vec![0.0_f32; 16_000]; // 1 second of silence at 16 kHz
@@ -72,7 +77,10 @@ async fn transcribe_worker_processes_one_item_then_exits_on_channel_close() -> a
         claim: claim_record,
         samples,
         samples_len,
-        wav_path: wav_path.clone(),
+        audio: FetchedAudio {
+            wav_path: wav_path.clone(),
+            attempt_dir: Some(attempt_dir.clone()),
+        },
         fetcher_name: "fake-fetcher",
         fetch_policy_tag: "deterministic-audio",
     };
@@ -110,10 +118,15 @@ async fn transcribe_worker_processes_one_item_then_exits_on_channel_close() -> a
     assert!(txt.exists(), "transcript .txt at {}", txt.display());
     assert!(json.exists(), "transcript .json at {}", json.display());
 
-    // Wav was cleaned up after the DB commit.
+    // The whole attempt dir was cleaned up after the DB commit (Epic 5b:
+    // previously only the wav went, leaving the dir behind).
     assert!(
         !wav_path.exists(),
         "wav must be removed after mark_succeeded"
+    );
+    assert!(
+        !attempt_dir.exists(),
+        "the attempt dir goes with it — cleanup is per-attempt, after the commit"
     );
 
     // Happy path: stale-after-failure counter must stay at zero.
@@ -225,7 +238,9 @@ async fn transcribe_worker_increments_stale_after_failure_on_swept_claim() -> an
     use tokio::sync::{mpsc, Mutex as TokioMutex};
     use tokio_util::sync::CancellationToken;
 
-    use ddp_transcribe::pipeline::{transcribe_worker, FetchedItem, ProcessOptions, SharedStore};
+    use ddp_transcribe::pipeline::{
+        transcribe_worker, FetchedAudio, FetchedItem, ProcessOptions, SharedStore,
+    };
 
     let tmp = TempDir::new()?;
     std::fs::create_dir_all(tmp.path().join("transcripts"))?;
@@ -266,7 +281,9 @@ async fn transcribe_worker_increments_stale_after_failure_on_swept_claim() -> an
     };
 
     let (tx, rx) = mpsc::channel::<FetchedItem>(2);
-    let wav_path = tmp.path().join("synth.wav");
+    let attempt_dir = tmp.path().join(".work/ytdlp-vid_a.4242-1");
+    std::fs::create_dir_all(&attempt_dir)?;
+    let wav_path = attempt_dir.join("vid_a.wav");
     std::fs::write(&wav_path, b"not a real wav")?;
     let samples = vec![0.0_f32; 16_000];
     let samples_len = samples.len();
@@ -274,7 +291,10 @@ async fn transcribe_worker_increments_stale_after_failure_on_swept_claim() -> an
         claim: claim_record,
         samples,
         samples_len,
-        wav_path,
+        audio: FetchedAudio {
+            wav_path,
+            attempt_dir: Some(attempt_dir.clone()),
+        },
         fetcher_name: "fake-fetcher",
         fetch_policy_tag: "deterministic-audio",
     })

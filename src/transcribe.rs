@@ -293,24 +293,410 @@ pub(crate) struct TranscribeRequest {
     pub reply: oneshot::Sender<Result<TranscribeOutput, TranscribeError>>,
 }
 
-// 0002: BackendMismatch is constructed by T13's backend-assertion path;
-// suppress dead_code until then.
+/// THE single exit from the worker loop: every reply — success and failure
+/// alike — leaves through here.
+///
+/// The worker used to write `let _ = req.reply.send(...)` at seven sites,
+/// so a caller that vanished before the worker replied cost a whole
+/// transcription with no trace at all. A closed reply channel is *expected*
+/// under caller-side cancellation (0012: `CancelOnDrop` fires, the future is
+/// dropped) and suspicious otherwise, and the two are only tellable apart
+/// from the log line — hence `cancel_flag_set`, which reads the request's
+/// own flag (the guard sets it on drop) rather than guessing.
+///
+/// Identity is a worker-local `request_seq`, not a video id: a
+/// `TranscribeRequest` carries no id, and the operator ruling (Epic 5b
+/// disposition matrix, E15) chose logging without one over widening the
+/// engine API to thread it down. Correlate by seq + elapsed against the
+/// pipeline's own per-video lines.
+///
+/// A *successful* send is the ordinary path and logs nothing — the warn
+/// line means "this result was thrown away", which is the only event here
+/// an operator can act on. `result_kind` is a variant label; transcript
+/// text never reaches the log.
+fn reply_and_log(
+    req: TranscribeRequest,
+    result: Result<TranscribeOutput, TranscribeError>,
+    request_seq: u64,
+    started: Instant,
+) {
+    let result_kind = match &result {
+        Ok(_) => "ok",
+        Err(TranscribeError::Cancelled) => "cancelled",
+        Err(TranscribeError::Timeout { .. }) => "timeout",
+        Err(TranscribeError::Failed { .. }) => "failed",
+        Err(TranscribeError::EmptyOutput) => "empty_output",
+        Err(TranscribeError::AudioDecode { .. }) => "audio_decode",
+        Err(TranscribeError::Bug { .. }) => "bug",
+    };
+    let cancel_flag_set = req.cancel.load(std::sync::atomic::Ordering::Relaxed);
+    // Elapsed since this request began processing (dequeue), not since it
+    // was submitted: the worker cannot see the caller's queue wait.
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    if req.reply.send(result).is_err() {
+        tracing::warn!(
+            request_seq,
+            elapsed_ms,
+            result_kind,
+            cancel_flag_set,
+            "transcribe reply channel closed; result dropped"
+        );
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum WhisperInitError {
     #[error("loading whisper model from {path}: {detail}")]
     ModelLoad { path: String, detail: String },
 
-    #[allow(dead_code)]
+    /// 0013: whisper.cpp's init log did not prove the backend this build
+    /// expects. Carries BOTH sides so the operator learns what was expected
+    /// and what actually happened without re-reading the log.
     #[error(
-        "backend mismatch: expected GPU but whisper.cpp engaged CPU fallback (sharp-edges.md:61)"
+        "backend mismatch: this build expects {expected}, but whisper.cpp's init log reported \
+         {detected} — a CPU fallback runs ~100x slower and would silently invalidate the batch \
+         (0013; sharp-edges.md:61)"
     )]
-    BackendMismatch,
+    BackendMismatch { expected: String, detected: String },
 
     #[error("creating whisper state: {detail}")]
     StateCreate { detail: String },
 
     #[error("spawning whisper worker thread: {detail}")]
     WorkerSpawn { detail: String },
+}
+
+// ============================================================================
+// Plan B Epic 5b (T08): whisper.cpp log bridge + 0013 backend assertion
+// ============================================================================
+//
+// 0013 requires engine construction to prove the backend whisper.cpp actually
+// engaged, because a silent CPU fallback produces a run that looks completely
+// normal and is ~100x slower. The only place whisper.cpp states its backend is
+// its init log, so we route that log into Rust and parse it.
+//
+// The cross-epic FOLLOWUPS invariant governs the mechanism: `whisper_log_set`
+// is PROCESS-GLOBAL, not per-context (deepdive sharp-edges.md:65 — the global
+// `g_state` holds exactly this callback and nothing else). So:
+//
+//   1. the callback is installed exactly ONCE, via `Once`, before any context
+//      initialization (see `install_log_bridge` call sites);
+//   2. every whisper.cpp line flows through this ONE bridge to `tracing` at
+//      debug level — never `eprintln`, never a per-engine callback swap;
+//   3. backend capture is phase-scoped: `InitCapture` holds a global phase
+//      mutex for the duration of one engine's init (context construction AND
+//      its primary `create_state`, which is where whisper.cpp v1.8.3 actually
+//      selects the backend), so two engines initializing concurrently cannot
+//      interleave their init lines into one buffer.
+//
+// Binding note: whisper-rs 0.16.0 also ships `install_logging_hooks()`, but it
+// wires whisper-rs's OWN trampolines straight into `log`/`tracing` with no seam
+// to capture the text — and the crate is vendored here with
+// `default-features = false`, so neither of its logging backends is even
+// compiled. We therefore install our own callback through the crate's thin
+// re-export of the raw C call, `whisper_rs::set_log_callback`
+// (= `whisper_rs_sys::whisper_log_set`), which is the documented
+// `whisper_log_set`-equivalent binding and the only one that yields the text.
+// Note it also captures ggml's lines during init: `whisper_backend_init_gpu`
+// forwards whisper's callback to `ggml_log_set` on entry (whisper.cpp:1291),
+// which is how the `ggml_cuda_init` device banner reaches us.
+
+/// What backend this build is entitled to demand.
+///
+/// The `cuda` feature is the gate the cross-epic FOLLOWUPS entry asks for:
+/// a CUDA build hard-fails on CPU fallback; every other build only logs,
+/// because `use_gpu(true)` on a CPU-only build is the expected local-dev path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExpectedBackend {
+    /// `--features cuda`: whisper.cpp MUST report a GPU backend.
+    Gpu,
+    /// Any other build: report the backend, assert nothing.
+    Unconstrained,
+}
+
+/// The gate itself. Written as `cfg!` rather than a `#[cfg]`-split pair of
+/// consts deliberately: both variants stay *constructed* in the source, so
+/// neither arm rots into `dead_code` on the build that doesn't select it and
+/// no `#[allow]` is needed (0002). `cfg!` is still resolved at compile time,
+/// so this is the same feature gate the cross-epic FOLLOWUPS entry asks for.
+/// Matches the `flash_attn: cfg!(feature = "cuda")` idiom in `commands.rs`.
+const EXPECTED_BACKEND: ExpectedBackend = if cfg!(feature = "cuda") {
+    ExpectedBackend::Gpu
+} else {
+    ExpectedBackend::Unconstrained
+};
+
+/// What whisper.cpp's init log says actually happened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DetectedBackend {
+    /// whisper.cpp selected a GPU device AND its backend initialized;
+    /// `device` is ggml's device name (e.g. `CUDA0`) as it appears in the
+    /// `using ... backend` line.
+    Gpu { device: String },
+    /// whisper.cpp selected a GPU device but `ggml_backend_dev_init` failed
+    /// (whisper.cpp:1321-1324), so `whisper_backend_init_gpu` returned nullptr
+    /// and the caller fell silently through to ACCEL/CPU
+    /// (whisper.cpp:1332-1358). Kept distinct from `Cpu` because the operator's
+    /// remedy differs — a GPU was found, so this is a driver/runtime fault, not
+    /// a missing device — and because saying "no GPU found" here would be a lie.
+    /// Rejected by a CUDA build exactly like `Cpu`.
+    GpuInitFailed { device: String },
+    /// whisper.cpp walked the device list and found no GPU — the silent
+    /// fallback 0013 exists to catch.
+    Cpu,
+    /// No verdict line appeared (including a log truncated before whisper.cpp
+    /// resolved a backend). Not proof of anything, and therefore not proof of
+    /// GPU use: a CUDA build treats this as a failure (fail closed).
+    Unknown,
+}
+
+impl std::fmt::Display for ExpectedBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Gpu => write!(f, "a GPU backend (built with --features cuda)"),
+            Self::Unconstrained => write!(f, "any backend (built without --features cuda)"),
+        }
+    }
+}
+
+impl std::fmt::Display for DetectedBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Gpu { device } => write!(f, "GPU backend {device}"),
+            Self::GpuInitFailed { device } => write!(
+                f,
+                "a CPU fallback after GPU backend {device} was selected but failed to start \
+                 (whisper.cpp logged `failed to initialize {device} backend`)"
+            ),
+            Self::Cpu => write!(f, "CPU (whisper.cpp logged `no GPU found`)"),
+            Self::Unknown => write!(
+                f,
+                "an unrecognized backend (the init log reached no whisper_backend_init_gpu verdict)"
+            ),
+        }
+    }
+}
+
+/// `whisper_backend_init_gpu: using CUDA0 backend` (whisper.cpp:1320).
+/// The `_gpu` in the prefix is load-bearing: `whisper_backend_init` (no
+/// suffix) logs the identical wording for ACCEL backends such as BLAS
+/// (whisper.cpp:1342), which are emphatically not GPUs.
+const GPU_BACKEND_LINE_PREFIX: &str = "whisper_backend_init_gpu: using ";
+/// `whisper_backend_init_gpu: failed to initialize CUDA0 backend`
+/// (whisper.cpp:1323). Note the ACCEL loop logs the SAME wording under the
+/// `whisper_backend_init:` prefix (whisper.cpp:1346); a BLAS failure must not
+/// be read as a GPU failure, hence the `_gpu`-anchored prefix here too.
+const GPU_BACKEND_FAILED_PREFIX: &str = "whisper_backend_init_gpu: failed to initialize ";
+const GPU_BACKEND_LINE_SUFFIX: &str = " backend";
+/// `whisper_backend_init_gpu: no GPU found` (whisper.cpp:1316).
+const NO_GPU_LINE: &str = "whisper_backend_init_gpu: no GPU found";
+
+/// Strip `<prefix>DEVICE backend` down to `DEVICE`.
+fn parse_backend_device<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    let device = line
+        .strip_prefix(prefix)?
+        .strip_suffix(GPU_BACKEND_LINE_SUFFIX)?;
+    (!device.is_empty()).then_some(device)
+}
+
+/// Parse whisper.cpp's captured init log into the backend it engaged.
+///
+/// Pure and GPU-free, so the whole decision is unit-testable on a CPU box
+/// (see `backend_assertion_tests`).
+///
+/// This is an ORDERED parse, not a substring search, because `using X backend`
+/// is logged BEFORE `ggml_backend_dev_init` is even attempted
+/// (whisper.cpp:1320-1321). A `using X` line is therefore only a *pending*
+/// claim; it is retracted by a following `failed to initialize X backend`, on
+/// which whisper.cpp returns nullptr and its caller falls silently through to
+/// ACCEL/CPU. Treating the pending claim as proof would let a CUDA build pass
+/// this assertion while running on CPU — the precise failure 0013 exists to
+/// catch.
+///
+/// Precedence, most to least conclusive:
+///   1. a `using X` that survived to the end of the phase unretracted → `Gpu`
+///      (so a failed attempt followed by a later successful one still passes);
+///   2. otherwise a retracted attempt → `GpuInitFailed`;
+///   3. otherwise `no GPU found` → `Cpu`;
+///   4. otherwise → `Unknown` (fail closed; includes truncated logs).
+fn detect_backend(log: &str) -> DetectedBackend {
+    // The most recent unretracted `using X backend` claim.
+    let mut pending: Option<&str> = None;
+    // The most recent retracted claim, kept for the diagnostic.
+    let mut failed: Option<&str> = None;
+    let mut saw_no_gpu = false;
+
+    for line in log.lines() {
+        let line = line.trim_end();
+
+        if let Some(device) = parse_backend_device(line, GPU_BACKEND_LINE_PREFIX) {
+            pending = Some(device);
+        } else if let Some(device) = parse_backend_device(line, GPU_BACKEND_FAILED_PREFIX) {
+            failed = Some(device);
+            // Retract only the claim this failure actually names. A failure
+            // naming some other device leaves an unrelated pending claim
+            // standing rather than silently invalidating it.
+            if pending == Some(device) {
+                pending = None;
+            }
+        } else if line == NO_GPU_LINE {
+            saw_no_gpu = true;
+        }
+    }
+
+    match (pending, failed, saw_no_gpu) {
+        (Some(device), _, _) => DetectedBackend::Gpu {
+            device: device.to_string(),
+        },
+        (None, Some(device), _) => DetectedBackend::GpuInitFailed {
+            device: device.to_string(),
+        },
+        (None, None, true) => DetectedBackend::Cpu,
+        (None, None, false) => DetectedBackend::Unknown,
+    }
+}
+
+/// Pull the human-readable device name out of ggml's init banner, e.g.
+/// `  Device 0: NVIDIA A10, compute capability 8.6, VMM: yes`
+/// (ggml-cuda.cu:267). 0013 wants the device NAME in the operator log, not
+/// just ggml's `CUDA0` handle. Absent on CPU-only inits, hence `Option`.
+fn detect_device_description(log: &str) -> Option<String> {
+    log.lines().find_map(|line| {
+        let rest = line.trim_start().strip_prefix("Device ")?;
+        let (index, description) = rest.split_once(": ")?;
+        // Guard against matching unrelated prose: ggml always prints an index.
+        index.parse::<u32>().ok()?;
+        let description = description.trim();
+        (!description.is_empty()).then(|| description.to_string())
+    })
+}
+
+/// The 0013 decision. Hard-fails a CUDA build whose init log does not prove a
+/// GPU — including the `Unknown` case, because "we could not tell" is not
+/// proof of GPU use and 0013 rejects softening the contract to a warning.
+fn check_backend(
+    expected: ExpectedBackend,
+    detected: &DetectedBackend,
+) -> Result<(), WhisperInitError> {
+    match (expected, detected) {
+        (ExpectedBackend::Unconstrained, _)
+        | (ExpectedBackend::Gpu, DetectedBackend::Gpu { .. }) => Ok(()),
+        (
+            ExpectedBackend::Gpu,
+            DetectedBackend::GpuInitFailed { .. } | DetectedBackend::Cpu | DetectedBackend::Unknown,
+        ) => Err(WhisperInitError::BackendMismatch {
+            expected: expected.to_string(),
+            detected: detected.to_string(),
+        }),
+    }
+}
+
+/// One-shot install guard for the process-global log callback.
+static LOG_BRIDGE_INSTALL: std::sync::Once = std::sync::Once::new();
+
+/// The active init-phase capture buffer. `Some` only while an `InitCapture`
+/// guard is alive. Locked briefly by the callback; never held across a
+/// `INIT_PHASE` acquisition, so the two locks cannot deadlock.
+static INIT_CAPTURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Serializes init phases. Held for the whole of one `WhisperContext`
+/// construction so concurrent engine inits cannot interleave their log lines
+/// into a shared buffer (the cross-epic FOLLOWUPS synchronization requirement).
+static INIT_PHASE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_capture() -> std::sync::MutexGuard<'static, Option<String>> {
+    // Poison-tolerant: a panicking init must not permanently break logging,
+    // and the buffer's contents are already treated as untrusted text.
+    INIT_CAPTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Install the process-global whisper.cpp log callback. Idempotent, cheap
+/// after the first call, and safe to race — `Once` blocks later callers until
+/// the install completes, so "installed before any context init" holds even if
+/// two engines are constructed simultaneously.
+fn install_log_bridge() {
+    LOG_BRIDGE_INSTALL.call_once(|| {
+        // SAFETY: `set_log_callback` is whisper-rs's thin wrapper over
+        // `whisper_log_set`. Its contract is that the callback must be safe to
+        // call from C: `log_bridge_trampoline` takes no user_data, does not
+        // unwind (an `extern "C"` fn aborts rather than unwinding across the
+        // FFI boundary), and only touches poison-tolerant statics. Installing
+        // once, before any context init, is the FOLLOWUPS invariant.
+        unsafe {
+            whisper_rs::set_log_callback(Some(log_bridge_trampoline), std::ptr::null_mut());
+        }
+    });
+}
+
+/// FFI entry point for whisper.cpp/ggml log lines.
+///
+/// `level` is `ggml_log_level` (a `c_uint` in whisper-rs-sys' bindings). We
+/// deliberately ignore it: whisper.cpp's severities do not map onto ours (its
+/// routine init banner is INFO, and an operator debugging a run wants the raw
+/// stream), so every line lands at `tracing` debug under one target.
+unsafe extern "C" fn log_bridge_trampoline(
+    _level: std::ffi::c_uint,
+    text: *const std::ffi::c_char,
+    _user_data: *mut std::ffi::c_void,
+) {
+    if text.is_null() {
+        return;
+    }
+    // SAFETY: whisper.cpp passes a NUL-terminated C string it owns for the
+    // duration of the call; we copy out of it before returning.
+    let line = unsafe { std::ffi::CStr::from_ptr(text) }.to_string_lossy();
+    record_bridge_line(&line);
+}
+
+/// The bridge body, split out from the trampoline so it is reachable from
+/// tests without an FFI round-trip.
+fn record_bridge_line(line: &str) {
+    let trimmed = line.trim_end();
+    if !trimmed.is_empty() {
+        tracing::debug!(target: "whisper_cpp", line = trimmed, "whisper.cpp");
+    }
+
+    // Append verbatim — whisper.cpp's own lines already carry their newline,
+    // and ggml's CONT-level fragments deliberately do not.
+    if let Some(buf) = lock_capture().as_mut() {
+        buf.push_str(line);
+    }
+}
+
+/// RAII scope for one init phase's log capture.
+///
+/// Holding `INIT_PHASE` for the guard's lifetime is what makes the captured
+/// buffer attributable to exactly one `WhisperContext` construction. `Drop`
+/// clears the buffer, so a panicking or early-returning init cannot leak its
+/// lines into the next phase.
+struct InitCapture {
+    _phase: std::sync::MutexGuard<'static, ()>,
+}
+
+impl InitCapture {
+    fn begin() -> Self {
+        // Belt and braces: the bridge must exist before anything logs into it.
+        install_log_bridge();
+        let phase = INIT_PHASE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *lock_capture() = Some(String::new());
+        Self { _phase: phase }
+    }
+
+    /// Copy out what has been captured so far. Cheap enough at init scale
+    /// (a few dozen short lines).
+    fn snapshot(&self) -> String {
+        lock_capture().clone().unwrap_or_default()
+    }
+}
+
+impl Drop for InitCapture {
+    fn drop(&mut self) {
+        *lock_capture() = None;
+    }
 }
 
 /// FFI trampoline for whisper.cpp's abort_callback. `user_data` must be the
@@ -357,9 +743,15 @@ pub struct WhisperEngine {
     /// Counter incremented each time the worker thread lazily allocates
     /// `lang_state` (at most once per worker lifetime). Always present so the
     /// worker capture doesn't branch on a feature flag; only **read** outside
-    /// the worker via the `test-helpers` getter below. 0002: `dead_code`
-    /// is allowed because the field is constructed and written-to in the
-    /// worker (via a cloned `Arc`) but only read in test-helpers builds.
+    /// the worker via the `test-helpers` getter below.
+    // 0002: this allow survives the Epic 5b purge. The field is private and
+    // written-to via a cloned `Arc` in the worker, but its only reader is
+    // `WhisperEngine::lang_state_allocations` below, gated on
+    // `feature = "test-helpers"` — so a default build genuinely has no read
+    // and fires `dead_code`. The named consumer is `tests/transcribe_lang_state.rs`
+    // (0005/0016). Deleting this allow requires the counter to gain a
+    // production reader; `#[expect]` is not an option because the deadness is
+    // configuration-dependent (0002 Guidance).
     #[allow(dead_code)]
     lang_state_allocations: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -375,6 +767,13 @@ impl WhisperEngine {
     /// hands off to async work) — not from inside a latency-sensitive async
     /// task, because the rendezvous recv() will block the executor thread.
     pub fn new(config: &EngineConfig) -> Result<Self, WhisperInitError> {
+        // 0013: the whisper.cpp log bridge is process-global and must exist
+        // before ANY context initialization. Installing here — before the
+        // worker is even spawned — means no init line can predate it, on any
+        // path that reaches a `WhisperContext`. `InitCapture::begin` calls it
+        // again for defence in depth; `Once` makes both cheap.
+        install_log_bridge();
+
         // Channel capacity 1: each TranscribeRequest carries a Vec<f32> of decoded
         // audio (~MB scale for a single-minute video). Epic 1's serial pipeline
         // never needs more than one request in flight. Epic 2's pipelined
@@ -402,18 +801,49 @@ impl WhisperEngine {
             .name("ddp-transcribe-whisper-worker".to_string())
             .spawn(move || {
                 // whisper-rs 0.16.0: setters take &mut self and return &mut Self.
-                // use_gpu(true) is harmless on a CPU build — whisper.cpp falls back.
-                // 0013 backend-mismatch assertion lands in T13.
+                // use_gpu(true) is harmless on a CPU build — whisper.cpp falls
+                // back, and `EXPECTED_BACKEND` is `Unconstrained` there. On a
+                // cuda build that same fallback is a hard failure (0013).
                 let mut ctx_params = WhisperContextParameters::default();
                 ctx_params
                     .use_gpu(true)
                     .flash_attn(flash_attn)
                     .gpu_device(gpu_device);
 
+                // 0013: capture whisper.cpp's init log across the WHOLE init
+                // phase. The guard holds the global init-phase lock, so a second
+                // engine constructed concurrently waits rather than mixing its
+                // lines into ours, and `Drop` clears the buffer on every exit
+                // path below.
+                //
+                // The phase deliberately spans BOTH the context construction and
+                // the primary `create_state()`: at the pinned whisper.cpp v1.8.3
+                // the backend is selected in `whisper_init_state`
+                // (whisper.cpp:3377 calls `whisper_backend_init`), NOT in the
+                // `..._no_state` constructor. Capturing only the constructor
+                // yields an empty backend verdict — verified against a real
+                // tiny.en init, where `whisper_backend_init_gpu: no GPU found`
+                // lands between `whisper_model_load` and `whisper_init_state`.
+                let capture = InitCapture::begin();
+
+                // Allocate WhisperState ONCE in the init phase and reuse it for
+                // every request. Per whisper.cpp's concurrency model
+                // (see whisper-cpp deepdive concurrency.md + sharp-edges.md:21):
+                // WhisperState owns ~500MB-1GB of KV caches and compute
+                // buffers; allocating one per request would defeat Plan B's
+                // efficiency goal. `whisper_full_with_state` clears `result_all`
+                // on entry (sharp-edges.md:19), so state reuse across calls is
+                // safe. Epic 1 ships single-state; Plan C may allocate N states
+                // per context for intra-GPU parallelism (0016 architecture).
+                //
+                // `ctx` and `state` live until this closure exits — keep the
+                // model in memory for the worker's lifetime. 0016:
+                // WhisperContext and WhisperState stay inside the worker
+                // thread; they never escape.
+                //
                 // whisper-rs 0.16.0 accepts P: AsRef<Path>; pass the PathBuf directly.
                 // 0003 deviation from brief sketch (brief did .to_str().unwrap_or("")).
-                let ctx_result = WhisperContext::new_with_params(&model_path, ctx_params);
-                let ctx = match ctx_result {
+                let ctx = match WhisperContext::new_with_params(&model_path, ctx_params) {
                     Ok(c) => {
                         tracing::info!(
                             gpu_device = gpu_device,
@@ -432,21 +862,11 @@ impl WhisperEngine {
                     }
                 };
 
-                // Allocate WhisperState ONCE in the init phase and reuse it for
-                // every request. Per whisper.cpp's concurrency model
-                // (see whisper-cpp deepdive concurrency.md + sharp-edges.md:21):
-                // WhisperState owns ~500MB-1GB of KV caches and compute
-                // buffers; allocating one per request would defeat Plan B's
-                // efficiency goal. `whisper_full_with_state` clears `result_all`
-                // on entry (sharp-edges.md:19), so state reuse across calls is
-                // safe. Epic 1 ships single-state; Plan C may allocate N states
-                // per context for intra-GPU parallelism (0016 architecture).
-                //
-                // `ctx` and `state` live until this closure exits — keep the
-                // model in memory for the worker's lifetime. 0016:
-                // WhisperContext and WhisperState stay inside the worker
-                // thread; they never escape.
-                let mut state = match ctx.create_state() {
+                let state_result = ctx.create_state();
+                let init_log = capture.snapshot();
+                drop(capture);
+
+                let mut state = match state_result {
                     Ok(s) => s,
                     Err(e) => {
                         let _ = init_tx.send(Err(WhisperInitError::StateCreate {
@@ -455,6 +875,37 @@ impl WhisperEngine {
                         return;
                     }
                 };
+
+                // 0013: the backend/device audit line, on every init, plus the
+                // assertion. This still runs at CONSTRUCTION — `WhisperEngine::new`
+                // is blocked on `init_rx` until the `Ok(())` below — so an
+                // operator learns about a CPU fallback before any batch work
+                // starts, never later and never as a warning.
+                let detected = detect_backend(&init_log);
+                let device_description = detect_device_description(&init_log);
+                let (backend, device) = match &detected {
+                    DetectedBackend::Gpu { device } => ("GPU", device.as_str()),
+                    // The GPU was found and named but never started: report the
+                    // CPU reality, and keep the device so the audit line says
+                    // WHICH backend failed to come up.
+                    DetectedBackend::GpuInitFailed { device } => {
+                        ("CPU (GPU init failed)", device.as_str())
+                    }
+                    DetectedBackend::Cpu => ("CPU", "none"),
+                    DetectedBackend::Unknown => ("unknown", "none"),
+                };
+                tracing::info!(
+                    backend = backend,
+                    device = device,
+                    device_name = device_description.as_deref().unwrap_or("unreported"),
+                    gpu_device = gpu_device,
+                    expected = %EXPECTED_BACKEND,
+                    "WhisperEngine: whisper.cpp backend (0013)"
+                );
+                if let Err(e) = check_backend(EXPECTED_BACKEND, &detected) {
+                    let _ = init_tx.send(Err(e));
+                    return;
+                }
 
                 // T2 perf-tweaks: secondary state used only for opt-in
                 // lang_detect is now **lazily allocated** on the first
@@ -484,7 +935,16 @@ impl WhisperEngine {
                     .unwrap_or("unknown")
                     .to_string();
 
+                // Worker-local request counter + per-request start instant:
+                // the identity and the clock behind every `reply_and_log`
+                // line (E15). Monotonic within one worker thread; it is not
+                // a global id and never leaves this loop.
+                let mut request_seq: u64 = 0;
+
                 while let Some(req) = request_rx.blocking_recv() {
+                    request_seq += 1;
+                    let started = Instant::now();
+
                     // Lazy lang_state allocation per T2 perf-tweaks. The
                     // `WhisperContext::create_state` call is non-trivial (a
                     // second mel encoder + decoder context on the same
@@ -505,12 +965,17 @@ impl WhisperEngine {
                                 // src/errors.rs; Epic 3's failure-classification
                                 // taxonomy will reclassify). Worker continues
                                 // so subsequent non-opt-in requests still work.
-                                let _ = req.reply.send(Err(TranscribeError::Bug {
-                                    detail: format!(
-                                        "lazy lang_state create_state failure \
-                                         (should be classified, not Bug, in Epic 3): {e}"
-                                    ),
-                                }));
+                                reply_and_log(
+                                    req,
+                                    Err(TranscribeError::Bug {
+                                        detail: format!(
+                                            "lazy lang_state create_state failure \
+                                             (should be classified, not Bug, in Epic 3): {e}"
+                                        ),
+                                    }),
+                                    request_seq,
+                                    started,
+                                );
                                 continue;
                             }
                         }
@@ -524,7 +989,7 @@ impl WhisperEngine {
                     if req.cancel.load(std::sync::atomic::Ordering::Relaxed)
                         || Instant::now() >= req.deadline
                     {
-                        let _ = req.reply.send(Err(TranscribeError::Cancelled));
+                        reply_and_log(req, Err(TranscribeError::Cancelled), request_seq, started);
                         continue;
                     }
 
@@ -698,7 +1163,7 @@ impl WhisperEngine {
                         // path; whisper.cpp's abort_callback won't fire here
                         // (state.full not yet called) so this is safe.
                         drop(unsafe { Box::from_raw(abort_user_data) });
-                        let _ = req.reply.send(Err(TranscribeError::Cancelled));
+                        reply_and_log(req, Err(TranscribeError::Cancelled), request_seq, started);
                         continue;
                     }
 
@@ -719,12 +1184,22 @@ impl WhisperEngine {
 
                     match run_result {
                         Err(_) if was_cancelled => {
-                            let _ = req.reply.send(Err(TranscribeError::Cancelled));
+                            reply_and_log(
+                                req,
+                                Err(TranscribeError::Cancelled),
+                                request_seq,
+                                started,
+                            );
                         }
                         Err(e) => {
-                            let _ = req.reply.send(Err(TranscribeError::Bug {
-                                detail: format!("whisper_full failed: {e}"),
-                            }));
+                            reply_and_log(
+                                req,
+                                Err(TranscribeError::Bug {
+                                    detail: format!("whisper_full failed: {e}"),
+                                }),
+                                request_seq,
+                                started,
+                            );
                         }
                         Ok(()) => {
                             // Extract text and raw signals in one pass over
@@ -762,18 +1237,28 @@ impl WhisperEngine {
                             let segments = match extract_segments(&state) {
                                 Ok(segs) => segs,
                                 Err(detail) => {
-                                    let _ = req.reply.send(Err(TranscribeError::Bug { detail }));
+                                    reply_and_log(
+                                        req,
+                                        Err(TranscribeError::Bug { detail }),
+                                        request_seq,
+                                        started,
+                                    );
                                     continue;
                                 }
                             };
 
-                            let _ = req.reply.send(Ok(TranscribeOutput {
-                                text,
-                                language,
-                                lang_probs, // Some(paired) when opt-in, None otherwise
-                                segments,
-                                model_id: model_id.clone(),
-                            }));
+                            reply_and_log(
+                                req,
+                                Ok(TranscribeOutput {
+                                    text,
+                                    language,
+                                    lang_probs, // Some(paired) when opt-in, None otherwise
+                                    segments,
+                                    model_id: model_id.clone(),
+                                }),
+                                request_seq,
+                                started,
+                            );
                         }
                     }
                 }
@@ -816,13 +1301,9 @@ impl WhisperEngine {
     /// to assert the lazy lifecycle (0 for non-opt-in workers; exactly 1 for
     /// opt-in workers regardless of request count). 0016: the counter is
     /// the only piece of the lazy lifecycle exposed outside the worker thread.
-    ///
-    /// 0002/0005: `dead_code` is allowed because workspace-level
-    /// `--features test-helpers` activates this getter on the bin compilation
-    /// path too, but only integration tests call it — matches the
-    /// `Store::get_video_for_test` / `EventRow` pattern in `src/state/mod.rs`.
+    /// Gated per 0005 — matches the `Store::get_video_for_test` / `EventRow`
+    /// pattern in `src/state/mod.rs`.
     #[cfg(feature = "test-helpers")]
-    #[allow(dead_code)]
     pub fn lang_state_allocations(&self) -> usize {
         self.lang_state_allocations
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -1044,5 +1525,345 @@ impl Transcriber for WhisperEngineHandle {
         // `transcript_source` field doesn't distinguish "engine vs
         // handle-to-engine"; both routes hit the same worker thread.
         "whisper-rs"
+    }
+}
+
+// ============================================================================
+// Plan B Epic 5b (T08): 0013 backend assertion — parser + decision tests
+// ============================================================================
+//
+// The fixtures below are the real whisper.cpp v1.8.3 init log shapes (the
+// pinned commit 2eeeba56, via whisper-rs-sys 0.15.0). Sources:
+//   - `whisper_init_with_params_no_state` banner: src/whisper.cpp:3713-3718
+//   - `whisper_backend_init_gpu` device enumeration / selection:
+//     src/whisper.cpp:1290-1325 ("device %zu: %s (type: %d)",
+//     "found GPU device %zu: %s (type: %d, cnt: %d)", "no GPU found",
+//     "using %s backend")
+//   - `whisper_backend_init` ACCEL loop, which reuses the SAME
+//     "using %s backend" wording under a DIFFERENT function prefix
+//     (src/whisper.cpp:1342) — this is why the parser anchors on the full
+//     `whisper_backend_init_gpu:` prefix rather than on "using ... backend".
+//   - `ggml_cuda_init` device banner: ggml/src/ggml-cuda/ggml-cuda.cu:206,267.
+//     Reaches our callback because `whisper_backend_init_gpu` forwards
+//     whisper's log callback to ggml via `ggml_log_set` on entry
+//     (src/whisper.cpp:1291).
+
+#[cfg(test)]
+mod backend_assertion_tests {
+    use super::*;
+
+    /// CUDA build on the A10 workspace: ggml enumerates one CUDA device and
+    /// whisper selects it. Line shapes from the v1.8.3 sources cited above;
+    /// the `using CUDA0 backend` line is the one `docs/operations/src-vm.md`
+    /// already tells the operator to look for at startup.
+    const CUDA_INIT_LOG: &str = "\
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: flash attn = 1
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: dtw        = 0
+whisper_model_load: loading model
+whisper_model_load: model size    = 1533.14 MB
+ggml_cuda_init: GGML_CUDA_FORCE_MMQ:    no
+ggml_cuda_init: GGML_CUDA_FORCE_CUBLAS: no
+ggml_cuda_init: found 1 CUDA devices:
+  Device 0: NVIDIA A10, compute capability 8.6, VMM: yes
+whisper_backend_init_gpu: device 0: CUDA0 (type: 1)
+whisper_backend_init_gpu: found GPU device 0: CUDA0 (type: 1, cnt: 0)
+whisper_backend_init_gpu: using CUDA0 backend
+whisper_init_state: kv self size  =    3.15 MB
+";
+
+    /// CPU-only build (or a CUDA build whose GPU init failed): whisper walks
+    /// the device list, finds nothing of GPU type, and falls back silently.
+    /// This is precisely the run 0013 exists to catch.
+    ///
+    /// Verbatim (elided) capture from this bridge on a tiny.en init, which is
+    /// also what pinned down the capture-window bug: the
+    /// `whisper_backend_init_gpu` lines land during `create_state()`, AFTER
+    /// `whisper_model_load` — not during the `..._no_state` constructor.
+    const CPU_INIT_LOG: &str = "\
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: flash attn = 0
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: dtw        = 0
+whisper_init_with_params_no_state: devices    = 1
+whisper_init_with_params_no_state: backends   = 1
+whisper_model_load: loading model
+whisper_model_load: model size    =   77.11 MB
+whisper_backend_init_gpu: device 0: CPU (type: 0)
+whisper_backend_init_gpu: no GPU found
+whisper_init_state: kv self size  =    3.15 MB
+";
+
+    #[test]
+    fn detect_backend_reads_cuda_init_log_as_gpu() {
+        assert_eq!(
+            detect_backend(CUDA_INIT_LOG),
+            DetectedBackend::Gpu {
+                device: "CUDA0".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn detect_backend_reads_cpu_only_init_log_as_cpu() {
+        assert_eq!(detect_backend(CPU_INIT_LOG), DetectedBackend::Cpu);
+    }
+
+    #[test]
+    fn detect_backend_reads_garbage_as_unknown() {
+        assert_eq!(detect_backend(""), DetectedBackend::Unknown);
+        assert_eq!(
+            detect_backend("some unrelated log\nlines that are not whisper init\n"),
+            DetectedBackend::Unknown
+        );
+    }
+
+    /// `whisper_backend_init` (no `_gpu` suffix) logs "using BLAS backend" for
+    /// ACCEL devices. Reading that as a GPU would defeat the whole assertion.
+    #[test]
+    fn detect_backend_ignores_the_accel_backend_line() {
+        let log = "\
+whisper_backend_init_gpu: no GPU found
+whisper_backend_init: using BLAS backend
+";
+        assert_eq!(detect_backend(log), DetectedBackend::Cpu);
+    }
+
+    /// The false-Gpu-positive gap. whisper.cpp logs `using X backend` BEFORE
+    /// calling `ggml_backend_dev_init` (whisper.cpp:1320-1321); when that call
+    /// fails it logs `failed to initialize X backend` and returns nullptr, and
+    /// the caller falls silently through to ACCEL/CPU (whisper.cpp:1332-1358).
+    /// Treating the `using` line as proof of GPU would let a CUDA build sail
+    /// past the assertion while running on CPU — exactly 0013's target class.
+    const CUDA_INIT_FAILED_LOG: &str = "\
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: flash attn = 1
+whisper_model_load: loading model
+ggml_cuda_init: found 1 CUDA devices:
+  Device 0: NVIDIA A10, compute capability 8.6, VMM: yes
+whisper_backend_init_gpu: device 0: CUDA0 (type: 1)
+whisper_backend_init_gpu: found GPU device 0: CUDA0 (type: 1, cnt: 0)
+whisper_backend_init_gpu: using CUDA0 backend
+whisper_backend_init_gpu: failed to initialize CUDA0 backend
+whisper_init_state: kv self size  =    3.15 MB
+";
+
+    #[test]
+    fn detect_backend_rejects_a_gpu_whose_backend_init_failed() {
+        assert_eq!(
+            detect_backend(CUDA_INIT_FAILED_LOG),
+            DetectedBackend::GpuInitFailed {
+                device: "CUDA0".to_string()
+            }
+        );
+        let err = check_backend(ExpectedBackend::Gpu, &detect_backend(CUDA_INIT_FAILED_LOG))
+            .expect_err("a failed GPU backend init is a silent CPU fallback — must hard-fail");
+        match err {
+            WhisperInitError::BackendMismatch { detected, .. } => {
+                assert!(
+                    detected.contains("CUDA0") && detected.contains("failed to initialize"),
+                    "the error must name the failure the operator has to act on: {detected}"
+                );
+            }
+            other => panic!("expected BackendMismatch, got {other:?}"),
+        }
+    }
+
+    /// Ordered parse, not "any failure poisons the log": a failed attempt
+    /// followed by a LATER successful GPU selection is a working GPU.
+    #[test]
+    fn detect_backend_accepts_a_gpu_selected_after_an_earlier_failure() {
+        let log = "\
+whisper_backend_init_gpu: using CUDA0 backend
+whisper_backend_init_gpu: failed to initialize CUDA0 backend
+whisper_backend_init_gpu: using CUDA1 backend
+whisper_init_state: kv self size  =    3.15 MB
+";
+        assert_eq!(
+            detect_backend(log),
+            DetectedBackend::Gpu {
+                device: "CUDA1".to_string()
+            }
+        );
+        check_backend(ExpectedBackend::Gpu, &detect_backend(log))
+            .expect("a GPU that did initialize satisfies a CUDA build");
+    }
+
+    /// The ACCEL loop reuses the failure wording too (whisper.cpp:1346) under
+    /// the `whisper_backend_init:` prefix. A BLAS failure says nothing about
+    /// the GPU verdict — here, CPU.
+    #[test]
+    fn detect_backend_ignores_an_accel_backend_init_failure() {
+        let log = "\
+whisper_backend_init_gpu: no GPU found
+whisper_backend_init: using BLAS backend
+whisper_backend_init: failed to initialize BLAS backend
+";
+        assert_eq!(detect_backend(log), DetectedBackend::Cpu);
+    }
+
+    /// Fail closed on a log that stops before whisper.cpp reaches a verdict:
+    /// device enumeration alone proves nothing, and `Unknown` is rejected by
+    /// the CUDA assertion.
+    #[test]
+    fn detect_backend_reads_a_truncated_init_log_as_unknown() {
+        let log = "\
+whisper_init_with_params_no_state: use gpu    = 1
+ggml_cuda_init: found 1 CUDA devices:
+  Device 0: NVIDIA A10, compute capability 8.6, VMM: yes
+whisper_backend_init_gpu: device 0: CUDA0 (type: 1)
+whisper_backend_init_gpu: found GPU device 0: CUDA0 (type: 1, cnt: 0)
+";
+        assert_eq!(detect_backend(log), DetectedBackend::Unknown);
+        check_backend(ExpectedBackend::Gpu, &detect_backend(log))
+            .expect_err("an unresolved init log is not proof of GPU use");
+    }
+
+    #[test]
+    fn detect_device_description_extracts_the_cuda_device_name() {
+        assert_eq!(
+            detect_device_description(CUDA_INIT_LOG).as_deref(),
+            Some("NVIDIA A10, compute capability 8.6, VMM: yes")
+        );
+        assert_eq!(detect_device_description(CPU_INIT_LOG), None);
+    }
+
+    #[test]
+    fn expecting_gpu_and_detecting_cpu_is_a_backend_mismatch() {
+        let err = check_backend(ExpectedBackend::Gpu, &DetectedBackend::Cpu)
+            .expect_err("CPU fallback under a CUDA build must hard-fail");
+        match err {
+            WhisperInitError::BackendMismatch { expected, detected } => {
+                // The variant carries BOTH sides so the operator does not have
+                // to go re-read the log to learn what actually happened.
+                assert!(expected.contains("GPU"), "expected side: {expected}");
+                assert!(detected.contains("CPU"), "detected side: {detected}");
+            }
+            other => panic!("expected BackendMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expecting_gpu_and_detecting_gpu_passes_and_names_the_device() {
+        let detected = detect_backend(CUDA_INIT_LOG);
+        check_backend(ExpectedBackend::Gpu, &detected).expect("CUDA0 satisfies a CUDA build");
+    }
+
+    /// Fail closed: an unparseable init log is not proof of GPU use, and 0013
+    /// rejects softening the contract. A CUDA build that cannot prove GPU must
+    /// abort at construction rather than run 100x slow.
+    #[test]
+    fn expecting_gpu_and_detecting_unknown_fails_closed() {
+        let err = check_backend(ExpectedBackend::Gpu, &DetectedBackend::Unknown)
+            .expect_err("unproven backend must not pass a CUDA build");
+        assert!(matches!(err, WhisperInitError::BackendMismatch { .. }));
+    }
+
+    /// Non-CUDA builds only log; CPU is the expected backend for local dev
+    /// (cross-epic FOLLOWUPS: "the assertion must NOT fire on non-CUDA builds").
+    #[test]
+    fn an_unconstrained_expectation_accepts_every_detected_backend() {
+        for detected in [
+            DetectedBackend::Cpu,
+            DetectedBackend::Unknown,
+            DetectedBackend::Gpu {
+                device: "CUDA0".to_string(),
+            },
+            DetectedBackend::GpuInitFailed {
+                device: "CUDA0".to_string(),
+            },
+        ] {
+            check_backend(ExpectedBackend::Unconstrained, &detected)
+                .expect("non-CUDA builds never hard-fail on backend");
+        }
+    }
+
+    /// The cfg gate itself: `cuda` builds expect a GPU, everything else is
+    /// unconstrained. Compiled under both feature sets.
+    #[test]
+    fn expected_backend_tracks_the_cuda_feature() {
+        if cfg!(feature = "cuda") {
+            assert_eq!(EXPECTED_BACKEND, ExpectedBackend::Gpu);
+        } else {
+            assert_eq!(EXPECTED_BACKEND, ExpectedBackend::Unconstrained);
+        }
+    }
+
+    /// The bridge install is idempotent and safe to call from many threads —
+    /// it is the precondition for "installed once, before any context init".
+    #[test]
+    fn installing_the_log_bridge_is_idempotent_across_threads() {
+        let handles: Vec<_> = (0..4)
+            .map(|_| std::thread::spawn(install_log_bridge))
+            .collect();
+        for h in handles {
+            h.join().expect("install thread should not panic");
+        }
+        install_log_bridge();
+    }
+
+    /// Capture is phase-scoped: lines logged inside the guard's lifetime are
+    /// captured, the slot is cleared on drop, and a second capture phase does
+    /// not see the first phase's lines.
+    #[test]
+    fn init_capture_is_phase_scoped_and_clears_on_drop() {
+        {
+            let capture = InitCapture::begin();
+            record_bridge_line("whisper_backend_init_gpu: using CUDA0 backend\n");
+            let log = capture.snapshot();
+            assert!(log.contains("CUDA0"), "captured log: {log:?}");
+        }
+        // Outside the guard, lines go nowhere (tracing only).
+        record_bridge_line("whisper_backend_init_gpu: no GPU found\n");
+        let capture = InitCapture::begin();
+        let log = capture.snapshot();
+        assert!(
+            log.is_empty(),
+            "a fresh capture phase must not inherit earlier lines: {log:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod reply_path_tests {
+    use super::*;
+
+    fn request() -> (
+        TranscribeRequest,
+        oneshot::Receiver<Result<TranscribeOutput, TranscribeError>>,
+    ) {
+        let (reply, rx) = oneshot::channel();
+        (
+            TranscribeRequest {
+                samples: Vec::new(),
+                config: PerCallConfig::default(),
+                cancel: Arc::new(AtomicBool::new(false)),
+                deadline: Instant::now() + Duration::from_secs(60),
+                reply,
+            },
+            rx,
+        )
+    }
+
+    /// The centralized reply path still delivers: routing all seven worker
+    /// replies through `reply_and_log` must not change what the caller gets.
+    #[test]
+    fn reply_and_log_delivers_to_a_live_caller() {
+        let (req, mut rx) = request();
+        reply_and_log(req, Err(TranscribeError::Cancelled), 1, Instant::now());
+        match rx.try_recv() {
+            Ok(Err(TranscribeError::Cancelled)) => {}
+            other => panic!("expected the Cancelled reply, got {other:?}"),
+        }
+    }
+
+    /// A caller that vanished first (0012's `CancelOnDrop` path, or an
+    /// unexplained drop) is logged, not a panic and not a lost worker.
+    #[test]
+    fn reply_and_log_survives_a_closed_reply_channel() {
+        let (req, rx) = request();
+        drop(rx);
+        reply_and_log(req, Err(TranscribeError::Cancelled), 2, Instant::now());
     }
 }

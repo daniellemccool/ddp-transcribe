@@ -18,6 +18,7 @@ Load the ADR(s) whose filename matches the area you are touching.
 - [0002 — Dead code is suppressed with #[allow(dead_code)] plus a justification comment](./0002-dead-code-is-suppressed-with-allow-dead-code-plus-a-justification-comment.md)
 - [0005 — Integration tests reach library test items via the test-helpers Cargo feature](./0005-integration-tests-reach-library-test-items-via-the-test-helpers-cargo-feature.md)
 - [0007 — Stats structs count the input side, with verb-named parallel counters](./0007-stats-structs-count-the-input-side-with-verb-named-parallel-counters.md)
+- [0045 — The crate is a fat library with a thin binary behind a minimal public facade](./0045-the-crate-is-a-fat-library-with-a-thin-binary-behind-a-minimal-public-facade.md)
 
 ### Artifacts
 
@@ -33,6 +34,7 @@ Load the ADR(s) whose filename matches the area you are touching.
 - [0024 — Stale-claim sweep recovers rows blind: no validation, no attempt bump](./0024-stale-claim-sweep-recovers-rows-blind-no-validation-no-attempt-bump.md)
 - [0036 — Retry is in-pipeline: capped failure-time requeue; the re-fetch is the liveness oracle](./0036-retry-is-in-pipeline-capped-failure-time-requeue-the-re-fetch-is-the-liveness-oracle.md)
 - [0040 — Analysis window is computed at ingest; recompute-window is the only flag mutator](./0040-analysis-window-is-computed-at-ingest-recompute-window-is-the-only-flag-mutator.md)
+- [0046 — requeue-failures is a forensic default-deny override of retry eligibility](./0046-requeue-failures-is-a-forensic-default-deny-override-of-retry-eligibility.md)
 
 ### Whisper engine
 
@@ -57,6 +59,7 @@ Load the ADR(s) whose filename matches the area you are touching.
 - [0027 — Orchestrator topology: 3 fetch workers feed 1 transcribe worker over a capacity-2 channel](./0027-orchestrator-topology-3-fetch-workers-feed-1-transcribe-worker-over-a-capacity-2-channel.md)
 - [0041 — status is the read-only operator surface; the 0017 done-contract lives behind --verify](./0041-status-is-the-read-only-operator-surface-the-0017-done-contract-lives-behind-verify.md)
 - [0044 — In-run checkpointing is an operator-supplied hook that can never abort the run](./0044-in-run-checkpointing-is-an-operator-supplied-hook-that-can-never-abort-the-run.md)
+- [0047 — Blocking IO on the worker hot path runs on spawn_blocking; inline only when nothing can be starved](./0047-blocking-io-on-the-worker-hot-path-runs-on-spawn-blocking-inline-only-when-nothing-can-be-starved.md)
 
 ### Failure classification
 

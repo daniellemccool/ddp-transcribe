@@ -14,12 +14,14 @@ use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
 use serde::Serialize;
 
-use crate::state::queries::BatchRunRow;
-use crate::state::Store;
+use crate::state::queries::{
+    BatchRunRow, RespondentSummary, TerminalRow, VideoDetailRow, VideoEventRow,
+};
+use crate::state::{ParkedRow, Store};
 
 /// The fixed status vocabulary (matches the schema CHECK constraint),
 /// in lifecycle order for rendering.
-pub const STATUSES: [&str; 5] = [
+pub(crate) const STATUSES: [&str; 5] = [
     "pending",
     "in_progress",
     "succeeded",
@@ -28,7 +30,7 @@ pub const STATUSES: [&str; 5] = [
 ];
 
 #[derive(Debug, Serialize)]
-pub struct StatusReport {
+pub(crate) struct StatusReport {
     pub total_videos: i64,
     /// Zero-filled over [`STATUSES`].
     pub counts: BTreeMap<String, i64>,
@@ -43,7 +45,7 @@ pub struct StatusReport {
 }
 
 #[derive(Debug, Serialize)]
-pub struct InProgressAge {
+pub(crate) struct InProgressAge {
     pub video_id: String,
     pub claimed_by: Option<String>,
     pub claimed_at: Option<i64>,
@@ -53,7 +55,7 @@ pub struct InProgressAge {
 }
 
 #[derive(Debug, Serialize)]
-pub struct BatchRunSummary {
+pub(crate) struct BatchRunSummary {
     pub run_id: i64,
     pub started_at: i64,
     pub finished_at: Option<i64>,
@@ -71,7 +73,7 @@ pub struct BatchRunSummary {
 }
 
 #[derive(Debug, Serialize)]
-pub struct PolicyProvenance {
+pub(crate) struct PolicyProvenance {
     pub bytes: usize,
     /// True iff policy_toml is byte-identical to THIS binary's compiled
     /// default. A binary upgrade can flip this for historical rows; that
@@ -80,14 +82,14 @@ pub struct PolicyProvenance {
 }
 
 #[derive(Debug, Serialize)]
-pub struct CensusHeadline {
+pub(crate) struct CensusHeadline {
     pub sweep_examined: Option<u64>,
     pub claimed: Option<u64>,
     pub succeeded: Option<u64>,
     pub failed: Option<u64>,
 }
 
-pub fn build_report(store: &Store, now: i64) -> Result<StatusReport> {
+pub(crate) fn build_report(store: &Store, now: i64) -> Result<StatusReport> {
     let raw_counts = store.count_by_status().context("counting by status")?;
     let mut counts = BTreeMap::new();
     for s in STATUSES {
@@ -166,10 +168,10 @@ fn summarize_run(row: BatchRunRow, compiled_default_toml: Option<&str>) -> Batch
 /// The archived ADR-0017 done-contract, mechanised. Sample vectors cap at
 /// [`VERIFY_SAMPLE_CAP`] ids so a catastrophically wrong tree doesn't blow
 /// up the report; counts are always complete.
-pub const VERIFY_SAMPLE_CAP: usize = 20;
+pub(crate) const VERIFY_SAMPLE_CAP: usize = 20;
 
 #[derive(Debug, Serialize)]
-pub struct VerifyReport {
+pub(crate) struct VerifyReport {
     pub succeeded_rows: usize,
     /// Rows missing `.txt` or `.json` at the sharded path.
     pub artifacts_missing: usize,
@@ -192,7 +194,7 @@ pub struct VerifyReport {
     pub sample_unreadable: Vec<String>,
 }
 
-pub fn run_verify(
+pub(crate) fn run_verify(
     store: &Store,
     transcripts_root: &Path,
     counts: &BTreeMap<String, i64>,
@@ -226,19 +228,10 @@ pub fn run_verify(
 
     for (shard, shard_ids) in by_shard {
         let dir = transcripts_root.join(shard);
-        // Absent shard dir → empty set → every row in it counts missing.
-        // Honest when status runs away from the artifacts volume. Any OTHER
-        // read_dir failure (permissions, broken mount, not-a-directory) is
-        // an infra fault on a present tree: counting those rows "missing"
-        // would steer the operator toward re-transcription instead of the
-        // mount, so they count unreadable instead.
-        let names: HashSet<OsString> = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries
-                .filter_map(|e| e.ok().map(|e| e.file_name()))
-                .collect(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashSet::new(),
+        let names: HashSet<OsString> = match read_shard_filenames(&dir) {
+            Ok(names) => names,
             Err(_) => {
-                for id in shard_ids {
+                for id in &shard_ids {
                     report.unreadable_artifacts += 1;
                     push_capped(&mut report.sample_unreadable, id);
                 }
@@ -289,6 +282,35 @@ pub fn run_verify(
     Ok(report)
 }
 
+/// One `read_dir` per shard into a filename set.
+///
+/// An absent shard dir is `Ok(empty)` → every row in it counts missing,
+/// which is honest when `status` runs away from the artifacts volume. Any
+/// OTHER failure (permissions, broken mount, not-a-directory) is an infra
+/// fault on a present tree: counting those rows "missing" would steer the
+/// operator toward re-transcription instead of the mount, so the caller
+/// counts them unreadable instead.
+fn read_shard_filenames(dir: &Path) -> std::io::Result<HashSet<OsString>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(e) => return Err(e),
+    };
+    collect_shard_filenames(entries.map(|e| e.map(|e| e.file_name())))
+}
+
+/// The entry-collecting half of [`read_shard_filenames`], split out because
+/// a failing `DirEntry` cannot be forced portably from a test: an entry
+/// that exists but can't be named/stat'd is an infra fault on a present
+/// tree, exactly like a failing `read_dir`, and must NOT be dropped from
+/// the set (dropping it silently downgrades an unreadable artifact to a
+/// missing one).
+fn collect_shard_filenames(
+    entries: impl IntoIterator<Item = std::io::Result<OsString>>,
+) -> std::io::Result<HashSet<OsString>> {
+    entries.into_iter().collect()
+}
+
 fn push_capped(v: &mut Vec<String>, id: &str) {
     if v.len() < VERIFY_SAMPLE_CAP {
         v.push(id.to_string());
@@ -297,7 +319,7 @@ fn push_capped(v: &mut Vec<String>, id: &str) {
 
 /// Render a unix timestamp as "YYYY-MM-DD HH:MM:SSZ". Out-of-range values
 /// (hand-edited DBs) render as a marker, never panic.
-pub fn fmt_utc(ts: i64) -> String {
+pub(crate) fn fmt_utc(ts: i64) -> String {
     Utc.timestamp_opt(ts, 0).single().map_or_else(
         || format!("(invalid timestamp {ts})"),
         |dt| dt.format("%Y-%m-%d %H:%M:%SZ").to_string(),
@@ -315,7 +337,7 @@ fn fmt_age(secs: i64) -> String {
     }
 }
 
-pub fn render_report(report: &StatusReport) -> String {
+pub(crate) fn render_report(report: &StatusReport) -> String {
     // Writing to a String is infallible; unwraps are forbidden, so route
     // through a helper closure that ignores the Ok(()) results via let _.
     let mut out = String::new();
@@ -500,16 +522,13 @@ fn render_params(params: &serde_json::Value) -> String {
     }
 }
 
-use crate::state::queries::{RespondentSummary, TerminalRow, VideoDetailRow, VideoEventRow};
-use crate::state::ParkedRow;
-
 #[derive(Debug, Serialize)]
-pub struct VideoDetailReport {
+pub(crate) struct VideoDetailReport {
     pub video: VideoDetailRow,
     pub events: Vec<VideoEventRow>,
 }
 
-pub fn build_video_detail(store: &Store, video_id: &str) -> Result<VideoDetailReport> {
+pub(crate) fn build_video_detail(store: &Store, video_id: &str) -> Result<VideoDetailReport> {
     let video = store
         .get_video_detail(video_id)
         .context("loading video row")?
@@ -520,7 +539,7 @@ pub fn build_video_detail(store: &Store, video_id: &str) -> Result<VideoDetailRe
     Ok(VideoDetailReport { video, events })
 }
 
-pub fn render_video_detail(r: &VideoDetailReport) -> String {
+pub(crate) fn render_video_detail(r: &VideoDetailReport) -> String {
     let mut out = String::new();
     let v = &r.video;
     let _ = writeln!(out, "video {}", v.video_id);
@@ -591,8 +610,9 @@ pub fn render_video_detail(r: &VideoDetailReport) -> String {
 
 /// Inline key=value rendering of the known detail_json shapes
 /// ({"kind","message"[,"policy"]}, {"reason","message"}, {"new_kind"}).
-/// `message` is excluded here (rendered on its own line). Unknown shapes
-/// fall back to the raw JSON so nothing is hidden.
+/// `message` is excluded here (rendered on its own line). Unknown shapes —
+/// and known keys carrying unexpected value types — fall back to the raw
+/// JSON so nothing is hidden.
 fn render_event_detail_inline(detail: Option<&str>) -> String {
     let Some(raw) = detail else {
         return String::new();
@@ -601,6 +621,16 @@ fn render_event_detail_inline(detail: Option<&str>) -> String {
         return format!("  detail: {raw}");
     };
     let known = ["kind", "policy", "new_kind", "reason"];
+    // A known key whose value is not a string can't render as `k=v`. The
+    // `as_str` filter below would silently DROP it — an unexpected writer
+    // (or a hand-edited row) would render as nothing at all. Fall back to
+    // the raw JSON instead: the same treatment unknown shapes already get.
+    if known
+        .iter()
+        .any(|k| obj.get(*k).is_some_and(|v| !v.is_string()))
+    {
+        return format!("  detail: {raw}");
+    }
     let mut parts: Vec<String> = known
         .iter()
         .filter_map(|k| {
@@ -643,11 +673,33 @@ fn excerpt(s: &str) -> String {
 }
 
 #[derive(Debug, Serialize)]
-pub struct RespondentReport {
+pub(crate) struct RespondentReport {
     pub respondent: RespondentSummary,
 }
 
-pub fn render_respondent(r: &RespondentReport) -> String {
+/// Mirrors [`build_video_detail`]: an id the DB has never seen is an
+/// operator error, not a report of zeroes. Without the existence gate a
+/// typo'd `--respondent-id` renders an all-zeros summary that reads as
+/// "this respondent donated nothing" — the one answer the operator must
+/// never get wrong.
+pub(crate) fn build_respondent_report(
+    store: &Store,
+    respondent_id: &str,
+) -> Result<RespondentReport> {
+    if !store
+        .respondent_is_known(respondent_id)
+        .context("checking respondent existence")?
+    {
+        anyhow::bail!("respondent {respondent_id} not found in the state DB");
+    }
+    Ok(RespondentReport {
+        respondent: store
+            .respondent_summary(respondent_id)
+            .context("respondent summary")?,
+    })
+}
+
+pub(crate) fn render_respondent(r: &RespondentReport) -> String {
     let s = &r.respondent;
     let mut out = String::new();
     let _ = writeln!(out, "respondent {}", s.respondent_id);
@@ -671,14 +723,14 @@ pub fn render_respondent(r: &RespondentReport) -> String {
 }
 
 #[derive(Debug, Serialize)]
-pub struct FailureLists {
+pub(crate) struct FailureLists {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub errors: Option<Vec<TerminalRow>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retryable: Option<Vec<ParkedRow>>,
 }
 
-pub fn render_failure_lists(l: &FailureLists) -> String {
+pub(crate) fn render_failure_lists(l: &FailureLists) -> String {
     let mut out = String::new();
     if let Some(errors) = &l.errors {
         let _ = writeln!(out, "failed_terminal ({}):", errors.len());
@@ -715,4 +767,41 @@ pub fn render_failure_lists(l: &FailureLists) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shard_filename_collection_surfaces_a_per_entry_error() {
+        // Review finding: an entry that exists but can't be named/stat'd
+        // must surface as an infra fault, not silently vanish from the
+        // shard's filename set (which would miscount its row as
+        // `artifacts_missing` and steer the operator at re-transcription
+        // instead of the mount). This is the extracted decision point —
+        // there is no portable way to make a real `DirEntry` fail.
+        let entries = vec![
+            Ok(OsString::from("v_ok1.txt")),
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "entry unnameable",
+            )),
+        ];
+        assert!(
+            collect_shard_filenames(entries).is_err(),
+            "a per-entry error must propagate, not be dropped"
+        );
+    }
+
+    #[test]
+    fn shard_filename_collection_reads_every_name() {
+        let entries = vec![
+            Ok(OsString::from("v_ok1.txt")),
+            Ok(OsString::from("v_ok1.json")),
+        ];
+        let names = collect_shard_filenames(entries).expect("no entry errors");
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&OsString::from("v_ok1.json")));
+    }
 }

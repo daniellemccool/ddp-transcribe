@@ -6,18 +6,27 @@ use clap::{Parser, Subcommand, ValueEnum};
 #[command(
     name = "ddp-transcribe",
     version,
-    about = "TikTok donation pipeline (Plan A walking skeleton)"
+    about = "Video-transcription pipeline for data-donation studies (TikTok DDP)"
 )]
 pub struct Cli {
     #[command(flatten)]
-    pub global: GlobalArgs,
+    pub(crate) global: GlobalArgs,
 
     #[command(subcommand)]
-    pub command: Command,
+    pub(crate) command: Command,
+}
+
+impl Cli {
+    /// The one field `main` needs before dispatch (0045): tracing init has to
+    /// run ahead of any library work, and this narrow accessor buys that
+    /// access without making `Cli`'s fields — or `GlobalArgs` — public API.
+    pub fn log_format(&self) -> LogFormat {
+        self.global.log_format
+    }
 }
 
 #[derive(Parser, Debug, Clone)]
-pub struct GlobalArgs {
+pub(crate) struct GlobalArgs {
     #[arg(long, value_enum, default_value_t = Profile::Dev, env = "DDP_TRANSCRIBE_PROFILE", global = true)]
     pub profile: Profile,
 
@@ -121,7 +130,7 @@ pub(crate) fn validate_window_order(
 }
 
 #[derive(Subcommand, Debug)]
-pub enum Command {
+pub(crate) enum Command {
     /// Create state.sqlite and apply schema. Idempotent.
     Init,
     /// Walk --inbox, parse DDP JSONs, upsert into videos and watch_history.
@@ -225,6 +234,71 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Operator override of retry eligibility (0046): restore failed rows to
+    /// `pending` after an external condition materially changed. Forensic and
+    /// DEFAULT-DENY — at least one qualifying selector (--error-kind /
+    /// --max-attempts / --older-than) or an explicit --all is required; the
+    /// modifiers --max and --dry-run never grant eligibility. Never resets
+    /// `attempt_count`; every moved row leaves an `operator_requeued` event.
+    ///
+    /// Post-override arithmetic: a row at `attempt_count = A` gets exactly one
+    /// forced attempt unless the next `process` run uses `--retries > A`.
+    // Grammar lives in clap, not in post-parse checks: `eligibility` is the
+    // required group (the default-deny gate), `qualifying` is the subset that
+    // --all conflicts with and that --include-terminal requires.
+    #[command(group(clap::ArgGroup::new("qualifying").multiple(true)))]
+    #[command(group(clap::ArgGroup::new("eligibility").required(true).multiple(true)))]
+    RequeueFailures {
+        /// Failure kind to match, compared by exact byte equality (no case
+        /// folding, no comma splitting — classification labels may legally
+        /// contain commas). Repeatable; repeats OR together. Matches
+        /// last_retryable_kind on retryable rows, terminal_reason on terminal
+        /// ones — never a terminal row's retained retryable kind.
+        #[arg(long = "error-kind", value_name = "KIND", groups = ["qualifying", "eligibility"])]
+        error_kind: Vec<String>,
+        /// Skip rows with attempt_count >= N.
+        #[arg(
+            long,
+            value_name = "N",
+            value_parser = clap::builder::RangedU64ValueParser::<u32>::new().range(1..),
+            groups = ["qualifying", "eligibility"],
+        )]
+        max_attempts: Option<u32>,
+        /// Match rows whose last FAILURE event (allowlist: failed_retryable,
+        /// failed_terminal, retry_requeued, cookie_parked) is strictly older
+        /// than this. Administrative events never reset that clock, and a row
+        /// with no allowlist event never matches. Accepts humantime strings:
+        /// "30d", "12h".
+        #[arg(
+            long,
+            value_name = "DUR",
+            value_parser = humantime::parse_duration,
+            groups = ["qualifying", "eligibility"],
+        )]
+        older_than: Option<std::time::Duration>,
+        /// Also consider failed_terminal rows. Opt-in twice over: it requires a
+        /// qualifying selector alongside it, so --include-terminal with --all
+        /// (or with --max alone) is a usage error.
+        #[arg(long, requires = "qualifying")]
+        include_terminal: bool,
+        /// Every failed_retryable row — never terminals. Conflicts with every
+        /// qualifying selector: `--all --older-than 30d` is a usage error, not
+        /// a silent intersection.
+        #[arg(long, group = "eligibility", conflicts_with = "qualifying")]
+        all: bool,
+        /// Cap the number of rows moved, taken in the deterministic order
+        /// attempt_count ASC, video_id ASC. A modifier: it never grants
+        /// eligibility on its own.
+        #[arg(
+            long,
+            value_name = "N",
+            value_parser = clap::builder::RangedU64ValueParser::<u32>::new().range(1..),
+        )]
+        max: Option<u32>,
+        /// Report per-kind counts for what would move, and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Backfill raw metadata (video_metadata_raw) for succeeded videos
     /// that predate fetch-time capture. Metadata-only yt-dlp per video —
     /// no media download, never touches video status. Best-effort and
@@ -235,13 +309,17 @@ pub enum Command {
         #[arg(long)]
         limit: Option<u64>,
         /// Print the cohort size and exit without invoking yt-dlp.
-        #[arg(long)]
+        /// Conflicts with --limit: dry-run invokes nothing, so a cap on
+        /// attempts has nothing to cap. Previously the pair parsed and
+        /// --limit was silently ignored (documented only in the runbook);
+        /// clap now says so itself.
+        #[arg(long, conflicts_with = "limit")]
         dry_run: bool,
     },
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Profile {
+pub(crate) enum Profile {
     Dev,
 }
 
@@ -259,5 +337,88 @@ mod tests {
     fn clap_definition_is_internally_consistent() {
         use clap::CommandFactory;
         Cli::command().debug_assert();
+    }
+
+    /// v0.3.1 CLI hardening bundle: `tests/cli.rs`'s both-position test
+    /// proves only that clap ACCEPTS a `GlobalArgs` flag after the
+    /// subcommand. These pin the two behaviors that acceptance leaves
+    /// unproven, and they live here rather than in `tests/cli.rs` because
+    /// `Cli::global` is `pub(crate)` (0045) — reading the parsed field is
+    /// only possible in-crate. `try_parse_from` also means no process spawn.
+    ///
+    /// 1. VALUE PROPAGATION: the value given after the subcommand actually
+    ///    reaches `GlobalArgs`, rather than the field keeping its default.
+    #[test]
+    fn global_flag_value_propagates_from_the_post_subcommand_position() {
+        let cli = Cli::try_parse_from([
+            "ddp-transcribe",
+            "status",
+            "--state-db",
+            "/after/state.sqlite",
+            "--transcripts",
+            "/after/transcripts",
+            "--inbox",
+            "/after/inbox",
+            "--download-workers",
+            "7",
+            "--stale-claim-threshold",
+            "45s",
+        ])
+        .expect("post-subcommand globals must parse");
+        assert_eq!(cli.global.state_db, PathBuf::from("/after/state.sqlite"));
+        assert_eq!(
+            cli.global.transcripts,
+            PathBuf::from("/after/transcripts"),
+            "the post-subcommand value must not be shadowed by the default"
+        );
+        assert_eq!(cli.global.inbox, PathBuf::from("/after/inbox"));
+        assert_eq!(cli.global.download_workers, Some(7));
+        assert_eq!(
+            cli.global.stale_claim_threshold,
+            Some(std::time::Duration::from_secs(45))
+        );
+        // Untouched globals still hold their declared defaults — the
+        // assertions above are about propagation, not about the whole
+        // struct being rebuilt from the subcommand's matches.
+        assert!(matches!(cli.global.profile, Profile::Dev));
+        assert!(matches!(cli.global.log_format, LogFormat::Human));
+    }
+
+    /// 2. DUPLICATE PRECEDENCE: the same global flag given both before AND
+    ///    after the subcommand. Clap resolves this last-occurrence-wins;
+    ///    this repo has never pinned that inherited behavior, so an operator
+    ///    who writes `--state-db A ... process --state-db B` gets B.
+    #[test]
+    fn duplicate_global_flag_takes_the_last_occurrence() {
+        let cli = Cli::try_parse_from([
+            "ddp-transcribe",
+            "--state-db",
+            "/before/state.sqlite",
+            "--download-workers",
+            "1",
+            "status",
+            "--state-db",
+            "/after/state.sqlite",
+            "--download-workers",
+            "9",
+        ])
+        .expect("a duplicated global is not a usage error");
+        assert_eq!(
+            cli.global.state_db,
+            PathBuf::from("/after/state.sqlite"),
+            "the post-subcommand occurrence wins"
+        );
+        assert_eq!(cli.global.download_workers, Some(9));
+
+        // Pre-subcommand-only still reaches the field (the baseline the
+        // duplicate case is measured against).
+        let cli = Cli::try_parse_from([
+            "ddp-transcribe",
+            "--state-db",
+            "/before/state.sqlite",
+            "status",
+        ])
+        .expect("pre-subcommand globals must parse");
+        assert_eq!(cli.global.state_db, PathBuf::from("/before/state.sqlite"));
     }
 }

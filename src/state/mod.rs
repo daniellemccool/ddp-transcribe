@@ -22,11 +22,10 @@ pub(crate) fn unix_now() -> i64 {
 
 /// Test-only helper for verifying row state. Not part of the public API; gated
 /// to test compilation only.
-// Cfg-gated to `any(test, feature = "test-helpers")`. When clippy/clippy-style
-// tests run with `--features test-helpers`, the bin compilation also gets the
-// feature and includes this struct, but never references it — hence dead_code.
+// Cfg-gated to `any(test, feature = "test-helpers")` per 0005; read by the
+// `tests/pipeline_fakes/` and `tests/state_*.rs` suites via
+// `Store::get_video_for_test`.
 #[cfg(any(test, feature = "test-helpers"))]
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct VideoRow {
     pub video_id: String,
@@ -63,10 +62,9 @@ pub struct ParkedRow {
     /// preserve-kind-on-fallback fix made this field a live read.)
     pub last_retryable_kind: Option<String>,
     pub last_retryable_message: Option<String>,
-    // 0002: `#[allow(dead_code)]` lifted (Epic 4b Task 03) — the
-    // `status --retryable` renderer is the first bin consumer since Epic 4a
-    // T08 deleted the triage subcommand (its `run_triage` compared this
-    // against `--max-attempts`).
+    // Read by the `status --retryable` renderer (Epic 4b Task 03) — the first
+    // consumer since Epic 4a T08 deleted the triage subcommand (its
+    // `run_triage` compared this against `--max-attempts`).
     pub attempt_count: i64,
 }
 
@@ -145,27 +143,24 @@ impl Store {
     }
 
     pub fn read_meta(&self, key: &str) -> Result<Option<String>> {
-        let result = self
-            .conn
+        self.conn
             .query_row(
                 "SELECT value FROM meta WHERE key = ?1",
                 params![key],
                 |row| row.get::<_, String>(0),
             )
-            .map_or_else(
-                |e| match e {
-                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                    other => Err(other),
-                },
-                |v| Ok(Some(v)),
-            )?;
-        Ok(result)
+            .optional()
+            .with_context(|| format!("reading meta key {key}"))
     }
 
-    // No bin consumer; only the cfg(test) `pragma_journal_mode_is_wal`
-    // integration test calls this. Visibility/API decision deferred per
-    // FOLLOWUPS (`Store::pragma_string` visibility) and 0002.
-    #[allow(dead_code)]
+    /// Read a PRAGMA whose value is a string. PRAGMA names cannot be
+    /// parameterized in SQLite, so this interpolates `name` into the SQL —
+    /// which is why it is not public API: no production code calls it, and
+    /// `tests/state_open.rs`'s `pragma_journal_mode_is_wal` (the only caller,
+    /// passing the literal `"journal_mode"`) reaches it through the
+    /// `test-helpers` feature per 0005. An external consumer can therefore no
+    /// longer hand it an attacker-controlled or malformed pragma name.
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn pragma_string(&self, name: &str) -> Result<String> {
         let value: String = self
             .conn
@@ -174,25 +169,19 @@ impl Store {
         Ok(value)
     }
 
-    /// Borrow the underlying connection for advanced operations. Internal use
-    /// for now; the public API will grow as Tasks 9+ add methods.
+    /// Borrow the underlying connection for reads that do not belong on the
+    /// `Store` surface. Crate-internal by design — a mutating caller uses a
+    /// mutator or [`Store::transaction`], never this.
     ///
-    /// T18 (pipelined orchestrator's `compute_process_stats`) was the first
-    /// in-bin consumer; the Epic 4a T06 review fix retired that fn
-    /// (`ProcessStats` is assembled from input-side counters per 0007),
-    /// leaving only in-module `#[cfg(test)]` schema tests and a `dead_code`
-    /// suppression per 0002. Epic 5a's dry-run ingest is the raw-connection
-    /// consumer that suppression was waiting for — `ingest` reads the
-    /// ledger through this connection on a real run and through its open
-    /// transaction on a dry-run — so the suppression is lifted.
+    /// Real consumers, as of Epic 5b: Epic 5a's ingest ledger read (a real
+    /// run reads the ledger on this connection; a dry-run reads it through
+    /// its own open transaction), `requeue_failures`' dry-run candidate
+    /// select, and the in-module `#[cfg(test)]` schema-invariant tests. The
+    /// `dead_code` suppression this accessor used to carry is gone with them
+    /// (0002). Its `&mut Connection` sibling `conn_mut` never gained a
+    /// consumer at all and was deleted in the same sweep.
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
-    }
-
-    // T9 (store-ingest) and T10 (store-claims) are the first consumers.
-    #[allow(dead_code)]
-    pub(crate) fn conn_mut(&mut self) -> &mut Connection {
-        &mut self.conn
     }
 
     /// Returns the number of rows actually inserted (1 for new, 0 for an
@@ -201,9 +190,8 @@ impl Store {
     ///
     /// Single-statement convenience wrapper retained for the integration tests
     /// (`tests/state_ingest.rs`); the production `ingest` walk uses the batched
-    /// transaction path ([`Store::transaction`] + [`upsert_video_tx`]). The tests
-    /// link the lib, but the bin no longer calls this, hence `dead_code` per 0002.
-    #[allow(dead_code)]
+    /// transaction path ([`Store::transaction`] + [`upsert_video_tx`]), so
+    /// `tests/state_ingest.rs` and `tests/pipeline_fakes/` are its only callers.
     pub fn upsert_video(
         &mut self,
         video_id: &str,
@@ -221,8 +209,8 @@ impl Store {
         Ok(changed)
     }
 
-    /// Convenience sibling of [`Store::upsert_video`]; see its note re: 0002.
-    #[allow(dead_code)]
+    /// Convenience sibling of [`Store::upsert_video`]; see its note on the
+    /// production path. Called only by `tests/state_ingest.rs`.
     pub fn upsert_watch_history(
         &mut self,
         respondent_id: &str,
@@ -301,6 +289,25 @@ pub(crate) fn ingested_file_fingerprint(
 
 /// Shared INSERT-OR-IGNORE SQL so the `&mut self` convenience methods and the
 /// transaction-scoped batch helpers below cannot drift.
+///
+/// **`videos.updated_at` contract (operator-ruled, Epic 5b).** The column
+/// records **lifecycle-mutation time: when this row's status/claim state last
+/// changed. A no-op ingest is clock-neutral.** `INSERT OR IGNORE` therefore
+/// binds `updated_at` alongside `first_seen_at` on the insert and leaves both
+/// alone on every re-ingest — re-ingesting the same DDP export must not
+/// rewrite the column for millions of untouched rows, and the row-change
+/// count (0 on a re-ingest, per 0006) stays the caller's signal. The name is
+/// deliberately NOT `inserted_at`: every lifecycle mutator below bumps it, so
+/// on a row that has moved at all it is a genuine last-mutation marker.
+///
+/// Mutators that bump it: `claim_next`, `mark_succeeded`,
+/// `mark_retryable_failure`, `record_fetch_failure` (both the park and the
+/// requeue arm), `mark_terminal_failure`, `sweep_stale_claims`,
+/// `sweep_mark_terminal`, `sweep_requeue`. Deliberate non-bumpers:
+/// `requeue_failures` (0046 — the operator override grants eligibility, it
+/// does not launder history, and `--older-than` reads the event clock rather
+/// than this column) and `apply_metadata_batch` (descriptive columns only, no
+/// lifecycle transition — 0042).
 const UPSERT_VIDEO_SQL: &str = "INSERT OR IGNORE INTO videos
                  (video_id, source_url, canonical, status,
                   first_seen_at, updated_at)
@@ -423,16 +430,14 @@ pub struct Claim {
     /// "SensitiveLoginGated" (ADR 0035); the start-of-batch sweep's requeue
     /// normalizes historical placeholder kinds before the row becomes
     /// claimable again.
-    // 0002: `#[allow(dead_code)]` lifted here (Task 08) — now read by
-    // `pipeline::cookie_opts_for`'s kind-gated cookie routing.
+    // Read by `pipeline::cookie_opts_for`'s kind-gated cookie routing.
     pub last_retryable_kind: Option<String>,
 }
 
 /// Outcome of `record_fetch_failure`'s one-transaction decision (Epic 4a):
 /// where did the failed row land, and did anything change at all.
-// 0002: `#[allow(dead_code)]` lifted in Epic 4a T06 — the pipelined workers
-// (via the shared record-failure helper) and `record_fetch_failure_serial`
-// match on every variant.
+// The pipelined workers (via the shared record-failure helper) and
+// `record_fetch_failure_serial` match on every variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureRecordOutcome {
     /// Row went back to 'pending' (end of queue via T05 ordering).
@@ -445,6 +450,187 @@ pub enum FailureRecordOutcome {
     /// Claim predicate missed (concurrent sweep re-claimed the row) — no
     /// mutation happened; caller counts it as stale_after_failure.
     StaleClaim,
+}
+
+/// Operator-supplied eligibility filter for [`Store::requeue_failures`]
+/// (0046). Built by the `requeue-failures` dispatch arm straight from the
+/// parsed flags; clap owns the default-deny grammar (which combinations are
+/// even expressible), this type owns only what the SQL predicate needs.
+///
+/// Deliberately NOT `Default`: an all-empty filter is exactly the unqualified
+/// invocation the record forbids, and `requeue_failures` rejects it rather
+/// than treating "no selector" as "every row".
+#[derive(Debug, Clone)]
+pub struct RequeueFilter {
+    /// Exact-byte-equality kind matches; repeats OR together. Empty = no
+    /// kind predicate.
+    pub error_kinds: Vec<String>,
+    /// Skip rows with `attempt_count >= N`.
+    pub max_attempts: Option<u32>,
+    /// Strictly older than: `last_failure_at < now - older_than`.
+    pub older_than: Option<std::time::Duration>,
+    /// Consider `failed_terminal` rows too (matching on `terminal_reason`).
+    pub include_terminal: bool,
+    /// Every `failed_retryable` row; mutually exclusive with the qualifying
+    /// selectors at parse time.
+    pub all: bool,
+    /// Cap on rows moved, applied in `attempt_count ASC, video_id ASC` order.
+    pub max: Option<u32>,
+}
+
+impl RequeueFilter {
+    /// The default-deny gate's library-side half: does this filter carry a
+    /// *qualifying* selector? `max` and dry-run are modifiers and never count.
+    fn has_qualifying_selector(&self) -> bool {
+        !self.error_kinds.is_empty() || self.max_attempts.is_some() || self.older_than.is_some()
+    }
+}
+
+/// What one `requeue-failures` invocation did (0046). `matched` is the
+/// selected set (identical in dry-run and real runs — same predicate SQL);
+/// `requeued` is the UPDATE's row-change count per 0006, and is 0 on a
+/// dry-run. `by_kind` carries the per-kind breakdown the command prints,
+/// sorted by kind for stable output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequeueOutcome {
+    pub matched: usize,
+    pub requeued: usize,
+    pub by_kind: Vec<(String, usize)>,
+}
+
+/// One row the requeue predicate selected, captured BEFORE the UPDATE so the
+/// `operator_requeued` event can carry the prior state (0046 forensics).
+struct RequeueCandidate {
+    video_id: String,
+    prior_status: String,
+    prior_kind: Option<String>,
+    attempt_count: i64,
+}
+
+/// Bucket label for a row whose kind column is NULL — a real state for rows
+/// terminalized before the classification columns existed.
+const REQUEUE_KIND_UNKNOWN: &str = "(none)";
+
+/// SQLite's default variable limit is 32766; requeue's UPDATE binds one
+/// variable per selected row, so a large `--all` run is chunked rather than
+/// prepared as one enormous IN list.
+const REQUEUE_UPDATE_CHUNK: usize = 512;
+
+/// The 0046 failure clock: `last_failure_at := MAX(video_events.at)` over the
+/// failure-event allowlist. Administrative transitions ('requeued',
+/// 'swept_stale', 'swept_terminal', 'claimed', 'succeeded') are deliberately
+/// absent — they must never reset an operator's `--older-than` clock.
+const REQUEUE_LAST_FAILURE_CTE: &str = "WITH last_failure AS (
+             SELECT video_id, MAX(at) AS last_failure_at
+             FROM video_events
+             WHERE event_type IN
+               ('failed_retryable','failed_terminal','retry_requeued','cookie_parked')
+             GROUP BY video_id
+         )";
+
+/// The kind a row is matched and counted by: `terminal_reason` for terminal
+/// rows, `last_retryable_kind` otherwise. Never a terminal row's retained
+/// retryable kind (0046).
+const REQUEUE_KIND_EXPR: &str =
+    "CASE WHEN v.status = 'failed_terminal' THEN v.terminal_reason ELSE v.last_retryable_kind END";
+
+/// Builds the ONE selection query both the dry-run and the real run execute —
+/// shared construction is what makes `--dry-run` an honest preview. Returns
+/// the SQL plus its positional parameters. `now` is the single per-invocation
+/// clock reading.
+fn build_requeue_select(filter: &RequeueFilter, now: i64) -> (String, Vec<rusqlite::types::Value>) {
+    use rusqlite::types::Value;
+
+    let mut params: Vec<Value> = Vec::new();
+    let mut sql = format!(
+        "{REQUEUE_LAST_FAILURE_CTE}
+         SELECT v.video_id, v.status, {REQUEUE_KIND_EXPR} AS kind, v.attempt_count
+         FROM videos v
+         LEFT JOIN last_failure lf ON lf.video_id = v.video_id
+         WHERE v.status IN ({})",
+        if filter.include_terminal {
+            "'failed_retryable','failed_terminal'"
+        } else {
+            "'failed_retryable'"
+        }
+    );
+
+    if !filter.error_kinds.is_empty() {
+        // Exact byte equality: SQLite's default BINARY collation on `=`/`IN`,
+        // no case folding. A NULL kind matches nothing (NULL IN (…) is NULL).
+        let placeholders = vec!["?"; filter.error_kinds.len()].join(",");
+        sql.push_str(&format!(
+            "\n           AND {REQUEUE_KIND_EXPR} IN ({placeholders})"
+        ));
+        for kind in &filter.error_kinds {
+            params.push(Value::Text(kind.clone()));
+        }
+    }
+
+    if let Some(max_attempts) = filter.max_attempts {
+        sql.push_str("\n           AND v.attempt_count < ?");
+        params.push(Value::Integer(i64::from(max_attempts)));
+    }
+
+    if let Some(older_than) = filter.older_than {
+        // Saturating conversion, mirroring sweep_stale_claims' threshold math.
+        let secs = i64::try_from(older_than.as_secs()).unwrap_or(i64::MAX);
+        sql.push_str(
+            "\n           AND lf.last_failure_at IS NOT NULL
+           AND lf.last_failure_at < ?",
+        );
+        params.push(Value::Integer(now.saturating_sub(secs)));
+    }
+
+    sql.push_str("\n         ORDER BY v.attempt_count ASC, v.video_id ASC");
+    if let Some(max) = filter.max {
+        sql.push_str("\n         LIMIT ?");
+        params.push(Value::Integer(i64::from(max)));
+    }
+
+    (sql, params)
+}
+
+/// Runs [`build_requeue_select`]'s query. Takes `&Connection` so the dry-run
+/// (bare connection, no write lock taken) and the real run (inside the
+/// IMMEDIATE transaction, deref-coerced) share one code path.
+fn select_requeue_candidates(
+    conn: &Connection,
+    sql: &str,
+    params: &[rusqlite::types::Value],
+) -> Result<Vec<RequeueCandidate>> {
+    let mut stmt = conn
+        .prepare(sql)
+        .context("prepare requeue_failures selection")?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(params.iter()), |r| {
+            Ok(RequeueCandidate {
+                video_id: r.get(0)?,
+                prior_status: r.get(1)?,
+                prior_kind: r.get(2)?,
+                attempt_count: r.get(3)?,
+            })
+        })
+        .context("query requeue_failures selection")?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("collect requeue_failures selection")?;
+    Ok(rows)
+}
+
+fn requeue_outcome(selected: &[RequeueCandidate], requeued: usize) -> RequeueOutcome {
+    let mut by_kind: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for candidate in selected {
+        let label = candidate
+            .prior_kind
+            .clone()
+            .unwrap_or_else(|| REQUEUE_KIND_UNKNOWN.to_string());
+        *by_kind.entry(label).or_default() += 1;
+    }
+    RequeueOutcome {
+        matched: selected.len(),
+        requeued,
+        by_kind: by_kind.into_iter().collect(),
+    }
 }
 
 /// Artifacts written to the database upon successful transcription.
@@ -501,7 +687,8 @@ impl Store {
             .context("claim_next: select oldest pending row")?;
 
         let Some((video_id, source_url, prev_attempts, last_retryable_kind)) = candidate else {
-            tx.commit()?;
+            tx.commit()
+                .context("commit claim transaction (no pending candidate)")?;
             return Ok(None);
         };
 
@@ -603,23 +790,49 @@ impl Store {
     /// wins across retries (engagement counts are point-in-time; fetched_at
     /// records the snapshot moment). Returns the row-change count per 0006.
     ///
+    /// **Claim-guarded** (Epic 5b, 0023 symmetry): the envelope is written
+    /// only while the row is `status = 'in_progress' AND claimed_by = ?` —
+    /// the same pair every other guarded mutator in this family carries — so a
+    /// worker whose claim was swept out from under it cannot overwrite a newer
+    /// envelope captured by whoever re-claimed the row. Both halves are
+    /// checked locally rather than leaning on the "claimed_by is non-NULL iff
+    /// in_progress" invariant maintained elsewhere in this file: a malformed
+    /// row fails closed. Last-write-wins still holds *among writers
+    /// that hold the claim* — that is what makes a retry refresh the envelope.
+    /// The guard rides the INSERT's source SELECT rather than the call site:
+    /// this mutator runs BEFORE outcome dispatch and must stay unconditional
+    /// on both the success and the failure path (0042 — metadata never
+    /// changes a video's outcome), so the caller keeps calling it exactly
+    /// once either way and a lost claim shows up as `Ok(0)`, never an error.
+    ///
     /// Callers treat failures as best-effort (log + continue): metadata
     /// must never change a video's pipeline outcome.
     ///
-    /// Task 03 wired both pipeline paths (`fetch_worker` and
-    /// `process_one`) as the first real callers, lifting the placeholder
-    /// `#[allow(dead_code)]` per 0002.
-    pub fn upsert_metadata_raw(&mut self, video_id: &str, envelope_json: &str) -> Result<usize> {
+    /// Both pipeline paths (`fetch_worker` and `process_one`) call this;
+    /// `backfill-metadata` writes unclaimed rows through
+    /// [`Store::insert_metadata_raw_if_missing`] instead.
+    pub fn upsert_metadata_raw(
+        &mut self,
+        video_id: &str,
+        worker_id: &str,
+        envelope_json: &str,
+    ) -> Result<usize> {
         let now = unix_now();
+        // INSERT … SELECT (not VALUES) so the claim predicate is part of the
+        // one statement. The SELECT carries a WHERE clause, which SQLite
+        // requires to disambiguate the trailing ON CONFLICT from a join's ON.
         let changed = self
             .conn
             .execute(
                 "INSERT INTO video_metadata_raw (video_id, fetched_at, raw_json)
-                 VALUES (?1, ?2, ?3)
+                 SELECT ?1, ?2, ?3 FROM videos
+                 WHERE video_id = ?1
+                   AND status = 'in_progress'
+                   AND claimed_by = ?4
                  ON CONFLICT(video_id) DO UPDATE SET
                      fetched_at = excluded.fetched_at,
                      raw_json   = excluded.raw_json",
-                params![video_id, now, envelope_json],
+                params![video_id, now, envelope_json, worker_id],
             )
             .with_context(|| format!("upsert_metadata_raw for {video_id}"))?;
         Ok(changed)
@@ -715,14 +928,12 @@ impl Store {
     // ("FetchOrTranscribe" per 0023); Epic 3 T07 replaced the placeholder
     // with typed classifier dispatch (`RetryableKind::tag()`).
     //
-    // 0002: Epic 4a T06 switched every pipeline caller (fetch_worker,
-    // transcribe_worker, run_serial) to `record_fetch_failure`, so the bin
-    // no longer reaches this mutator. Integration tests
-    // (`tests/state_claims.rs`, `tests/state_sweep.rs`) still exercise it
-    // directly as a failed_retryable seeding helper, hence dead_code-suppressed
-    // rather than deleted. (Epic 4a T08 checked at triage retirement: retained —
-    // the direct-mutator tests still depend on it.)
-    #[allow(dead_code)]
+    // Epic 4a T06 switched every pipeline caller (fetch_worker,
+    // transcribe_worker, run_serial) to `record_fetch_failure`, so no
+    // production path reaches this mutator. Integration tests
+    // (`tests/state_claims.rs`, `tests/state_sweep.rs`) exercise it directly
+    // as a failed_retryable seeding helper — retained for them, re-checked at
+    // Epic 4a T08's triage retirement and again in the Epic 5b allow purge.
     pub fn mark_retryable_failure(
         &mut self,
         video_id: &str,
@@ -794,8 +1005,7 @@ impl Store {
     /// 0006 note: the `Result<usize>` row-count contract is honored
     /// internally — each UPDATE's row count drives the outcome; the typed
     /// enum IS the row-count information, made unambiguous for the caller.
-    // 0002: `#[allow(dead_code)]` lifted in Epic 4a T06 — first callers:
-    // fetch_worker + transcribe_worker (via the shared pipelined
+    // Callers: fetch_worker + transcribe_worker (via the shared pipelined
     // record-failure helper) and run_serial's `record_fetch_failure_serial`.
     #[allow(clippy::too_many_arguments)] // one logical decision; every arg participates
     pub fn record_fetch_failure(
@@ -902,8 +1112,7 @@ impl Store {
     /// returns `ClassifiedFailure::Unavailable` (ADR 0033 write-off classes:
     /// `IpBlockedMessage`, `VideoNotAvailable10231`) — a row that will never
     /// succeed on retry. Epic 2 landed the surface with no caller so Epic 3's
-    /// diff would be a classifier-add task, not a mutator-add task; the
-    /// `#[allow(dead_code)]` that held that placement is lifted here per 0002.
+    /// diff would be a classifier-add task, not a mutator-add task.
     ///
     /// The `last_retryable_kind`/`last_retryable_message` columns are NOT
     /// cleared on this flip — they're retained as diagnostic history so an
@@ -1092,6 +1301,13 @@ impl Store {
     /// caller), this operates on unclaimed failed rows; the operator-visible
     /// audit trail is the 'swept_terminal' event. last_retryable_* columns
     /// are preserved (0023 family convention: diagnostics accumulate).
+    ///
+    /// `claimed_by`/`claimed_at` are cleared defensively. Under the current
+    /// schema they are already NULL on every `failed_retryable` row (the
+    /// mutators that park a row there clear them), so the clear is inert
+    /// today — it exists so that if a future transition ever lets a still-
+    /// claimed row reach this mutator, the row cannot leave here terminal
+    /// while advertising an owner.
     pub fn sweep_mark_terminal(
         &mut self,
         video_id: &str,
@@ -1109,6 +1325,8 @@ impl Store {
                  SET status = 'failed_terminal',
                      terminal_reason = ?2,
                      terminal_message = ?3,
+                     claimed_by = NULL,
+                     claimed_at = NULL,
                      updated_at = ?4
                  WHERE video_id = ?1 AND status = 'failed_retryable'",
                 params![video_id, reason, message, now],
@@ -1132,6 +1350,11 @@ impl Store {
     /// are one statement). Writes the re-classified kind back so historical
     /// placeholder kinds ("Fetch") become taxonomy kinds before the row is
     /// claimable — cookie routing (ADR 0035) reads the kind at claim time.
+    ///
+    /// `claimed_by`/`claimed_at` are cleared defensively, for the reason given
+    /// on [`Store::sweep_mark_terminal`]: inert under the current schema, but a
+    /// row must never return to `pending` still advertising an owner —
+    /// `claim_next` would then hand it out with a stale claimant recorded.
     pub fn sweep_requeue(
         &mut self,
         video_id: &str,
@@ -1148,6 +1371,8 @@ impl Store {
                 "UPDATE videos
                  SET status = 'pending',
                      last_retryable_kind = ?2,
+                     claimed_by = NULL,
+                     claimed_at = NULL,
                      updated_at = ?3
                  WHERE video_id = ?1
                    AND status = 'failed_retryable'
@@ -1168,6 +1393,97 @@ impl Store {
         Ok(changed)
     }
 
+    /// Operator eligibility override (0046): restore failed rows to `pending`
+    /// after an external condition materially changed. This is NOT a retry
+    /// scheduler — 0036 remains the retry authority and the next fetch remains
+    /// the liveness oracle; this grants one more claim and nothing else.
+    ///
+    /// One `BEGIN IMMEDIATE` transaction shaped like [`Store::sweep_stale_claims`]:
+    /// select → update → one event per row. `attempt_count` is never reset or
+    /// decremented, `last_retryable_*`/`terminal_*` are retained, and
+    /// `videos.updated_at` is deliberately NOT touched — the command grants
+    /// eligibility, it does not launder history.
+    ///
+    /// `dry_run` executes the identical predicate SQL and stops there: no
+    /// write lock, no rows, no events, `requeued == 0`.
+    ///
+    /// Default-deny is enforced at parse time by clap; the guard here is the
+    /// library-side half of the same rule, so no in-process caller can reach
+    /// "no selector means every row" through a hand-built filter.
+    pub fn requeue_failures(
+        &mut self,
+        filter: &RequeueFilter,
+        actor: &str,
+        dry_run: bool,
+    ) -> Result<RequeueOutcome> {
+        if !filter.all && !filter.has_qualifying_selector() {
+            anyhow::bail!(
+                "requeue-failures: refusing to run without a qualifying selector \
+                 (--error-kind / --max-attempts / --older-than) or an explicit --all"
+            );
+        }
+
+        // One clock reading per invocation: the --older-than cutoff and every
+        // event's `at` come from this same `now`.
+        let now = unix_now();
+        let (sql, params) = build_requeue_select(filter, now);
+
+        if dry_run {
+            let selected = select_requeue_candidates(self.conn(), &sql, &params)?;
+            return Ok(requeue_outcome(&selected, 0));
+        }
+
+        let tx = self.transaction_immediate()?;
+        let selected = select_requeue_candidates(&tx, &sql, &params)?;
+
+        let mut changed = 0usize;
+        if !selected.is_empty() {
+            for chunk in selected.chunks(REQUEUE_UPDATE_CHUNK) {
+                let placeholders = vec!["?"; chunk.len()].join(",");
+                changed += tx
+                    .execute(
+                        &format!(
+                            "UPDATE videos
+                             SET status = 'pending',
+                                 claimed_by = NULL,
+                                 claimed_at = NULL
+                             WHERE video_id IN ({placeholders})"
+                        ),
+                        rusqlite::params_from_iter(chunk.iter().map(|c| c.video_id.as_str())),
+                    )
+                    .context("UPDATE videos for requeue_failures")?;
+            }
+            debug_assert_eq!(selected.len(), changed, "event set must match moved set");
+
+            let mut ev = tx
+                .prepare_cached(
+                    "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
+                     VALUES (?1, ?2, 'operator_requeued', ?3, ?4)",
+                )
+                .context("prepare operator_requeued event for requeue_failures")?;
+            for candidate in &selected {
+                let detail = serde_json::json!({
+                    "prior_status": candidate.prior_status,
+                    "prior_kind": candidate.prior_kind,
+                    "attempt_count": candidate.attempt_count,
+                })
+                .to_string();
+                ev.execute(params![candidate.video_id, now, actor, detail])
+                    .with_context(|| {
+                        format!("operator_requeued event for {}", candidate.video_id)
+                    })?;
+            }
+        }
+
+        tx.commit().context("commit requeue_failures")?;
+
+        if changed > 0 {
+            tracing::info!(requeued = changed, actor, "requeue_failures");
+        }
+
+        Ok(requeue_outcome(&selected, changed))
+    }
+
     /// Open a batch-run record (Epic 4a): one row per `process` invocation,
     /// carrying the run parameters and the FULL active classification policy
     /// TOML — the census without its generating policy is not reproducible
@@ -1180,8 +1496,8 @@ impl Store {
     /// identity-creating INSERT — there is no predicate to miss, and the
     /// product the caller needs is the generated run_id itself, not a count
     /// that would always be 1.
-    // 0002: `#[allow(dead_code)]` lifted in Epic 4a T07 — main()'s Process
-    // arm calls this before engine construction (fail fast on policy).
+    // The Process dispatch arm calls this before engine construction (fail
+    // fast on policy).
     pub fn open_batch_run(&mut self, params_json: &str, policy_toml: &str) -> Result<i64> {
         let now = unix_now();
         self.conn
@@ -1197,8 +1513,8 @@ impl Store {
     /// Close a batch-run record with its census. Returns the row-change
     /// count per 0006 (0 = unknown run_id or already closed by predicate
     /// miss — callers log, never panic).
-    // 0002: `#[allow(dead_code)]` lifted in Epic 4a T07 — main()'s Process
-    // arm calls this after run_pipelined resolves, via `shared.try_lock()`.
+    // The Process dispatch arm calls this after run_pipelined resolves, via
+    // `shared.try_lock()`.
     pub fn close_batch_run(&mut self, run_id: i64, census_json: &str) -> Result<usize> {
         let now = unix_now();
         self.conn
@@ -1260,10 +1576,9 @@ impl Store {
 }
 
 impl Store {
-    // Cfg-gated test helper; same bin-firing dynamic as `VideoRow` above when
-    // `--features test-helpers` is enabled at the workspace level.
+    // Cfg-gated test helper per 0005; called by `tests/pipeline_fakes/` and
+    // the `tests/state_*.rs` suites.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(dead_code)]
     pub fn get_video_for_test(&self, video_id: &str) -> Result<Option<VideoRow>> {
         let row = self
             .conn
@@ -1291,9 +1606,8 @@ impl Store {
 }
 
 /// A row from `video_events`, returned by `get_events_for_test`.
-// Cfg-gated test helper per 0005; fires dead_code in bin compilation when --features test-helpers is enabled.
+// Cfg-gated test helper per 0005.
 #[cfg(any(test, feature = "test-helpers"))]
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct EventRow {
     pub event_type: String,
@@ -1303,8 +1617,8 @@ pub struct EventRow {
 #[cfg(any(test, feature = "test-helpers"))]
 impl Store {
     /// Retrieve all `video_events` rows for a given video_id, ordered by id.
-    // Cfg-gated test helper per 0005; same bin-firing dynamic as EventRow above.
-    #[allow(dead_code)]
+    // Cfg-gated test helper per 0005; called by `tests/state_retry.rs` and
+    // `tests/state_claims.rs`.
     pub fn get_events_for_test(&self, video_id: &str) -> Result<Vec<EventRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT event_type, worker_id FROM video_events WHERE video_id = ?1 ORDER BY id",

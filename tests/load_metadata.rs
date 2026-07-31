@@ -25,13 +25,13 @@ fn seeded_db(dir: &tempfile::TempDir) -> std::path::PathBuf {
         .upsert_video("vid_b", "https://example/b", false)
         .unwrap();
     store
-        .upsert_metadata_raw(
+        .insert_metadata_raw_if_missing(
             "vid_a",
             r#"{"schema":1,"printed":"{\"id\":\"vid_a\",\"description\":\"desc A\",\"uploader\":\"acct\",\"timestamp\":1768924271,\"view_count\":42}"}"#,
         )
         .unwrap();
     store
-        .upsert_metadata_raw("vid_b", "definitely not json")
+        .insert_metadata_raw_if_missing("vid_b", "definitely not json")
         .unwrap();
     db
 }
@@ -185,7 +185,7 @@ fn metadata_raw_page_walks_all_rows_exactly_once_in_order() {
     for id in ids {
         store.upsert_video(id, "https://example/v", false).unwrap();
         store
-            .upsert_metadata_raw(id, r#"{"schema":1,"printed":"{}"}"#)
+            .insert_metadata_raw_if_missing(id, r#"{"schema":1,"printed":"{}"}"#)
             .unwrap();
     }
 

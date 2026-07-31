@@ -54,19 +54,15 @@ struct RawTable {
 }
 
 /// Immutable, validated classification policy. Shared with workers via Arc.
-// 0002: lifted in Epic 4a T03 — constructed by `main()`'s Process arm and
-// consumed throughout `failure::classify_fetch_error` /
-// `pipeline::cookie_opts_for`.
+// Constructed by the Process dispatch arm and consumed throughout
+// `failure::classify_fetch_error` / `pipeline::cookie_opts_for`.
 #[derive(Debug)]
 pub struct ClassificationTable {
     rules: Vec<RawRule>,
     fallback: RawFallback,
     by_label: HashMap<String, Disposition>,
-    // 0002: populated for every table but only read by `source_toml()`,
-    // which nothing calls yet — Epic 4a T07 will read it to snapshot the
-    // active policy into `batch_runs.policy_toml`. Still genuinely dead
-    // from main()'s perspective; lift alongside `source_toml` then.
-    #[allow(dead_code)]
+    // Populated for every table; read by `source_toml()`, which the status
+    // renderer and the `batch_runs.policy_toml` snapshot both call.
     source: String,
 }
 
@@ -177,16 +173,14 @@ impl ClassificationTable {
         self.by_label.get(label).copied()
     }
 
-    // 0002: consumed by Epic 4a T07 (`batch_runs.policy_toml` snapshot);
-    // lift when it lands. Exercised today only by classification.rs's own
-    // `#[cfg(test)]` module.
-    #[allow(dead_code)]
+    // Consumed by `status.rs`'s policy render and the
+    // `batch_runs.policy_toml` snapshot (`tests/batch_census.rs`).
     pub fn source_toml(&self) -> &str {
         &self.source
     }
 
-    // 0002: `#[allow(dead_code)]` lifted in Epic 4a T06 — main()'s Process
-    // arm logs `rule_count()` on the "classification policy active" line.
+    // The Process dispatch arm logs `rule_count()` on the "classification
+    // policy active" line.
     pub fn rule_count(&self) -> usize {
         self.rules.len()
     }
@@ -195,8 +189,7 @@ impl ClassificationTable {
 /// The compiled-in default policy. Every rule carries its evidence citation;
 /// this text is also what lands in `batch_runs.policy_toml` when no
 /// `--classification` override is given.
-// 0002: `#[allow(dead_code)]` lifted in Epic 4a T06 — `compiled_default()`
-// (bin-live after CLI wiring) parses this const.
+// `compiled_default()` parses this const.
 pub const DEFAULT_TABLE_TOML: &str = r#"# ddp-transcribe classification policy (compiled default)
 # Ordered, first-match-wins, exact case-sensitive substrings. Evidence:
 # 65k pilot corpus + oEmbed probe census 2026-07-07 (n=7,087); ADR 0033
@@ -411,6 +404,94 @@ disposition = "terminal"
         // hardcoded chain.
         let m = t.classify("blah status code 10231 blah");
         assert_eq!(m.label, "AnyStatusCode");
+    }
+
+    /// Epic 3 close-out bundle: the compiled default's rule ORDER is
+    /// load-bearing (write-off classes first, network markers last), and
+    /// `classify` is `str::contains`, so a real yt-dlp blob carrying two
+    /// markers at once resolves by TABLE position — never by where the
+    /// markers sit in the text. `first_match_wins_on_overlapping_patterns`
+    /// pins the mechanism on a synthetic table; this pins the shipped
+    /// ordering that the pilot evidence bought.
+    #[test]
+    fn default_table_precedence_holds_when_one_blob_carries_two_markers() {
+        let t = ClassificationTable::compiled_default().expect("default table must parse");
+        // (earlier marker, later marker, winning label, winning disposition)
+        let cases: &[(&str, &str, &str, Disposition)] = &[
+            // Terminal write-off (rule 1) beats a retryable class (rule 4) —
+            // the ordering ADR-0033 exists to protect.
+            (
+                "ERROR: Your IP address is blocked",
+                "ERROR: Did not get any data blocks",
+                "IpBlockedMessage",
+                Disposition::Terminal,
+            ),
+            // Terminal write-off beats a network marker (last block).
+            (
+                "ERROR: unable to extract: status code 10240",
+                "ERROR: Unable to download webpage: Too Many Requests",
+                "VideoNotAvailable10240",
+                Disposition::Terminal,
+            ),
+            // Between two retryables, the earlier rule still wins: the
+            // message class (rule 9) outranks the network markers below it.
+            (
+                "ERROR: HTTP Error 403: Forbidden",
+                "ERROR: SSL handshake failed",
+                "HttpError",
+                Disposition::Retryable,
+            ),
+        ];
+        for (earlier, later, label, disposition) in cases {
+            // Both concatenation orders: table position decides, not the
+            // byte offset of the marker inside the blob.
+            for blob in [format!("{earlier}\n{later}"), format!("{later}\n{earlier}")] {
+                let m = t.classify(&blob);
+                assert_eq!(m.label, *label, "label for blob: {blob:?}");
+                assert_eq!(
+                    m.disposition, *disposition,
+                    "disposition for blob: {blob:?}"
+                );
+                assert!(m.matched_rule, "a two-marker blob is never a fallback hit");
+            }
+        }
+    }
+
+    /// Matching is exact and case-SENSITIVE (documented on `classify`).
+    /// yt-dlp/TikTok wording casing has drifted before, so pin the
+    /// consequence: a case-shifted marker does not match its rule and lands
+    /// on the default-cautious retryable fallback rather than being written
+    /// off terminal by accident.
+    #[test]
+    fn classification_is_case_sensitive() {
+        let t = ClassificationTable::compiled_default().expect("default table must parse");
+        for shifted in [
+            "ERROR: your ip address is blocked",      // was terminal
+            "ERROR: STATUS CODE 10240",               // was terminal
+            "ERROR: did not get any data blocks",     // was NoDataBlocks
+            "ERROR: http error 403: forbidden",       // was HttpError
+            "ERROR: unable to download WEBPAGE: ssl", // was NetworkTransient
+            "ERROR: NO VIDEO FORMATS FOUND",          // was NoVideoFormats
+        ] {
+            let m = t.classify(shifted);
+            assert!(
+                !m.matched_rule,
+                "case-shifted marker must not match a rule: {shifted:?} matched {}",
+                m.label
+            );
+            assert_eq!(m.label, "YtDlpOther", "for {shifted:?}");
+            assert_eq!(m.disposition, Disposition::Retryable, "for {shifted:?}");
+        }
+        // Control: the exactly-cased forms of the same two markers DO match,
+        // so the assertions above are about casing and nothing else.
+        assert_eq!(
+            t.classify("ERROR: Your IP address is blocked").label,
+            "IpBlockedMessage"
+        );
+        assert_eq!(
+            t.classify("ERROR: No video formats found").label,
+            "NoVideoFormats"
+        );
     }
 
     #[test]
