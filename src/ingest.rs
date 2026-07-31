@@ -655,5 +655,17 @@ mod tests {
         let start_only = WindowBounds::from_dates(Some(d(2026, 2, 1)), None);
         assert!(start_only.contains(ts("2030-01-01 00:00:00")));
         assert!(!start_only.contains(ts("2026-01-31 23:59:59")));
+        // The mirror case: an end bound with no start is open-ended below
+        // and still inclusive through its own last second.
+        let end_only = WindowBounds::from_dates(None, Some(d(2026, 2, 28)));
+        assert!(
+            end_only.contains(ts("1999-01-01 00:00:00")),
+            "no lower bound"
+        );
+        assert!(
+            end_only.contains(ts("2026-02-28 23:59:59")),
+            "end date inclusive through its last second"
+        );
+        assert!(!end_only.contains(ts("2026-03-01 00:00:00")));
     }
 }

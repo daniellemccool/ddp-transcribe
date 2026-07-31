@@ -71,6 +71,32 @@ fn seeded_db(tmp: &tempfile::TempDir) -> std::path::PathBuf {
         )
         .unwrap();
     }
+    // detail_json shape fixtures the renderer must survive: a known key
+    // carrying a NON-string value, malformed JSON, and the
+    // {"reason","message"} shape. Kept off v_retry1 so the legibility
+    // assertion there (no raw JSON for known shapes) still means what it says.
+    for (vid, at, ev, detail) in [
+        (
+            "v_retry2",
+            140,
+            "retry_requeued",
+            r#"{"kind":404,"message":"numeric kind, not a string"}"#,
+        ),
+        ("v_retry2", 150, "note", "not json at all"),
+        (
+            "v_term",
+            160,
+            "failed_terminal",
+            r#"{"reason":"IpBlockedMessage","message":"ERROR: Your IP address is blocked"}"#,
+        ),
+    ] {
+        conn.execute(
+            "INSERT INTO video_events (video_id, at, event_type, worker_id, detail_json)
+             VALUES (?1, ?2, ?3, 'w1', ?4)",
+            rusqlite::params![vid, at, ev, detail],
+        )
+        .unwrap();
+    }
     // watch_history for the respondent summary (in_window NOT NULL in v3).
     for (vid, watched_at) in [("v_ok1", 500), ("v_ok2", 600), ("v_retry1", 700)] {
         conn.execute(
@@ -170,6 +196,44 @@ fn status_empty_db_renders_zero_counts() {
 }
 
 #[test]
+fn status_zero_fills_statuses_the_db_never_uses() {
+    // A DB holding exactly ONE status must still report the whole
+    // vocabulary — an absent key reads as "no data", a zero reads as
+    // "none in this state", and the operator needs the latter.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = tmp.path().join("state.sqlite");
+    {
+        let _s = ddp_transcribe::state::Store::open(&db).unwrap();
+    }
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute(
+        "INSERT INTO videos (video_id, source_url, canonical, status, first_seen_at, updated_at)
+         VALUES ('v_only', 'https://example/v_only', 1, 'succeeded', 100, 100)",
+        [],
+    )
+    .unwrap();
+    let out = Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args(["--state-db", db.to_str().unwrap(), "status", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["total_videos"], 1);
+    assert_eq!(v["counts"]["succeeded"], 1);
+    for absent in [
+        "pending",
+        "in_progress",
+        "failed_terminal",
+        "failed_retryable",
+    ] {
+        assert_eq!(v["counts"][absent], 0, "{absent} must zero-fill");
+    }
+}
+
+#[test]
 fn status_json_flags_compiled_default_policy() {
     let tmp = tempfile::TempDir::new().unwrap();
     let db = seeded_db(&tmp);
@@ -230,6 +294,59 @@ fn status_video_id_renders_legible_event_history() {
 }
 
 #[test]
+fn status_video_id_falls_back_to_raw_json_for_non_string_known_key() {
+    // A known key whose value is not a string must not vanish: the whole
+    // detail falls back to raw JSON so nothing is hidden from the operator.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = seeded_db(&tmp);
+    Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args([
+            "--state-db",
+            db.to_str().unwrap(),
+            "status",
+            "--video-id",
+            "v_retry2",
+        ])
+        .assert()
+        .success()
+        .stdout(contains(r#""kind":404"#));
+}
+
+#[test]
+fn status_video_id_renders_malformed_and_reason_shaped_details() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = seeded_db(&tmp);
+    // Malformed detail_json renders as a raw fallback, never a crash.
+    Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args([
+            "--state-db",
+            db.to_str().unwrap(),
+            "status",
+            "--video-id",
+            "v_retry2",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("detail: not json at all"));
+    // The {"reason","message"} shape: reason inline, message on its own line.
+    Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args([
+            "--state-db",
+            db.to_str().unwrap(),
+            "status",
+            "--video-id",
+            "v_term",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("reason=IpBlockedMessage"))
+        .stdout(contains("message: ERROR: Your IP address is blocked"));
+}
+
+#[test]
 fn status_video_id_unknown_is_a_failure() {
     let tmp = tempfile::TempDir::new().unwrap();
     let db = seeded_db(&tmp);
@@ -277,6 +394,26 @@ fn status_respondent_summary_counts() {
 }
 
 #[test]
+fn status_respondent_id_unknown_is_a_failure() {
+    // A typo'd respondent must error like --video-id does, not report an
+    // all-zeros summary that reads as "this respondent donated nothing".
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = seeded_db(&tmp);
+    Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args([
+            "--state-db",
+            db.to_str().unwrap(),
+            "status",
+            "--respondent-id",
+            "resp-typo",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("not found"));
+}
+
+#[test]
 fn status_errors_and_retryable_lists() {
     let tmp = tempfile::TempDir::new().unwrap();
     let db = seeded_db(&tmp);
@@ -321,6 +458,27 @@ fn artifact_json(video_id: &str, schema_version: &str) -> String {
 "fetcher":"ytdlp","transcript_source":"whisper-rs","model":"test",
 "raw_signals":{{"schema_version":"{schema_version}","language":"en","lang_probs":null,"segments":[]}}}}"#
     )
+}
+
+/// Structurally VALID TranscriptMetadata with `raw_signals` absent — the
+/// pre-Epic-1 artifact shape. It parses, so it is not "unreadable"; it has
+/// no schema_version to check, so it must count as a mismatch.
+fn artifact_json_without_raw_signals(video_id: &str) -> String {
+    format!(
+        r#"{{"video_id":"{video_id}","source_url":"https://example/{video_id}",
+"duration_s":1.0,"language_detected":"en","transcribed_at":"2026-07-13T00:00:00Z",
+"fetcher":"ytdlp","transcript_source":"whisper-rs","model":"test"}}"#
+    )
+}
+
+/// Write a `.txt` plus arbitrary `.json` bytes at the sharded path — for
+/// artifacts whose JSON is deliberately not TranscriptMetadata.
+fn write_raw_artifacts(root: &std::path::Path, video_id: &str, json: &str) {
+    let shard = &video_id[video_id.len() - 2..];
+    let dir = root.join(shard);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{video_id}.txt")), "text").unwrap();
+    std::fs::write(dir.join(format!("{video_id}.json")), json).unwrap();
 }
 
 fn write_artifacts(root: &std::path::Path, video_id: &str, txt: bool, json: Option<&str>) {
@@ -441,6 +599,57 @@ fn verify_all_green_is_pause_safe_and_exits_0() {
         .assert()
         .success()
         .stdout(contains("pause-safe: YES"));
+}
+
+#[test]
+fn verify_separates_corrupt_json_from_absent_raw_signals() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = tmp.path().join("state.sqlite");
+    {
+        let _s = ddp_transcribe::state::Store::open(&db).unwrap();
+    }
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    for id in ["v_corrupt", "v_norawsig"] {
+        conn.execute(
+            "INSERT INTO videos (video_id, source_url, canonical, status, first_seen_at, updated_at)
+             VALUES (?1, 'https://example/x', 1, 'succeeded', 100, 100)",
+            rusqlite::params![id],
+        )
+        .unwrap();
+    }
+    let transcripts = tmp.path().join("transcripts");
+    // Present but unparseable → unreadable (a parse fault, not data loss).
+    write_raw_artifacts(&transcripts, "v_corrupt", "{not valid json");
+    // Parses, but carries no raw_signals → schema-version mismatch.
+    write_raw_artifacts(
+        &transcripts,
+        "v_norawsig",
+        &artifact_json_without_raw_signals("v_norawsig"),
+    );
+
+    let out = Command::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .args([
+            "--state-db",
+            db.to_str().unwrap(),
+            "--transcripts",
+            transcripts.to_str().unwrap(),
+            "status",
+            "--verify",
+            "--json",
+        ])
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let ver = &v["verify"];
+    assert_eq!(ver["artifacts_missing"], 0);
+    assert_eq!(ver["unreadable_artifacts"], 1);
+    assert_eq!(ver["sample_unreadable"][0], "v_corrupt");
+    assert_eq!(ver["schema_version_mismatches"], 1);
+    assert_eq!(ver["sample_mismatched"][0], "v_norawsig");
 }
 
 #[test]

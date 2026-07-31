@@ -350,11 +350,7 @@ pub async fn dispatch(cli: Cli) -> Result<CommandExit> {
                     print!("{}", status::render_video_detail(&report));
                 }
             } else if let Some(id) = respondent_id {
-                let report = status::RespondentReport {
-                    respondent: store
-                        .respondent_summary(&id)
-                        .context("respondent summary")?,
-                };
+                let report = status::build_respondent_report(&store, &id)?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&report)?);
                 } else {

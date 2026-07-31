@@ -293,6 +293,57 @@ pub(crate) struct TranscribeRequest {
     pub reply: oneshot::Sender<Result<TranscribeOutput, TranscribeError>>,
 }
 
+/// THE single exit from the worker loop: every reply — success and failure
+/// alike — leaves through here.
+///
+/// The worker used to write `let _ = req.reply.send(...)` at seven sites,
+/// so a caller that vanished before the worker replied cost a whole
+/// transcription with no trace at all. A closed reply channel is *expected*
+/// under caller-side cancellation (0012: `CancelOnDrop` fires, the future is
+/// dropped) and suspicious otherwise, and the two are only tellable apart
+/// from the log line — hence `cancel_flag_set`, which reads the request's
+/// own flag (the guard sets it on drop) rather than guessing.
+///
+/// Identity is a worker-local `request_seq`, not a video id: a
+/// `TranscribeRequest` carries no id, and the operator ruling (Epic 5b
+/// disposition matrix, E15) chose logging without one over widening the
+/// engine API to thread it down. Correlate by seq + elapsed against the
+/// pipeline's own per-video lines.
+///
+/// A *successful* send is the ordinary path and logs nothing — the warn
+/// line means "this result was thrown away", which is the only event here
+/// an operator can act on. `result_kind` is a variant label; transcript
+/// text never reaches the log.
+fn reply_and_log(
+    req: TranscribeRequest,
+    result: Result<TranscribeOutput, TranscribeError>,
+    request_seq: u64,
+    started: Instant,
+) {
+    let result_kind = match &result {
+        Ok(_) => "ok",
+        Err(TranscribeError::Cancelled) => "cancelled",
+        Err(TranscribeError::Timeout { .. }) => "timeout",
+        Err(TranscribeError::Failed { .. }) => "failed",
+        Err(TranscribeError::EmptyOutput) => "empty_output",
+        Err(TranscribeError::AudioDecode { .. }) => "audio_decode",
+        Err(TranscribeError::Bug { .. }) => "bug",
+    };
+    let cancel_flag_set = req.cancel.load(std::sync::atomic::Ordering::Relaxed);
+    // Elapsed since this request began processing (dequeue), not since it
+    // was submitted: the worker cannot see the caller's queue wait.
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    if req.reply.send(result).is_err() {
+        tracing::warn!(
+            request_seq,
+            elapsed_ms,
+            result_kind,
+            cancel_flag_set,
+            "transcribe reply channel closed; result dropped"
+        );
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum WhisperInitError {
     #[error("loading whisper model from {path}: {detail}")]
@@ -884,7 +935,16 @@ impl WhisperEngine {
                     .unwrap_or("unknown")
                     .to_string();
 
+                // Worker-local request counter + per-request start instant:
+                // the identity and the clock behind every `reply_and_log`
+                // line (E15). Monotonic within one worker thread; it is not
+                // a global id and never leaves this loop.
+                let mut request_seq: u64 = 0;
+
                 while let Some(req) = request_rx.blocking_recv() {
+                    request_seq += 1;
+                    let started = Instant::now();
+
                     // Lazy lang_state allocation per T2 perf-tweaks. The
                     // `WhisperContext::create_state` call is non-trivial (a
                     // second mel encoder + decoder context on the same
@@ -905,12 +965,17 @@ impl WhisperEngine {
                                 // src/errors.rs; Epic 3's failure-classification
                                 // taxonomy will reclassify). Worker continues
                                 // so subsequent non-opt-in requests still work.
-                                let _ = req.reply.send(Err(TranscribeError::Bug {
-                                    detail: format!(
-                                        "lazy lang_state create_state failure \
-                                         (should be classified, not Bug, in Epic 3): {e}"
-                                    ),
-                                }));
+                                reply_and_log(
+                                    req,
+                                    Err(TranscribeError::Bug {
+                                        detail: format!(
+                                            "lazy lang_state create_state failure \
+                                             (should be classified, not Bug, in Epic 3): {e}"
+                                        ),
+                                    }),
+                                    request_seq,
+                                    started,
+                                );
                                 continue;
                             }
                         }
@@ -924,7 +989,7 @@ impl WhisperEngine {
                     if req.cancel.load(std::sync::atomic::Ordering::Relaxed)
                         || Instant::now() >= req.deadline
                     {
-                        let _ = req.reply.send(Err(TranscribeError::Cancelled));
+                        reply_and_log(req, Err(TranscribeError::Cancelled), request_seq, started);
                         continue;
                     }
 
@@ -1098,7 +1163,7 @@ impl WhisperEngine {
                         // path; whisper.cpp's abort_callback won't fire here
                         // (state.full not yet called) so this is safe.
                         drop(unsafe { Box::from_raw(abort_user_data) });
-                        let _ = req.reply.send(Err(TranscribeError::Cancelled));
+                        reply_and_log(req, Err(TranscribeError::Cancelled), request_seq, started);
                         continue;
                     }
 
@@ -1119,12 +1184,22 @@ impl WhisperEngine {
 
                     match run_result {
                         Err(_) if was_cancelled => {
-                            let _ = req.reply.send(Err(TranscribeError::Cancelled));
+                            reply_and_log(
+                                req,
+                                Err(TranscribeError::Cancelled),
+                                request_seq,
+                                started,
+                            );
                         }
                         Err(e) => {
-                            let _ = req.reply.send(Err(TranscribeError::Bug {
-                                detail: format!("whisper_full failed: {e}"),
-                            }));
+                            reply_and_log(
+                                req,
+                                Err(TranscribeError::Bug {
+                                    detail: format!("whisper_full failed: {e}"),
+                                }),
+                                request_seq,
+                                started,
+                            );
                         }
                         Ok(()) => {
                             // Extract text and raw signals in one pass over
@@ -1162,18 +1237,28 @@ impl WhisperEngine {
                             let segments = match extract_segments(&state) {
                                 Ok(segs) => segs,
                                 Err(detail) => {
-                                    let _ = req.reply.send(Err(TranscribeError::Bug { detail }));
+                                    reply_and_log(
+                                        req,
+                                        Err(TranscribeError::Bug { detail }),
+                                        request_seq,
+                                        started,
+                                    );
                                     continue;
                                 }
                             };
 
-                            let _ = req.reply.send(Ok(TranscribeOutput {
-                                text,
-                                language,
-                                lang_probs, // Some(paired) when opt-in, None otherwise
-                                segments,
-                                model_id: model_id.clone(),
-                            }));
+                            reply_and_log(
+                                req,
+                                Ok(TranscribeOutput {
+                                    text,
+                                    language,
+                                    lang_probs, // Some(paired) when opt-in, None otherwise
+                                    segments,
+                                    model_id: model_id.clone(),
+                                }),
+                                request_seq,
+                                started,
+                            );
                         }
                     }
                 }
@@ -1737,5 +1822,48 @@ whisper_backend_init_gpu: found GPU device 0: CUDA0 (type: 1, cnt: 0)
             log.is_empty(),
             "a fresh capture phase must not inherit earlier lines: {log:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod reply_path_tests {
+    use super::*;
+
+    fn request() -> (
+        TranscribeRequest,
+        oneshot::Receiver<Result<TranscribeOutput, TranscribeError>>,
+    ) {
+        let (reply, rx) = oneshot::channel();
+        (
+            TranscribeRequest {
+                samples: Vec::new(),
+                config: PerCallConfig::default(),
+                cancel: Arc::new(AtomicBool::new(false)),
+                deadline: Instant::now() + Duration::from_secs(60),
+                reply,
+            },
+            rx,
+        )
+    }
+
+    /// The centralized reply path still delivers: routing all seven worker
+    /// replies through `reply_and_log` must not change what the caller gets.
+    #[test]
+    fn reply_and_log_delivers_to_a_live_caller() {
+        let (req, mut rx) = request();
+        reply_and_log(req, Err(TranscribeError::Cancelled), 1, Instant::now());
+        match rx.try_recv() {
+            Ok(Err(TranscribeError::Cancelled)) => {}
+            other => panic!("expected the Cancelled reply, got {other:?}"),
+        }
+    }
+
+    /// A caller that vanished first (0012's `CancelOnDrop` path, or an
+    /// unexplained drop) is logged, not a panic and not a lost worker.
+    #[test]
+    fn reply_and_log_survives_a_closed_reply_channel() {
+        let (req, rx) = request();
+        drop(rx);
+        reply_and_log(req, Err(TranscribeError::Cancelled), 2, Instant::now());
     }
 }
