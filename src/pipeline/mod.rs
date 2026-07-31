@@ -249,9 +249,9 @@ pub enum ProcessOutcome {
 /// `fetch_and_decode` converts without an explicit `.map_err`; the anyhow
 /// boundary (where a caller needs `anyhow::Result`) is crossed via the
 /// blanket `From<E: std::error::Error + Send + Sync + 'static> for
-/// anyhow::Error` impl, which does NOT attach context — required so
-/// `serial.rs`'s `downcast_ref::<FetchPhaseError>()` can recover the typed
-/// error from the anyhow chain.
+/// anyhow::Error` impl, which does NOT attach context. `serial.rs` recovers
+/// the typed error from that chain via `classify_fetch_phase_in_chain`,
+/// which walks it (E12) rather than downcasting the top-level error.
 #[derive(Debug, thiserror::Error)]
 pub enum FetchPhaseError {
     #[error(transparent)]

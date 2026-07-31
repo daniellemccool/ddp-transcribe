@@ -17,13 +17,19 @@ use crate::fetcher::VideoFetcher;
 use crate::state::{Claim, FailureRecordOutcome, Store};
 use crate::transcribe::Transcriber;
 
-// T18 swapped the Process dispatch arm to `run_pipelined`, so this helper is
-// no longer on the production path. It stays exercised by the integration
-// tests in `tests/pipeline_fakes/serial_tests.rs` (serial's behavioral
-// contract — retryable classification + StaleAfterSuccess — is part of the
-// helper-shared invariants documented in `mod.rs`), which reach it through
-// `pipeline`'s re-export. Retiring the helper or restoring a behind-a-flag
-// caller is a FOLLOWUPS item.
+/// **Non-production reference/test path.** Retained as the reference
+/// implementation of the claim → fetch+decode → transcribe+write loop,
+/// exercised by the integration tests in
+/// `tests/pipeline_fakes/serial_tests.rs`; production runs use the pipelined
+/// orchestrator ([`super::run_pipelined`]), which T18 wired into the
+/// `Process` dispatch arm. Serial's behavioral contract — retryable
+/// classification + `StaleAfterSuccess` — is part of the helper-shared
+/// invariants documented in `mod.rs`, and the tests reach this function
+/// through `pipeline`'s re-export.
+///
+/// Retirement is deferred (E12 ruling, operator, 2026-07-30) until this
+/// function's unique tests are mapped onto the pipelined / shared-helper
+/// suites — deleting it before then would drop coverage, not just code.
 pub async fn run_serial(
     store: &mut Store,
     fetcher: &dyn VideoFetcher,
@@ -66,25 +72,16 @@ pub async fn run_serial(
                     error = %e,
                     "video failed; classifying"
                 );
-                // Epic 3 T07: classify by downcasting to the typed
-                // FetchPhaseError (propagated un-contexted by process_one's
-                // `?` so the anyhow chain's root cause survives the
-                // downcast). A `None` here means the anyhow chain didn't
-                // originate from `fetch_and_decode` — i.e. a transcribe-side
-                // failure, handled by the nested TranscribeError chain-walk
-                // in the None arm below (T07 review fix: Bug-class
-                // transcribe errors must escalate, not silently downgrade
-                // to retryable).
-                //
-                // Tripwire: this downcast relies on the fetch path never
-                // wrapping FetchPhaseError in `.context()`. If a future edit
-                // adds context on that path, `downcast_ref` silently misses
-                // and routing falls through to the TranscribeOther
-                // catch-all below — chain-walk like the transcribe side
-                // (`e.chain().find_map(...)`) if that ever happens.
-                let verdict = e
-                    .downcast_ref::<FetchPhaseError>()
-                    .map(|fe| classify_fetch_phase(fe, &opts.classification));
+                // Epic 3 T07: classify by recovering the typed
+                // FetchPhaseError from the anyhow chain (E12: a chain WALK,
+                // symmetric with the transcribe-side `find_map` below — see
+                // `classify_fetch_phase_in_chain`). A `None` here means the
+                // chain didn't originate from `fetch_and_decode` — i.e. a
+                // transcribe-side failure, handled by the nested
+                // TranscribeError chain-walk in the None arm below (T07
+                // review fix: Bug-class transcribe errors must escalate, not
+                // silently downgrade to retryable).
+                let verdict = classify_fetch_phase_in_chain(&e, &opts.classification);
                 match verdict {
                     Some(ClassifiedFailure::Unavailable { label, ctx }) => {
                         let changed = store
@@ -191,6 +188,36 @@ pub async fn run_serial(
     }
 
     Ok(stats)
+}
+
+/// Recover a typed [`FetchPhaseError`] from an anyhow chain and classify it;
+/// `None` when the chain carries none (i.e. a transcribe-side failure, which
+/// `run_serial` routes through its own `TranscribeError` chain-walk).
+///
+/// E12 ruling (operator, 2026-07-30). This used to be a top-level
+/// `e.downcast_ref::<FetchPhaseError>()`, guarded by a tripwire comment
+/// warning that `.context(...)` on the fetch path would break it — an
+/// asymmetry with the transcribe side's `e.chain().find_map(...)`. Two
+/// facts, both established while closing the ruling:
+///
+/// - The `.context()` half of the worry was unfounded: `anyhow::Error`'s own
+///   `downcast_ref` already searches through its `Context` wrappers, to any
+///   depth. Zero, one and two context layers all resolved before this change.
+/// - The asymmetry was real anyway. `downcast_ref` understands anyhow's
+///   wrappers and nothing else, so a `FetchPhaseError` reachable only as some
+///   other error's `#[source]` was invisible to it. `chain()` walks
+///   `std::error::Error::source()` and finds both shapes.
+///
+/// A miss here is silent and consequential: the verdict falls through to the
+/// `TranscribeOther` catch-all, turning a terminal write-off into a retryable
+/// requeue. Chain-walking closes that whole class rather than one instance.
+fn classify_fetch_phase_in_chain(
+    e: &anyhow::Error,
+    table: &crate::classification::ClassificationTable,
+) -> Option<ClassifiedFailure> {
+    e.chain()
+        .find_map(|cause| cause.downcast_ref::<FetchPhaseError>())
+        .map(|fe| classify_fetch_phase(fe, table))
 }
 
 /// Serial-path `record_fetch_failure` dispatch + local-stats increment.
@@ -332,6 +359,88 @@ mod tests {
     fn silence_wav() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/audio/silence_16khz_mono.wav")
+    }
+
+    /// A `FetchPhaseError` reachable only as another error's `source` — the
+    /// case the top-level `downcast_ref` genuinely missed. `anyhow`'s own
+    /// `downcast_ref` understands its `Context` wrappers (see the test
+    /// below), but it knows nothing about a third-party error that carries
+    /// a `FetchPhaseError` as `#[source]`; only a chain walk finds that.
+    #[derive(Debug, thiserror::Error)]
+    #[error("phase 1 failed for {video_id}")]
+    struct SourceWrapped {
+        video_id: &'static str,
+        #[source]
+        source: FetchPhaseError,
+    }
+
+    /// E12 ruling (operator, 2026-07-30): the fetch-side classification must
+    /// walk the error chain, symmetric with the transcribe-side
+    /// `e.chain().find_map(...)`, so a `FetchPhaseError` that a future edit
+    /// buries under a wrapper still classifies correctly. The failure mode
+    /// being closed is invisible in production: the row still fails, but
+    /// with the `TranscribeOther` catch-all kind instead of its real
+    /// classification — a terminal write-off silently downgraded to a
+    /// retryable requeue.
+    ///
+    /// Zero, one and two `.context(...)` layers must all classify
+    /// identically (the ruling's prescribed cases), and so must a
+    /// `#[source]`-nested error.
+    #[test]
+    fn fetch_phase_classification_survives_context_layers() {
+        use crate::errors::FetchError;
+
+        let table =
+            crate::classification::ClassificationTable::compiled_default().expect("default table");
+        // A terminal write-off class: the verdict ARM differs from the
+        // `TranscribeOther` retryable the miss used to produce, so a
+        // regression changes the outcome, not just the label.
+        let typed = || {
+            FetchPhaseError::Fetch(FetchError::ToolFailed {
+                tool: "yt-dlp".to_string(),
+                exit_code: 1,
+                signal: None,
+                stderr_excerpt: "ERROR: Your IP address is blocked from accessing this post"
+                    .to_string(),
+            })
+        };
+        let mk = || anyhow::Error::from(typed());
+        let cases = [
+            ("no context", mk()),
+            ("one context layer", mk().context("acquiring audio")),
+            (
+                "two context layers",
+                mk().context("acquiring audio").context("processing vid_a"),
+            ),
+            // The discriminating case: only a chain walk reaches this one.
+            (
+                "source-nested under a context layer",
+                anyhow::Error::from(SourceWrapped {
+                    video_id: "vid_a",
+                    source: typed(),
+                })
+                .context("processing vid_a"),
+            ),
+        ];
+        for (label, err) in cases {
+            match classify_fetch_phase_in_chain(&err, &table) {
+                Some(ClassifiedFailure::Unavailable { label: got, .. }) => {
+                    assert_eq!(got, "IpBlockedMessage", "{label}");
+                }
+                other => panic!("{label}: expected Unavailable(IpBlockedMessage), got {other:?}"),
+            }
+        }
+
+        // The `None` contract is unchanged: a chain with no FetchPhaseError
+        // anywhere in it still returns None, so `run_serial`'s transcribe-side
+        // arm keeps receiving the errors it owns.
+        let transcribe_side = anyhow::Error::from(TranscribeError::EmptyOutput)
+            .context("transcribing vid_a")
+            .context("processing vid_a");
+        assert!(
+            classify_fetch_phase_in_chain(&transcribe_side, &table).is_none(),
+            "a transcribe-side chain must not be claimed by the fetch classifier"
+        );
     }
 
     /// T5-review carry-forward: `process_one` MUST surface a 0-row
