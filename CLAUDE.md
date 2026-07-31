@@ -2,7 +2,9 @@
 
 ## Project
 
-Video-transcription pipeline for data-donation studies (formerly `uu-tiktok`; historical docs/ADRs use the old name and `UU_TIKTOK_*` env prefix). Ingests TikTok DDP (Data Donation Programme) exports — TikTok is the currently supported source — fetches the donor's watched videos, and transcribes the audio with whisper.cpp. Current state on `main`: Plan B Epics 1–2 complete (embedded `whisper-rs` + raw confidence signals + CUDA bake; state machine + pipelined orchestrator). Plan B Epic 3 (failure classification + operator-driven requeue) is planned; artifacts under `docs/superpowers/plans/`.
+Video-transcription pipeline for data-donation studies (formerly `uu-tiktok`; historical docs/ADRs use the old name and `UU_TIKTOK_*` env prefix). Ingests TikTok DDP (Data Donation Programme) exports — TikTok is the currently supported source — fetches the donor's watched videos, and transcribes the audio with whisper.cpp. Current state on `main`: Plan B complete (Epics 1–5b), released as v0.4.0; the live campaign workspace stays pinned on v0.3.0 (ADR-0043 promotion model). Next arc: production ops (`docs/superpowers/plans/PRODUCTION-OPS-KICKOFF-PROMPT.md`); remaining work is trigger-gated in `docs/FOLLOWUPS.md` (production-run / Plan C / cross-epic groups).
+
+Deployment/ops live in a sibling repo: `~/src/d3i/d3i-infra/researchcloud-ddp-transcribe` owns the SRC catalog item (`pipeline_git_ref`), sync/yoda scripts, and provisioning; campaign-VM operational work usually spans both repos. Pipeline-side runbook: `docs/operations/src-vm.md`.
 
 ## Working disciplines (project-wide ADRs)
 
@@ -24,8 +26,9 @@ Feature-derived ADRs (0004, 0009–0017, plus Epic 2+ feature ADRs) live on feat
 ## Default working patterns
 
 - **Executing plans:** `superpowers:subagent-driven-development` (in-session) or `superpowers:executing-plans` (multi-session).
-- **Before claiming done:** `superpowers:verification-before-completion`. Run `cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test --features test-helpers -- --test-threads=1`. The `--features test-helpers` flag exposes library items needed by integration tests (per 0005). **`--test-threads=1` is mandatory on the operator's dev workstation — multi-threaded `cargo test` overheats the machine.** Secondary benefits: deterministic ordering for state-machine tests with per-test fixture DBs, and avoiding GPU-contention noise across the whisper-engine integration tests. Do not drop `--test-threads=1` for "faster" runs.
-- **Parallel work / conflict isolation:** `superpowers:using-git-worktrees`.
+- **Before claiming done:** `superpowers:verification-before-completion`. Run `cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test --features test-helpers -- --test-threads=1 && cargo build --release` (the release build gates thin-LTO per ADR-0045). The `--features test-helpers` flag exposes library items needed by integration tests (per 0005). **`--test-threads=1` is mandatory on the operator's dev workstation — multi-threaded `cargo test` overheats the machine.** Secondary benefits: deterministic ordering for state-machine tests with per-test fixture DBs, and avoiding GPU-contention noise across the whisper-engine integration tests. Do not drop `--test-threads=1` for "faster" runs.
+- **Parallel work / conflict isolation:** `superpowers:using-git-worktrees`. `EnterWorktree` auto-names the branch `worktree-<name>`; when a plan mandates an exact branch name, rename with `git branch -m` immediately after creation.
+- **No CUDA locally:** this workstation has no CUDA toolkit and a Kepler-only GPU — `cargo build --release --features cuda` and GPU smokes CANNOT run here; they run on the SRC workspace (see `docs/operations/src-vm.md`).
 - **Code review:** `superpowers:requesting-code-review` / `superpowers:receiving-code-review`; the three-tier protocol per 0018.
 - **Debugging:** `superpowers:systematic-debugging`.
 - **Onboarding / system orientation:** start at `docs/reference/architecture/index.md` — the architecture doc set (index + four lifecycle-stage deepdives).

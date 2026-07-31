@@ -11,6 +11,10 @@ checks:
       grep: 'read_to_end'
       in: ["src/process.rs"]
       expect: absent
+    - desc: no whole-output child capture (equivalent grow-with-output reads)
+      grep: 'wait_with_output|\.output\(\)'
+      in: ["src/process.rs"]
+      expect: absent
 ---
 
 # Subprocess output capture is bounded by construction

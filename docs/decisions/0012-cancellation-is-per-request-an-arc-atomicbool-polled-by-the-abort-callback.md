@@ -20,7 +20,7 @@ is never shared across requests and never lives on the engine struct.
 
 - Review rejects any engine-level or shared cancellation flag: a late timeout from request A must be structurally unable to cancel request B, and reset-per-call does not close that race.
 - Timeout enforcement is the same single callback polling the deadline — no separate timer task.
-- On abort, whisper-rs unwinds from `whisper_full_with_state` and the worker replies `Err(TranscribeError::Cancelled)`. Dropping the request future is itself a first-class cancel: the `CancelOnDrop` guard flips the flag on drop and the worker treats a closed reply channel as an already-cancelled caller — keep the guard; don't bypass it.
+- On abort, `state.full()` returns an ordinary `Err` (no unwind), and the worker attributes it to `Err(TranscribeError::Cancelled)` only when the callback actually fired: the callback records its firing in a per-request `abort_fired: Arc<AtomicBool>`, so an unrelated inference `Err` landing just after the deadline is not misclassified as a cancel — keep the attribution on `abort_fired`, never on re-checking the clock. Dropping the request future is itself a first-class cancel: the `CancelOnDrop` guard flips the flag on drop and the worker treats a closed reply channel as an already-cancelled caller — keep the guard; don't bypass it.
 - The orchestrator's CancellationToken propagates into this flag (via the select + abort-callback composition); this record owns the per-request half.
 
 ## Why

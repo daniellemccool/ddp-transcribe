@@ -7,6 +7,7 @@ applies_to:
     - src/state/mod.rs
     - src/cli.rs
     - src/commands.rs
+    - tests/requeue_failures.rs
 priority: invariant
 ---
 
@@ -14,7 +15,8 @@ priority: invariant
 
 ## Decision
 
-ADR-0036 remains the normal retry authority. An operator may explicitly
+In-pipeline failure-time requeue (`record_fetch_failure`) remains the normal
+retry authority. An operator may explicitly
 restore failed rows to pending after an external condition has materially
 changed. This is a forensic, default-deny override of eligibility, not an
 alternate classifier or retry scheduler; the subsequent fetch remains the

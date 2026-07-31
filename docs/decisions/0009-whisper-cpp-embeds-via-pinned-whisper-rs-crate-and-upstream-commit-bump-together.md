@@ -5,7 +5,7 @@ category: Whisper engine
 applies_to:
     - Cargo.toml
     - src/transcribe.rs
-priority: default
+priority: invariant
 ---
 
 # whisper.cpp embeds via pinned whisper-rs; crate and upstream commit bump together

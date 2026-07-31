@@ -19,8 +19,7 @@ fresh controller from the spec plus the close-out doc.
 
 ## Guidance
 
-- Every dispatch brief in a plan includes the report format and cap (with allowance for genuinely unusual cases); review rejects briefs that let full implementation transcripts flow back to the orchestrator.
-- Phase boundaries are planned, not improvised: the plan names them, and the close-out doc is the only controller state that crosses one.
+- Every dispatch brief in a plan includes the structured report format and the ≤250-word cap (with allowance for genuinely unusual cases), and plans name their phase boundaries up front — the controller ends its session at each one, leaving the ≤1-page close-out doc as the only state that crosses; review rejects briefs that let full implementation transcripts flow back, and plans that improvise phase boundaries.
 - The discipline lives in the briefs, not a hook — a truncating hook would mangle the unusual cases that legitimately need more words.
 
 ## Why

@@ -12,6 +12,7 @@ transcripts/
 state.sqlite
 state.sqlite-wal
 state.sqlite-shm
+ddp-run-export.sqlite
 manifest.parquet
 *.tmp
 
