@@ -32,7 +32,13 @@ External tools on `PATH`:
 whisper.cpp is **embedded** (`whisper-rs`), not shelled out to — there is no
 `whisper-cli` on the runtime path. You still supply a model file.
 
-Plus a Rust toolchain (stable; edition 2021).
+Build-time dependencies (whisper.cpp is compiled from source by
+`whisper-rs-sys` on every build, CPU or GPU):
+
+- a Rust toolchain (stable; edition 2021)
+- `cmake` (drives the vendored whisper.cpp build)
+- `clang` (bindgen needs `libclang.so` to generate the C bindings — the
+  build fails with `Unable to find libclang` without it)
 
 ### One-time setup
 
@@ -48,6 +54,39 @@ Download the `tiny.en` whisper model (~75 MB) to `./models/`:
 cargo build            # dev
 cargo build --release  # needed for the e2e test against real tools
 ```
+
+### GPU (CUDA) build
+
+```sh
+cargo build --release --features cuda
+```
+
+Additional prerequisites: the CUDA toolkit (`nvcc`) and an NVIDIA GPU with
+compute capability ≥ 7.5 (CUDA 13 dropped older architectures). Notes from a
+verified Arch Linux setup (RTX 2080, CUDA 13.3, 2026-08):
+
+- packages: `cuda cmake clang` (plus `yt-dlp` and `rustup` from the base
+  prerequisites); the `cuda` package pulls its own compatible host compiler
+  (`gcc15`)
+- `nvcc` lives in `/opt/cuda/bin` — on `PATH` via `/etc/profile.d/cuda.sh`
+  after a fresh shell, or set it explicitly for the build
+- `nvcc` rejects a too-new system gcc (13.3 supports ≤ gcc 15): set
+  `CUDAHOSTCXX=/usr/bin/g++-15`
+- pin the kernel architectures to your card with `CUDAARCHS` (e.g. `75` for
+  Turing) — skipping this makes cmake probe the GPU at build time, which
+  fails in environments where the build host can't see the device
+
+All together:
+
+```sh
+PATH=/opt/cuda/bin:$PATH CUDAHOSTCXX=/usr/bin/g++-15 CUDAARCHS=75 \
+  cargo build --release --features cuda
+```
+
+A CUDA build **refuses to run on CPU** (ADR-0013): startup must log
+`backend="GPU" device="CUDA0"`; if whisper.cpp reports no GPU, the engine
+aborts instead of silently running ~100× slower. First full CUDA compile of
+the whisper.cpp kernels takes ~8 minutes; warm rebuilds are ~2.
 
 ### Minimal end-to-end run
 
