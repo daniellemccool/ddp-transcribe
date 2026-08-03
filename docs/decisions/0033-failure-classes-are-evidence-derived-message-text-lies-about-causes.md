@@ -8,7 +8,7 @@ applies_to:
 priority: invariant
 ---
 
-# Failure classes are evidence-derived; message text lies about causes
+# Classify on evidence, never message text
 
 ## Decision
 

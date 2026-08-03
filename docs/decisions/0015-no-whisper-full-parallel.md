@@ -12,7 +12,7 @@ checks:
       expect: absent
 ---
 
-# No whisper_full_parallel
+# Never call whisper_full_parallel
 
 ## Decision
 

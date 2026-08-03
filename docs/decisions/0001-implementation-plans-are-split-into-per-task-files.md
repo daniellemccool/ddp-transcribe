@@ -7,7 +7,7 @@ applies_to:
 priority: default
 ---
 
-# Implementation plans are split into per-task files
+# Split plans per task
 
 ## Decision
 

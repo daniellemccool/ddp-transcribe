@@ -7,7 +7,7 @@ applies_to:
 priority: invariant
 ---
 
-# Cancellation is per-request: an Arc<AtomicBool> polled by the abort callback
+# Cancel per-request, never engine-wide
 
 ## Decision
 

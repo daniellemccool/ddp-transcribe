@@ -9,7 +9,7 @@ applies_to:
 priority: invariant
 ---
 
-# Artifacts are durable on disk before mark_succeeded
+# Write artifacts before mark_succeeded
 
 ## Decision
 

@@ -7,7 +7,7 @@ applies_to:
 priority: default
 ---
 
-# Engine API stays stable across single- and multi-state internals
+# Keep the engine API stable
 
 ## Decision
 

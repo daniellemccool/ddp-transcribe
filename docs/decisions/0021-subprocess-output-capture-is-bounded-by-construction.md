@@ -17,7 +17,7 @@ checks:
       expect: absent
 ---
 
-# Subprocess output capture is bounded by construction
+# Bound subprocess capture
 
 ## Decision
 

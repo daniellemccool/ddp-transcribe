@@ -9,7 +9,7 @@ companions:
     - tests/whisper_engine_init.rs
 ---
 
-# Startup asserts the GPU backend and logs the device name
+# Assert the GPU backend at startup
 
 ## Decision
 

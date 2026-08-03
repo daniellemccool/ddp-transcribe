@@ -8,7 +8,7 @@ applies_to:
 priority: default
 ---
 
-# Test discipline is tiered: batch test-first for plan-prescribed code, real TDD for deviations
+# Reserve real TDD for deviations
 
 ## Decision
 

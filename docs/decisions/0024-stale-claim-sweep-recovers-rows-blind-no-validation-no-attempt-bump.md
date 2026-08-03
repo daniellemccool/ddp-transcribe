@@ -10,7 +10,7 @@ companions:
     - tests/state_sweep.rs
 ---
 
-# Stale-claim sweep recovers rows blind: no validation, no attempt bump
+# Sweep stale claims blind, no bump
 
 ## Decision
 

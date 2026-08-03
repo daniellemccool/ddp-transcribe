@@ -15,7 +15,7 @@ checks:
       expect: absent
 ---
 
-# The crate is a fat library with a thin binary behind a minimal public facade
+# Keep the binary thin, library fat
 
 ## Decision
 

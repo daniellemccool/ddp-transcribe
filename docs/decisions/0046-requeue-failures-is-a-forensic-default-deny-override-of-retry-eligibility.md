@@ -11,7 +11,7 @@ applies_to:
 priority: invariant
 ---
 
-# requeue-failures is a forensic default-deny override of retry eligibility
+# Default-deny requeue-failures
 
 ## Decision
 

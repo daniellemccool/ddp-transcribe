@@ -13,7 +13,7 @@ companions:
     - tests/recompute_window.rs
 ---
 
-# Analysis window is computed at ingest; recompute-window is the only flag mutator
+# Move in_window only via recompute-window
 
 ## Decision
 

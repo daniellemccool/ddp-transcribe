@@ -8,7 +8,7 @@ applies_to:
 priority: invariant
 ---
 
-# Production deployments build pinned release tags; promotion is an explicit tag-and-bump
+# Deploy only pinned release tags
 
 ## Decision
 

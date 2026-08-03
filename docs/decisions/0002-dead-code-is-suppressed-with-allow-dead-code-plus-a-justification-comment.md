@@ -7,7 +7,7 @@ applies_to:
 priority: default
 ---
 
-# Dead code is suppressed with #[allow(dead_code)] plus a justification comment
+# Justify every allow(dead_code)
 
 ## Decision
 

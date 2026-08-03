@@ -10,7 +10,7 @@ companions:
     - tests/status.rs
 ---
 
-# status is the read-only operator surface; the archived done-contract lives behind --verify
+# Keep status strictly read-only
 
 ## Decision
 
