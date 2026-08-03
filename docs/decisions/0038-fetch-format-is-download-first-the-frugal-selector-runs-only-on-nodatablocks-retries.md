@@ -9,7 +9,7 @@ applies_to:
 priority: default
 ---
 
-# Fetch format is download-first; the frugal selector runs only on NoDataBlocks retries
+# Keep frugal for NoDataBlocks only
 
 ## Decision
 

@@ -8,7 +8,7 @@ applies_to:
 priority: default
 ---
 
-# Transcript output shards by the last two digits of the video id
+# Shard by the last two id digits
 
 ## Decision
 

@@ -9,7 +9,7 @@ applies_to:
 priority: invariant
 ---
 
-# DDP watch-history timestamps are treated as UTC, documentary-only and empirically unresolved
+# Treat timestamps as UTC-assumed only
 
 ## Decision
 

@@ -7,7 +7,7 @@ applies_to:
 priority: default
 ---
 
-# raw_signals passes whisper confidence signals through raw
+# Pass confidence signals raw
 
 ## Decision
 

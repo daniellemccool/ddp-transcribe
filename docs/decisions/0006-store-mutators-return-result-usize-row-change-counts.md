@@ -7,7 +7,7 @@ applies_to:
 priority: default
 ---
 
-# Store mutators return Result<usize> row-change counts
+# Return row counts from mutators
 
 ## Decision
 

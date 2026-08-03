@@ -13,7 +13,7 @@ companions:
     - tests/state_schema_version.rs
 ---
 
-# Schema version hard-fails at Store::open; migration is an explicit CLI subcommand
+# Migrate only via the subcommand
 
 ## Decision
 

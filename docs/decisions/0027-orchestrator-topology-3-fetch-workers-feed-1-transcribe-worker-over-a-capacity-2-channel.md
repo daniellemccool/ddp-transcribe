@@ -8,7 +8,7 @@ applies_to:
 priority: default
 ---
 
-# Orchestrator topology: 3 fetch workers feed 1 transcribe worker over a capacity-2 channel
+# Run 3 fetchers into 1 transcriber
 
 ## Decision
 

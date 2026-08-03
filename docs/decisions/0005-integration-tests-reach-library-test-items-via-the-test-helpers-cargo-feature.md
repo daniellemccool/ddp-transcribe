@@ -11,7 +11,7 @@ applies_to:
 priority: default
 ---
 
-# Integration tests reach library test items via the test-helpers Cargo feature
+# Gate test items via test-helpers
 
 ## Decision
 

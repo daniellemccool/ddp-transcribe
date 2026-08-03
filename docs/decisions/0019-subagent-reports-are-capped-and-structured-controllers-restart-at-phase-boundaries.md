@@ -7,7 +7,7 @@ applies_to:
 priority: default
 ---
 
-# Subagent reports are capped and structured; controllers restart at phase boundaries
+# Cap reports, restart per phase
 
 ## Decision
 

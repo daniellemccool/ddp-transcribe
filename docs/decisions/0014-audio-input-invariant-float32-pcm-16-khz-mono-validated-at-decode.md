@@ -8,7 +8,7 @@ applies_to:
 priority: invariant
 ---
 
-# Audio input invariant: float32 PCM 16 kHz mono, validated at decode
+# Validate 16k mono f32 at decode
 
 ## Decision
 

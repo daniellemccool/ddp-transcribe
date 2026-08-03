@@ -7,7 +7,7 @@ applies_to:
 priority: default
 ---
 
-# Task reviews are three-tier; codex-advisor is called by the reviewer, never the orchestrator
+# Route codex via the reviewer
 
 ## Decision
 

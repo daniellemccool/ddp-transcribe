@@ -9,7 +9,7 @@ companions:
     - src/batch.rs
 ---
 
-# Classification is an operator-editable TOML table, snapshotted per batch
+# Snapshot the policy table per batch
 
 ## Decision
 

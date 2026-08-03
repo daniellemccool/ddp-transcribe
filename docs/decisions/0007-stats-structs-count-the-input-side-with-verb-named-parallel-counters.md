@@ -9,7 +9,7 @@ applies_to:
 priority: default
 ---
 
-# Stats structs count the input side, with verb-named parallel counters
+# Count the input side in stats
 
 ## Decision
 

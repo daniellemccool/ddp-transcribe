@@ -17,7 +17,7 @@ companions:
     - tests/e2e_real_tools.rs
 ---
 
-# Fetch-time metadata is captured raw-first; parsing is a replayable post-run step
+# Re-parse metadata, never re-fetch
 
 ## Decision
 

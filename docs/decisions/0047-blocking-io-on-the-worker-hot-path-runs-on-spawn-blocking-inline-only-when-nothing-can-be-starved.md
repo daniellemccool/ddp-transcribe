@@ -11,7 +11,7 @@ applies_to:
 priority: default
 ---
 
-# Blocking IO on the worker hot path runs on spawn_blocking; inline only when nothing can be starved
+# Wrap unbounded IO in spawn_blocking
 
 ## Decision
 

@@ -8,7 +8,7 @@ applies_to:
 priority: default
 ---
 
-# Workers drain and exit on claim_next None — no polling
+# Exit on claim_next None, never poll
 
 ## Decision
 

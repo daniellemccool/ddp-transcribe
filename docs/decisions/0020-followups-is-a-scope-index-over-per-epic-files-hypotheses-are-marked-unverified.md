@@ -11,7 +11,7 @@ applies_to:
 priority: default
 ---
 
-# FOLLOWUPS is a scope index over per-epic files; hypotheses are marked unverified
+# Mark hypotheses unverified
 
 ## Decision
 

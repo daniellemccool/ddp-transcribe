@@ -10,7 +10,7 @@ applies_to:
 priority: default
 ---
 
-# Retry is in-pipeline: capped failure-time requeue; the re-fetch is the liveness oracle
+# Let the re-fetch judge liveness
 
 ## Decision
 

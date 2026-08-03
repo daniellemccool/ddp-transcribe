@@ -10,7 +10,7 @@ companions:
     - src/classification.rs
 ---
 
-# Failure mutators take string kinds and keep the claim guard
+# Keep string kinds and claim guard
 
 ## Decision
 

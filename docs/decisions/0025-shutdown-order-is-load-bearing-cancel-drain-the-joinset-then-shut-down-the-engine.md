@@ -11,7 +11,7 @@ companions:
     - tests/pipeline_fakes/pipelined_tests.rs
 ---
 
-# Shutdown order is load-bearing: cancel, drain the JoinSet, then shut down the engine
+# Cancel, drain, then shut the engine
 
 ## Decision
 

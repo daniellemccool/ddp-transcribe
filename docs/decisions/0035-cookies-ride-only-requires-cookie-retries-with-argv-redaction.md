@@ -11,7 +11,7 @@ companions:
     - src/process.rs
 ---
 
-# Cookies ride only requires-cookie retries, with argv redaction
+# Send cookies on gated retries only
 
 ## Decision
 

@@ -8,7 +8,7 @@ applies_to:
 priority: invariant
 ---
 
-# whisper.cpp embeds via pinned whisper-rs; crate and upstream commit bump together
+# Bump whisper-rs with upstream
 
 ## Decision
 
