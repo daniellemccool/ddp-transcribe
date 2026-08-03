@@ -1,5 +1,10 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(adg:*)"
+    ]
+  },
   "hooks": {
     "SessionStart": [
       {
@@ -13,11 +18,7 @@
     ]
   },
   "enabledPlugins": {
-    "rust-analyzer-lsp@claude-plugins-official": true
-  },
-  "permissions": {
-    "allow": [
-      "Bash(adg:*)"
-    ]
+    "rust-analyzer-lsp@claude-plugins-official": true,
+    "write-adr@d3i-claude-skills": true
   }
 }
