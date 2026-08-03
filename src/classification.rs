@@ -202,13 +202,18 @@ fallback = { label = "YtDlpOther", disposition = "retryable" }
 [[rule]]
 # yt-dlp MISFIRE: TikTok returns this text for DELETED content. It is NOT
 # an IP issue (probe 10/10 dead; same-egress re-fetches cleared the IP —
-# ADR-0033 comment 2026-07-07). Census: 3,241 rows.
+# ADR-0033 comment 2026-07-07). Census: 3,241 rows. Re-verified 2026-08-03:
+# 12/12 dead by manual browser probe from a second (residential NL) egress.
 pattern = "Your IP address is blocked"
 label = "IpBlockedMessage"
 disposition = "terminal"
 
 [[rule]]
-# Probe-validated 5/5 dead (2026-07-06); census: 68 rows.
+# Probe-validated 5/5 dead (2026-07-06); census: 68 rows. Semantics refined
+# by manual browser probe 2026-08-03 (n=4, residential NL egress): all render
+# "not available in your region" — 10231 is a REGION LOCK, not removal.
+# Terminal remains correct for this study: the campaign VM and the operator
+# share the NL vantage, so no egress we own can reach these.
 pattern = "status code 10231"
 label = "VideoNotAvailable10231"
 disposition = "terminal"
@@ -217,7 +222,8 @@ disposition = "terminal"
 # Census 2026-07-07: 606/606 probe-dead, single exact message — the entire
 # former YtDlpOther population. Match the SPECIFIC code: unknown future
 # codes must fall through to the retryable fallback and earn terminal
-# status the way this one did.
+# status the way this one did. Re-verified 2026-08-03: 4/4 dead by manual
+# browser probe from a second (residential NL) egress.
 pattern = "status code 10240"
 label = "VideoNotAvailable10240"
 disposition = "terminal"
