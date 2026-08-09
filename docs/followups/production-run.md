@@ -207,6 +207,84 @@ events = sweep, none = writer loss.
 
 ---
 
+### `--impersonate` belongs in `build_yt_dlp_args` (with its own ADR)
+
+**Found in:** the 2026-08-06 TLS-fingerprint 403 incident
+(`docs/operations/incident-2026-08-06-tiktok-tls-403.md`) — TikTok's edge
+began rejecting non-browser TLS fingerprints on `www.tiktokv.com`, killing
+every fetch's unimpersonated first hop; 1.81M rows burned one attempt over
+60 unattended hours.
+**Disposition:** The live mitigation is deliberately ops-level: a yt-dlp
+user config (`~/.config/yt-dlp/config` → `--impersonate chrome`) on the
+campaign VM, installed by the deploy repo's `ytdlp` role, working because
+the pipeline never passes `--ignore-config`. That keeps the pinned v0.3.0
+binary untouched mid-campaign (ADR-0043), but it is config-by-side-effect:
+invisible in `batch_runs.params_json`, invisible in the argv the subprocess
+layer logs, and silently absent on any host where the file is missing.
+**Trigger to revisit:** the next pipeline release that touches the fetcher
+(or Plan C multi-engine work, whichever first).
+
+The proper fix is `--impersonate <target>` as an explicit member of
+`build_yt_dlp_args` (`src/fetcher/ytdlp.rs`), with an ADR settling: whether
+it is unconditional or flag-gated, what happens on hosts without curl_cffi
+(yt-dlp hard-errors on `--impersonate` with no target available — the
+desktop currently has none installed), and whether the target string is
+operator-configurable. Note the interaction with the deploy role's
+provisioning check ("Verify yt-dlp impersonation targets are available"),
+which currently verifies a capability nothing in the pipeline explicitly
+uses. When the argv change lands, retire the config file in the same deploy
+change — two sources of the same flag is drift waiting to happen.
+
+---
+
+### yt-dlp version drift vs the classification-pattern pins
+
+**Found in:** the same incident's probe work. ADR-0033 pins the table's
+patterns to yt-dlp 2026.03.17 stderr; the deploy role installs yt-dlp
+unpinned at provisioning time (`pipx install`, `creates:` guard, never
+upgraded). Live fleet observed 2026-08-09: campaign VM 2026.07.04, old VM
+2026.06.09 — three versions in play including the dev pin, none chosen on
+purpose.
+**Disposition:** No observed mismatch — the campaign classified correctly
+throughout, and the incident's `HTTP Error` messages matched the table on
+both VM versions. This is drift *exposure*, not drift damage.
+**Trigger to revisit:** any yt-dlp upgrade or reinstall on a fetch host, or
+the first unexplained growth of `YtDlpOther` (the fallback catching what a
+drifted message no longer matches — cheap census query, worth adding to the
+operator's periodic checks).
+
+Options when triggered, in ascending effort: re-verify the table against
+the new version's stderr corpus (0033's own procedure); pin the version in
+the deploy role so drift becomes a deliberate act; both.
+
+---
+
+### Mass-instant-failure circuit breaker for the fetch path
+
+**Found in:** the same incident. The pipeline spent ~60 hours failing every
+claim in ~250 ms at ~8/s — 1.81M attempts burned, sustained hammering of an
+endpoint that was rejecting us, and zero successes for two and a half days
+with no operator-visible signal (census only writes at run end; tracing
+output is operationally invisible per the `swept_stale` entry's tmux
+ruling).
+**Disposition:** Design task, not a quick patch — the right shape needs
+thought (consecutive-failure threshold vs success-rate window; per-worker
+vs run-global; halt vs exponential backoff vs park-and-continue; how it
+interacts with `claim_next`-None drain semantics per ADR-0026 and the
+cancel/drain shutdown protocol per ADR-0025).
+**Trigger to revisit:** before the next long unattended campaign stretch;
+at latest, the next epic touching the fetch workers.
+
+Sizing note from the incident: at wave rates, even a crude "abort the run
+after N consecutive retryable fetch failures with zero successes" (N in
+the hundreds) would have cut the burn from 1.81M attempts to noise, ended
+the run (making the census visible), and — combined with the deploy-side
+run-log persistence followup — alerted the operator ~2 days earlier. Per
+the standing operator ruling, prefer a DB-visible signal (the census row)
+over a log warning.
+
+---
+
 ### `swept_stale` event/recovered-set invariant is enforced only in debug builds
 
 **Found in:** Epic 5a Task 03 review (2026-07-30), parked by operator ruling

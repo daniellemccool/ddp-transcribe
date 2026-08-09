@@ -69,6 +69,9 @@ condition in the archive.
 - Campaign shakedown 2026-07-28: **Hypothesis (unverified):** concurrent-writer lost updates (one run's 13 successes reverted to pending, idempotently re-done) → instrumented in v0.3.2 (`31c18df`); adjudicate at the next `pending` bump via `swept_stale` events, then graduate to a fix task
 - Campaign shakedown 2026-07-28: `process` claims beyond `--max-videos` → same two-writer cluster, same v0.3.2 instrumentation; per-worker cap accounting diagnosis falsified 2026-07-29 (fix landed 9228c89, predates the observation)
 - Epic 5a T03 review: `swept_stale` event-set/recovered-set invariant is enforced only by `debug_assert_eq!` (compiled out of release) → next-campaign hardening; operator ruling: prefer a DB-visible signal over a log warn
+- 403-incident 2026-08-06: `--impersonate` belongs in `build_yt_dlp_args` with its own ADR (live mitigation is a VM-side yt-dlp user config — config-by-side-effect) → next fetcher-touching release
+- 403-incident 2026-08-06: yt-dlp version drift vs 0033 pattern pins (fleet runs 2026.06.09/2026.07.04 against a 2026.03.17 pin; no observed mismatch) → any yt-dlp upgrade/reinstall, or unexplained `YtDlpOther` growth
+- 403-incident 2026-08-06: mass-instant-failure circuit breaker for the fetch path (60 h × 8 fail/s unobserved; census only writes at run end) → before the next long unattended campaign stretch
 - Full production-run entries: [followups/production-run.md](followups/production-run.md)
 
 **Plan C (short-link resolution, multi-engine, storage scale)**

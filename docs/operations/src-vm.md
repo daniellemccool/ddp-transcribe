@@ -466,7 +466,12 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite --transcripts ~/ddp-work/tran
 ## Known VM facts (hard-won; do not re-derive)
 
 - **`IpBlockedMessage` means the video was removed.** The yt-dlp stderr text is a
-  misfire; the IP is fine (ADR-0033 comment, 2026-07-07).
+  misfire; the IP is fine (ADR-0033 comment, 2026-07-07). A *real* block looks
+  entirely different — zero successes cliff-onset, uniform retryable `HttpError`
+  on the first hop, `no metadata envelope captured` on every fetch, terminal
+  writes stopped — and never says "IP" at all: 60 h / 1.8M real rejections
+  produced that text zero times (signature table in
+  `incident-2026-08-06-tiktok-tls-403.md`).
 - The census persists in the state DB's `batch_runs` table with the active
   policy TOML — attrition documentation survives tmux.
 - `/etc/rsc/cron_webdav.sh` and `cron_user.sh` curl processes are SURF platform
@@ -490,3 +495,21 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite --transcripts ~/ddp-work/tran
 - Bulk file transfer off the volume: iRODS/Yoda per-file overhead dominates below
   ~1 MB/file; parallelize disjoint shard ranges or use a bundle transfer. 120k
   files single-stream ≈ 24 h (measured 2026-07-07).
+- **`ddp-transcribe --version` reporting `0.1.0` is the v0.3.0 signature, not an
+  anomaly.** The Cargo.toml bump-in-tag-commit discipline started at v0.3.1;
+  rc1 and v0.3.0 both compiled with the manifest still at 0.1.0. On the pinned
+  campaign binary, `0.1.0` is *confirmation* of v0.3.0. (v0.3.1+ report their
+  real versions.)
+- **The VM carries `~/.config/yt-dlp/config` → `--impersonate chrome` since
+  2026-08-09** — the mitigation for the 2026-08-06 TLS-fingerprint 403 wave
+  (`incident-2026-08-06-tiktok-tls-403.md`). Every yt-dlp invocation reads it
+  (the pipeline never passes `--ignore-config`). Deleting or losing this file
+  reverts the VM to 100% fetch failure with `HttpError` retryable parks —
+  and it is **hand-applied only**: a re-provision loses it until the deploy
+  repo's `ytdlp` role installs it (handoff section in the incident doc).
+- **`www.tiktokv.com` (the DDP share-redirect host) 403s non-browser TLS
+  fingerprints from SURF egresses** (both workspace IPs, verified 2026-08-09;
+  residential passes unimpersonated). An `HttpError` wave with
+  `no metadata envelope captured` on every fetch = the first hop is being
+  rejected again — probe with and without `--impersonate chrome` before
+  anything else, and do not let the run keep burning attempts.

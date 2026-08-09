@@ -261,6 +261,13 @@ label = "FfprobePostprocess"
 disposition = "retryable"
 
 [[rule]]
+# 2026-08-06..09: carried the campaign-wide 403 wave — 1,806,618 rows, one
+# attempt each, when TikTok began rejecting non-browser TLS fingerprints on
+# www.tiktokv.com (probe matrix + timeline:
+# docs/operations/incident-2026-08-06-tiktok-tls-403.md). Retryable proved
+# exactly right: zero terminal writes in 60 h of 100% failure, and the whole
+# wave recovered wholesale once fetches were impersonated (yt-dlp user
+# config on the VM). Message text said Forbidden; the cause was transport.
 pattern = "HTTP Error"
 label = "HttpError"
 disposition = "retryable"
