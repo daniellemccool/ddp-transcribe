@@ -1,12 +1,27 @@
 # Incident 2026-08-06 — campaign-wide 403 wave (TikTok TLS-fingerprint gate)
 
-**Status: RESOLVED 2026-08-09** (mitigation live on the campaign VM; pipeline
-run resumed after a clean 50-video validation batch). Written same-day from
-the live investigation; all timestamps UTC (DB epoch times). Read with
-ADR-0033 (evidence-derived classification — this incident is a textbook
-instance), ADR-0035 (cookie scoping — untouched here), and
-`docs/operations/cookied-runs.md` §2 (the retry arithmetic the recovery had
-to protect).
+**Status: SUPERSEDED 2026-08-11.** Resolved 2026-08-09, then the mitigation
+itself caused
+[incident 2026-08-10](incident-2026-08-10-tiktok-waf-impersonation-block.md):
+TikTok's Akamai WAF began serving a block page to the impersonated
+fingerprint this document told yt-dlp to use. **The `--impersonate chrome`
+config described below has been removed from the VM and must NOT be
+reinstated** — see the cancelled handoff in
+[Handoff](#handoff--d3i-infrastructure-researchcloud-ddp-transcribe-not-actioned-here).
+The 403 gate documented here is still live; it is now avoided by fetching the
+canonical `www.tiktok.com/@<user>/video/<id>/` URL instead of the
+`tiktokv.com` share URL.
+
+Written same-day from the live investigation; all timestamps UTC (DB epoch
+times). Read with ADR-0033 (evidence-derived classification — this incident is
+a textbook instance) and ADR-0035 (cookie scoping — untouched here).
+
+> **Dangling reference:** this document cites
+> `docs/operations/cookied-runs.md` §1 and §2 for the retry arithmetic the
+> recovery had to protect. That file exists in no git ref (checked
+> 2026-08-11, all branches). Either it is unpushed/local-only or the citation
+> is wrong. Verify sweep semantics against the v0.3.x binary before the
+> cookie mop-up rather than trusting either document, as §5 already warns.
 
 ## Summary
 
@@ -83,13 +98,30 @@ break), residential passes unimpersonated, impersonation clears it from the
 blocked IPs. The cliff onset at a precise second mid-run is a rule
 deployment signature, not a gradually-earned threshold.
 
+> **CORRECTION (2026-08-11): "non-browser TLS fingerprint" is too broad.**
+> On 2026-08-11, from the campaign VM, plain **`curl`** to the same share URL
+> completed the redirect chain with HTTP 200, while plain **yt-dlp**
+> (python/OpenSSL ClientHello) got 403 on the same host in the same minute.
+> The rule discriminates *among* non-browser fingerprints — it was rejecting
+> python's ClientHello specifically, not everything unbrowserlike. This
+> matters because it widens the escape hatches: "use a different HTTP client"
+> is a live option, and it means a fingerprint-based rule can be narrow enough
+> that one client passing tells you nothing about another.
+
 **Open forensic question (does not affect the fix):** whether the rule's
 egress condition is "datacenter IP" or whether the newer OpenSSL 3.6
 ClientHello simply isn't matched. Discriminator, if ever wanted: an
 ubuntu:24.04 container (py3.12/OpenSSL 3.0.13, yt-dlp 2026.07.04) probing
 plain from a residential egress.
 
-## Mitigation (live on the campaign VM since 2026-08-09)
+## Mitigation (~~live on the campaign VM since 2026-08-09~~ REMOVED 2026-08-11)
+
+**This mitigation is retired. Do not re-apply it.** It was live 2026-08-09 →
+2026-08-10 19:14 and worked (58,601 videos fetched at a ~77% success rate),
+then became the cause of
+[incident 2](incident-2026-08-10-tiktok-waf-impersonation-block.md). The file
+was deleted and curl_cffi uninstalled from the pipx venv on 2026-08-11.
+Recorded here as history:
 
 ```
 mkdir -p ~/.config/yt-dlp && echo '--impersonate chrome' > ~/.config/yt-dlp/config
@@ -109,7 +141,31 @@ own ADR) is a FOLLOWUPS entry.
 For the agent working the deploy repo; nothing in that repo has been
 changed as part of this incident.
 
-1. **`roles/ytdlp`: install the impersonation config at provisioning.**
+> ### ⛔ ITEM 1 IS CANCELLED (2026-08-11) — DO NOT IMPLEMENT
+>
+> Installing `--impersonate chrome` at provisioning would now **re-break
+> fetching**: the impersonated fingerprint is exactly what TikTok's Akamai WAF
+> began blocking on 2026-08-10
+> ([incident 2](incident-2026-08-10-tiktok-waf-impersonation-block.md)). It was
+> never actioned, which is luck rather than judgement.
+>
+> **The replacement handoff is the inverse.** The `ytdlp` role currently
+> *installs* curl_cffi and *verifies* impersonation targets are available; the
+> campaign now requires curl_cffi to be **absent**, because
+> `impersonate=True` is hardcoded in yt-dlp's TikTok extractor and removing
+> the package is the only way to disable it. So:
+>
+> 1. Do **not** install the config file.
+> 2. Stop installing curl_cffi (or install yt-dlp without the extra that
+>    pulls it), and invert the verify task — it should assert impersonation is
+>    *unavailable*, since that is the campaign's working configuration.
+> 3. A re-provision today silently reinstates curl_cffi and returns the VM to
+>    100% fetch failure. Same trap as this document warned about, inverted.
+>
+> Item 2 below (run-log persistence) stands unchanged and is still wanted.
+
+1. ~~**`roles/ytdlp`: install the impersonation config at provisioning.**~~
+   **(CANCELLED — see the box above. Retained for the reasoning only.)**
    Two tasks after the existing pipx install (same `become_user:
    {{ pipeline_user }}` pattern): create `{{ pipeline_home }}/.config/yt-dlp`
    (mode 0755), then copy a config file to

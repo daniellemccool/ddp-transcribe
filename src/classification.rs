@@ -197,6 +197,17 @@ pub const DEFAULT_TABLE_TOML: &str = r#"# ddp-transcribe classification policy (
 schema = 1
 # Default-cautious: unknown messages retry once and let the re-fetch
 # adjudicate (fetch-as-oracle).
+#
+# 2026-08-10: this fallback carried the whole Akamai-WAF outage — 1,360 rows in
+# ~21 min across two never-before-seen messages ("Unsupported URL: .../share/
+# video/<id>/" and "Unexpected response from webpage request"), both actually
+# WAF refusals served as HTTP 200 with an HTML block page. Retryable was
+# exactly right: zero terminal writes, whole wave recovered once the transport
+# was fixed. It is also why the outage was silent for hours — an unrecognised
+# message is survivable *and* invisible here, so `YtDlpOther` growth is the
+# alarm to monitor (FOLLOWUPS: hourly census check). Naming these two patterns
+# explicitly is a filed followup; the disposition would not change.
+# Record: docs/operations/incident-2026-08-10-tiktok-waf-impersonation-block.md
 fallback = { label = "YtDlpOther", disposition = "retryable" }
 
 [[rule]]
