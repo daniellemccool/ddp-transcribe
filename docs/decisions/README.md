@@ -61,6 +61,7 @@ Load the ADR(s) whose filename matches the area you are touching.
 - [0041 — Keep status strictly read-only](./0041-status-is-the-read-only-operator-surface-the-archived-done-contract-lives-behind-verify.md)
 - [0044 — Keep checkpoint hooks non-fatal](./0044-in-run-checkpointing-is-an-operator-supplied-hook-that-can-never-abort-the-run.md)
 - [0047 — Wrap unbounded IO in spawn_blocking](./0047-blocking-io-on-the-worker-hot-path-runs-on-spawn-blocking-inline-only-when-nothing-can-be-starved.md)
+- [0050 — Trip the breaker, never burn the pool](./0050-trip-the-breaker-never-burn-the-pool.md)
 
 ### Failure classification
 
