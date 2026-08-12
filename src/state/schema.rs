@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: &str = "6";
+pub const SCHEMA_VERSION: &str = "7";
 
 pub(super) const SCHEMA_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS videos (
@@ -41,8 +41,8 @@ CREATE TABLE IF NOT EXISTS videos (
     updated_at          INTEGER NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_videos_pending_v3
-    ON videos (status, attempt_count, first_seen_at, video_id)
+CREATE INDEX IF NOT EXISTS idx_videos_pending_v4
+    ON videos (status, attempt_count, video_id DESC)
     WHERE status = 'pending';
 
 CREATE TABLE IF NOT EXISTS watch_history (

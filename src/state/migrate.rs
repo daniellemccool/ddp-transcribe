@@ -1,6 +1,7 @@
 //! Pre-Epic-2 → current schema migration ladder (0022; extended by Epic 4a
-//! for v2→v3, Epic 4b for v3→v4, Epic 4c for v4→v5, and the ingest
-//! production hardening for v5→v6). Opens the DB raw,
+//! for v2→v3, Epic 4b for v3→v4, Epic 4c for v4→v5, the ingest
+//! production hardening for v5→v6, and ADR-0048 (claim newest-published
+//! first) for v6→v7). Opens the DB raw,
 //! bypassing Store::open's version check; runs the ladder + UPDATE meta
 //! inside one transaction. Idempotent on already-migrated DBs.
 
@@ -58,9 +59,9 @@ pub fn run_migrate(path: &Path) -> Result<()> {
     }
 
     // Sequential ladder: each stage advances a local `version` string.
-    // Today five stages exist (v1→v2, v2→v3, v3→v4, v4→v5, v5→v6); future epics
-    // will append more blocks as the schema bumps further. Unknown starting
-    // versions still bail below.
+    // Today six stages exist (v1→v2, v2→v3, v3→v4, v4→v5, v5→v6, v6→v7);
+    // future epics will append more blocks as the schema bumps further.
+    // Unknown starting versions still bail below.
     let tx = conn
         .transaction()
         .context("begin transaction for schema migrate")?;
@@ -140,6 +141,34 @@ pub fn run_migrate(path: &Path) -> Result<()> {
         // produced its rows. An empty ledger means the first post-migration
         // run pays the full walk once, then every later run is fast.
         version = "6".to_string();
+    }
+
+    if version == "6" {
+        // Recency order relies on fixed-width ids: lexicographic DESC on
+        // TEXT equals numeric DESC only when every id has the same length.
+        // Claim-order ADR (0048): refuse the migration rather than
+        // mis-order claims.
+        let bad: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM videos WHERE canonical = 1 AND LENGTH(video_id) != 19",
+                [],
+                |r| r.get(0),
+            )
+            .context("v6→v7: canonical id-width census")?;
+        if bad != 0 {
+            anyhow::bail!(
+                "v6→v7: {bad} canonical rows have non-19-digit video_ids; \
+                 recency claim order requires fixed-width ids — refusing to migrate"
+            );
+        }
+        tx.execute_batch(
+            "DROP INDEX IF EXISTS idx_videos_pending_v3;
+             CREATE INDEX IF NOT EXISTS idx_videos_pending_v4
+                 ON videos (status, attempt_count, video_id DESC)
+                 WHERE status = 'pending';",
+        )
+        .context("v6→v7: recency claim index")?;
+        version = "7".to_string();
     }
 
     if version != SCHEMA_VERSION {

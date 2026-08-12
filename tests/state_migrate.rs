@@ -2,8 +2,8 @@
 
 //! Migration test: synthesize a v1 DB (no new Epic 2 columns; meta.schema_version='1'),
 //! run the migrate function, confirm v2 columns are present and meta.schema_version
-//! lands on the current SCHEMA_VERSION (v6 as of the ingest production
-//! hardening — the ladder walks v1→v2→v3→v4→v5→v6 in one call). Then run
+//! lands on the current SCHEMA_VERSION (v7 as of ADR-0048's recency claim
+//! index — the ladder walks v1→v2→v3→v4→v5→v6→v7 in one call). Then run
 //! Store::open and confirm it succeeds (round-trip
 //! with T2's check). Also covers the v2→v3 leg directly: a hand-built v2-shaped DB
 //! migrating to v3's `batch_runs` table + attempt-aware pending index.
@@ -225,8 +225,9 @@ fn migrate_v2_to_v3_adds_batch_runs_and_attempt_aware_index() -> Result<()> {
             .collect::<std::result::Result<Vec<String>, _>>()?;
         assert_eq!(
             index_names,
-            vec!["idx_videos_pending_v3".to_string()],
-            "old idx_videos_pending must be dropped; only the v3 index remains"
+            vec!["idx_videos_pending_v4".to_string()],
+            "old idx_videos_pending must be dropped; only the current pending index remains \
+             (v3's index has since been superseded by v4's recency ordering, ADR-0048)"
         );
     }
 
@@ -700,12 +701,12 @@ fn synthesize_v4_db(path: &std::path::Path) -> Result<()> {
     )?;
     conn.execute(
         "INSERT INTO videos (video_id, source_url, canonical, status, first_seen_at, updated_at)
-         VALUES ('vid_a', 'https://example/vid_a', 1, 'pending', 1, 1)",
+         VALUES ('7000000000000000111', 'https://example/7000000000000000111', 1, 'pending', 1, 1)",
         [],
     )?;
     conn.execute(
         "INSERT INTO watch_history (respondent_id, video_id, watched_at, in_window, watched_at_raw)
-         VALUES ('w1', 'vid_a', 1000, 1, '2024-05-20 12:00:00')",
+         VALUES ('w1', '7000000000000000111', 1000, 1, '2024-05-20 12:00:00')",
         [],
     )?;
     Ok(())
@@ -743,7 +744,7 @@ fn migrate_upgrades_v4_to_v5_idempotently() {
     // Pre-v5 videos rows carry NULL in every new column.
     let (desc, fetched): (Option<String>, Option<i64>) = conn
         .query_row(
-            "SELECT video_description, metadata_fetched_at FROM videos WHERE video_id='vid_a'",
+            "SELECT video_description, metadata_fetched_at FROM videos WHERE video_id='7000000000000000111'",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -831,12 +832,12 @@ fn synthesize_v5_db(path: &std::path::Path) -> Result<()> {
     )?;
     conn.execute(
         "INSERT INTO videos (video_id, source_url, canonical, status, first_seen_at, updated_at)
-         VALUES ('vid_a', 'https://example/vid_a', 1, 'pending', 1, 1)",
+         VALUES ('7000000000000000111', 'https://example/7000000000000000111', 1, 'pending', 1, 1)",
         [],
     )?;
     conn.execute(
         "INSERT INTO watch_history (respondent_id, video_id, watched_at, in_window, watched_at_raw)
-         VALUES ('w1', 'vid_a', 1000, 1, '2024-05-20 12:00:00')",
+         VALUES ('w1', '7000000000000000111', 1000, 1, '2024-05-20 12:00:00')",
         [],
     )?;
     Ok(())
@@ -882,4 +883,167 @@ fn migrate_upgrades_v5_to_v6_idempotently() {
 
     // Round-trip: Store::open accepts the migrated DB (0022's both-directions rule).
     let _store = Store::open(&db).expect("migrated DB opens at the current version");
+}
+
+/// Synthesize a v6-shaped schema (`ingested_files` ledger present, still
+/// carrying the OLD `idx_videos_pending_v3` recency-agnostic index) at
+/// `path` — the shape a real v6 production DB has today. Clones
+/// `synthesize_v5_db`'s body and applies the v5→v6 delta directly (the
+/// `ingested_files` table, verbatim from `migrate.rs`'s v5→v6 block),
+/// recording `meta.schema_version = '6'`. The seeded canonical row uses a
+/// 19-digit id (matching real TikTok ids) so the v6→v7 happy-path test
+/// doesn't trip the new width guard (ADR-0048); the width-guard test below
+/// adds its own bad row.
+fn synthesize_v6_db(path: &std::path::Path) -> Result<()> {
+    let conn = Connection::open(path)?;
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA foreign_keys = ON;
+
+         CREATE TABLE IF NOT EXISTS videos (
+             video_id            TEXT PRIMARY KEY NOT NULL,
+             source_url          TEXT NOT NULL,
+             canonical           INTEGER NOT NULL,
+             status              TEXT NOT NULL CHECK (status IN
+                                   ('pending','in_progress','succeeded','failed_terminal','failed_retryable')),
+             claimed_by          TEXT,
+             claimed_at          INTEGER,
+             attempt_count       INTEGER NOT NULL DEFAULT 0,
+             succeeded_at        INTEGER,
+             duration_s          REAL,
+             language_detected   TEXT,
+             fetcher             TEXT,
+             transcript_source   TEXT,
+             last_retryable_kind     TEXT,
+             last_retryable_message  TEXT,
+             terminal_reason         TEXT,
+             terminal_message        TEXT,
+             video_description   TEXT,
+             uploader            TEXT,
+             uploader_id         TEXT,
+             video_created_at    INTEGER,
+             view_count          INTEGER,
+             like_count          INTEGER,
+             comment_count       INTEGER,
+             metadata_fetched_at INTEGER,
+             first_seen_at       INTEGER NOT NULL,
+             updated_at          INTEGER NOT NULL
+         );
+
+         CREATE INDEX IF NOT EXISTS idx_videos_pending_v3
+             ON videos (status, attempt_count, first_seen_at, video_id)
+             WHERE status = 'pending';
+
+         CREATE TABLE IF NOT EXISTS watch_history (
+             respondent_id  TEXT NOT NULL,
+             video_id       TEXT NOT NULL,
+             watched_at     INTEGER NOT NULL,
+             in_window      INTEGER NOT NULL,
+             watched_at_raw TEXT,
+             PRIMARY KEY (respondent_id, video_id, watched_at),
+             FOREIGN KEY (video_id) REFERENCES videos(video_id)
+         );
+
+         CREATE TABLE IF NOT EXISTS batch_runs (
+             run_id       INTEGER PRIMARY KEY,
+             started_at   INTEGER NOT NULL,
+             finished_at  INTEGER,
+             params_json  TEXT NOT NULL,
+             policy_toml  TEXT NOT NULL,
+             census_json  TEXT
+         );
+
+         CREATE TABLE IF NOT EXISTS video_metadata_raw (
+             video_id   TEXT PRIMARY KEY NOT NULL,
+             fetched_at INTEGER NOT NULL,
+             raw_json   TEXT NOT NULL,
+             FOREIGN KEY (video_id) REFERENCES videos(video_id)
+         );
+
+         CREATE TABLE IF NOT EXISTS ingested_files (
+             file_name   TEXT PRIMARY KEY NOT NULL,
+             size_bytes  INTEGER NOT NULL,
+             mtime       INTEGER NOT NULL,
+             ingested_at INTEGER NOT NULL
+         );
+
+         CREATE TABLE IF NOT EXISTS meta (
+             key   TEXT PRIMARY KEY NOT NULL,
+             value TEXT NOT NULL
+         );
+
+         INSERT INTO meta (key, value) VALUES ('schema_version', '6');
+        ",
+    )?;
+    conn.execute(
+        "INSERT INTO videos (video_id, source_url, canonical, status, first_seen_at, updated_at)
+         VALUES ('7000000000000000111', 'https://example/7000000000000000111', 1, 'pending', 1, 1)",
+        [],
+    )?;
+    conn.execute(
+        "INSERT INTO watch_history (respondent_id, video_id, watched_at, in_window, watched_at_raw)
+         VALUES ('w1', '7000000000000000111', 1000, 1, '2024-05-20 12:00:00')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// ADR-0048 (claim newest-published first): the v6→v7 leg in isolation. A
+/// v6-shaped DB (old `idx_videos_pending_v3` index) migrates to v7: the old
+/// index is dropped, the new recency index (`idx_videos_pending_v4`) exists
+/// under its new name, and a second `run_migrate` call is idempotent.
+#[test]
+fn migrate_upgrades_v6_to_v7_idempotently() -> anyhow::Result<()> {
+    let tmp = TempDir::new()?;
+    let path = tmp.path().join("state.sqlite");
+    synthesize_v6_db(&path)?;
+
+    run_migrate(&path)?;
+    let conn = rusqlite::Connection::open(&path)?;
+    let version: String = conn.query_row(
+        "SELECT value FROM meta WHERE key = 'schema_version'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(version, "7");
+    let old: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_videos_pending_v3'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(old, 0, "v3 index must be dropped");
+    let new: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_videos_pending_v4'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(new, 1, "v4 recency index must exist");
+    drop(conn);
+    run_migrate(&path)?; // idempotent second pass
+    Ok(())
+}
+
+/// ADR-0048: the v6→v7 leg must refuse to migrate when a canonical row's
+/// `video_id` isn't exactly 19 digits — the recency claim order relies on
+/// lexicographic DESC over TEXT equalling numeric DESC, which only holds
+/// when every id has the same width. Refusing beats silently mis-ordering
+/// claims.
+#[test]
+fn migrate_v6_to_v7_rejects_non_19_digit_canonical_ids() -> anyhow::Result<()> {
+    let tmp = TempDir::new()?;
+    let path = tmp.path().join("state.sqlite");
+    synthesize_v6_db(&path)?;
+    let conn = rusqlite::Connection::open(&path)?;
+    conn.execute(
+        "INSERT INTO videos (video_id, source_url, canonical, status, first_seen_at, updated_at)
+         VALUES ('123456789012345678', 'https://example/short', 1, 'pending', 0, 0)",
+        [],
+    )?;
+    drop(conn);
+    let err = run_migrate(&path).expect_err("18-digit canonical id must refuse the migration");
+    assert!(
+        err.to_string().contains("19"),
+        "error names the width invariant: {err}"
+    );
+    Ok(())
 }
