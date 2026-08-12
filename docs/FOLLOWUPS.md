@@ -81,6 +81,7 @@ condition in the archive.
 - Epic 3 final review: `scrub_cookie_path` canonicalized/relative path-variant hardening → Plan C (multi-engine work)
 - Transcript-storage assessment: DB-at-runtime transcript storage (schema v4 + export subcommand + sync redesign; own epic) only if the ADR-0004 ~1M-small-files ceiling approaches or SQL-queryable transcripts become a research need → Plan C (storage scale)
 - T1-Epic1: codex ADR-refinement bullets gated on multi-engine / CUDA-fallback work (0009 fallback Engine API, 0016 multi-engine GPU memory, error-variant enumeration) → Plan C (re-routed from cross-epic 2026-07-30; the entry's other three bullets are archived)
+- v0.5.0 Task 03 (parked): `claim_next`'s doc comment states the 19-digit id guarantee unconditionally, but the v7 migration guard enforces it only for `canonical = 1` rows (latent — all pending rows are canonical today) → Plan C (short-link resolution lands non-canonical rows)
 - Full Plan C entries: [followups/plan-c.md](followups/plan-c.md)
 
 **Cross-epic / ADR maintenance / verify-then-archive**

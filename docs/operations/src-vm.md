@@ -19,10 +19,22 @@ with an age-gated startup sweep, and the ADR-0013 backend assertion actually
 firing on CUDA builds. Anything marked "v0.4.0" below is not on the workspace
 until that tag is cut and `pipeline_git_ref` is bumped.
 
-**Version state:** the workspace still runs **v0.3.0**. v0.3.1 was tagged but
-never deployed, so the next upgrade jumps **0.3.0 → 0.3.2** in one step and
-both tags' release notes apply; `-V` must print `0.3.2` afterwards. Anything
-below marked "as of v0.3.1" therefore arrives with that same upgrade.
+**Version state:** the workspace still runs **v0.3.0**. v0.3.1, v0.3.2, and
+v0.4.0 were all tagged but never deployed — each superseded by the next
+before its promotion window — and **v0.5.0** (census-completion release: D1
+recency claim order / schema v7, ADR-0049 claim-time canonical fetch-URL
+derivation, ADR-0050 the mass-failure circuit breaker, transport
+observability) now exists too. So the next upgrade jumps **0.3.0 → 0.5.0**
+in one promotion, and every intermediate tag's release notes apply
+cumulatively (per ADR-0043). After relaunch: `-V` must print `0.5.0`, `-h`
+must list `backfill-metadata` and `requeue-failures`, and `process -h` must
+show `--checkpoint-cmd` and `--breaker-threshold`. The DB needs exactly one
+`migrate` call to go from v6 to v7 — idempotent, and it **refuses to run**
+if any `canonical = 1` row's `video_id` is not a fixed-width 19-digit
+numeric string (the recency claim order's width guard, ADR-0048; see
+"Update procedure" below for the migration ladder). Anything below marked
+"as of v0.3.1" / "as of v0.3.2" / "v0.4.0" therefore all arrive with this
+same jump.
 
 ## Topology (what actually exists)
 
@@ -80,6 +92,53 @@ ddp-transcribe -V && ddp-transcribe -h | head -12   # subcommand list matches ex
 
 After the pending 0.3.0 → 0.3.2 upgrade, `-V` must print **0.3.2**, `-h` must
 list `backfill-metadata`, and `process -h` must show `--checkpoint-cmd`.
+After the eventual 0.3.0 → 0.5.0 promotion, see "Resume sequence after the
+v0.5.0 promotion" below in place of an ordinary uncapped restart.
+
+### Resume sequence after the v0.5.0 promotion (spec D6)
+
+Do not uncap the batch immediately after the v0.5.0 relaunch. Spec D6's
+staged validation, in order:
+
+1. **Validation batch:** `process --max-videos 50 --retries 2`. Expect
+   ≥~70% success, zero `HttpError` / `YtDlpOther`, metadata envelopes
+   captured. This confirms the canonical unimpersonated fetch path
+   (ADR-0049) actually clears the WAF before committing real budget to it.
+2. **Rate measurement:** `process --max-videos 10000` — establishes the
+   current fetch/day rate under the new transport and claim order
+   (ADR-0048) before sizing batches for the remaining ~1.93M-video census.
+3. **Capped batches as routine** thereafter — bounded unattended blast
+   radius. `--retries 2` is the floor throughout this whole sequence.
+
+**Detection:** the hourly dead-man census check (zero successes in the last
+hour, or any `YtDlpOther` growth) is **deploy-repo/VM-side** — a cron job
+that queries the state DB and notifies, not anything shipped in this repo.
+This repo's contribution is only that the census is queryable (`status`,
+`batch_runs`); installing the cron job is the operator's / deploy-repo's
+task, not this promotion's.
+
+**Fallback ladder if the breaker trips (exit 4) or the validation batch
+underperforms** — pre-tested, not improvised; each rung was verified by the
+incident-2 probe-matrix procedure before being relied on here: (1)
+UA-override to a current Chrome string; (2) yt-dlp downgrade to
+`2026.03.17` — the version ADR-0033's classification patterns are pinned
+to, so a downgrade also closes the standing yt-dlp version-drift followup
+while it's active; (3) only then the heavy options (real-browser fetcher,
+egress diversity), each needing its own design round. Work the ladder in
+order — do not skip to (3) on the first trip.
+
+**Startup echo delay (expected, not a hang):** every `process` invocation
+now performs a best-effort yt-dlp environment echo at startup — two
+sequential probes (`yt-dlp --version`, then `yt-dlp --list-impersonate-targets`),
+10s timeout each — recorded into `batch_runs.params_json` as
+`ytdlp_version` / `ytdlp_impersonation_available`, alongside `fetch_url_form`
+(currently always `"canonical-v1"` — ADR-0049's derived-URL echo; this is
+the field to check if you need to answer "which URL form is this run
+fetching?"). A healthy yt-dlp answers
+both in well under a second; if yt-dlp hangs, batch start is delayed by a
+bounded worst case of ~20s before the first claim. No operator action
+needed — this is the explanation if a batch appears to pause briefly right
+after invocation.
 
 ### Dev / emergency escape hatch (diverges from the pinned tag — NOT the production procedure)
 
@@ -108,18 +167,25 @@ After deploying an ingest-production-hardening (v6-schema) binary, migrate
 the state DB before running anything else against it:
 
 ```bash
-ddp-transcribe --state-db ~/ddp-state/state.sqlite migrate   # -> v6, idempotent
+ddp-transcribe --state-db ~/ddp-state/state.sqlite migrate   # -> v7, idempotent
 ```
 
 The ladder is sequential, so one `migrate` call takes a v3 DB all the way to
-v6. v3 → v4 adds `watch_history.watched_at_raw` (the timezone-verdict hedge,
+v7. v3 → v4 adds `watch_history.watched_at_raw` (the timezone-verdict hedge,
 ADR-0039); v4 → v5 adds the `video_metadata_raw` table and eight nullable
 metadata columns on `videos` (ADR-0042); v5 → v6 adds the `ingested_files`
 ledger, created deliberately empty (the migration cannot know which files
-produced a pre-v6 DB's rows). `migrate` is a no-op if the DB is already at
-v6. The binary refuses to open an un-migrated DB for any other subcommand —
-`Store::open` hard-fails with a typed `SchemaVersionMismatch` error naming
-the expected/found versions and instructing `migrate` (ADR-0022).
+produced a pre-v6 DB's rows); **v6 → v7** (v0.5.0) replaces the pending
+index with `idx_videos_pending_v4` for the recency claim order (ADR-0048),
+and first **censuses every `canonical = 1` row's `video_id`** — if any is
+not a fixed-width 19-digit numeric string, the migration **refuses to run**
+rather than silently mis-ordering claims (production ingest has only ever
+inserted 19-digit canonical ids, so this is not expected to fire, but it is
+a hard stop, not a warning, if it ever does). `migrate` is a no-op if the DB
+is already at v7. The binary refuses to open an un-migrated DB for any
+other subcommand — `Store::open` hard-fails with a typed
+`SchemaVersionMismatch` error naming the expected/found versions and
+instructing `migrate` (ADR-0022).
 
 Because the ledger migrates in empty, the first `ingest` run after migrating
 pays one full walk (stat + read + parse every file, same cost as pre-ledger
@@ -178,6 +244,14 @@ CUDA_VISIBLE_DEVICES=0 ddp-transcribe \
 - Startup must show the ADR-0013 banner (`whisper_backend_init_gpu: using CUDA0
   backend`); its absence means CPU fallback — abort and investigate.
 - `process` exit code 3 = zero videos claimed (queue drained) — not an error.
+- `process` exit code 4 = the mass-failure circuit breaker tripped
+  (ADR-0050): a run-global streak of consecutive claims resolved without a
+  single success reached `--breaker-threshold` (default 50; `0` disables).
+  The census (`batch_runs.census_json`) carries `breaker_tripped: true`.
+  **Operator response: probe-matrix first, restart second** — verify which
+  rung of the fallback ladder (below) actually restores fetches before
+  relaunching; restarting blind into the same failing endpoint just re-trips
+  the breaker and burns another `--breaker-threshold` claims for nothing.
 - After a `process` batch: run `~/sync-to-storage.sh` (do NOT run it while an
   export/transfer is reading the volume's transcript tree). For uncapped
   campaign runs, prefer the in-run checkpoint hook below — a batch that runs

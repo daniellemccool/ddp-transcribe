@@ -180,6 +180,11 @@ pub(crate) enum Command {
             requires = "checkpoint_cmd"
         )]
         checkpoint_every: std::time::Duration,
+        /// Abort the run after this many consecutive claims resolve without
+        /// a success (0 disables). Protects the pool and the egress from
+        /// WAF-style mass-failure waves.
+        #[arg(long, default_value_t = 50)]
+        breaker_threshold: usize,
     },
     /// Upgrade a pre-Epic-2 (v1) state.sqlite to the current schema version.
     /// Idempotent: no-op if already at the current version.

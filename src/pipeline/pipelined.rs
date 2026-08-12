@@ -7,7 +7,7 @@
 //! `--pipelined` branch in `main.rs`.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -124,6 +124,51 @@ fn handle_mutator_result(
         }
         Ok(changed) => Ok(changed),
         Err(e) => Err(e.context(format!("{op} for {video_id}"))),
+    }
+}
+
+/// Breaker ADR (0050): run-global consecutive-no-success streak. Trips the
+/// ADR-0025 supervision token exactly once; never touches video state.
+///
+/// `pub` (not module-private) for the same reason as [`FetchedItem`] /
+/// [`SharedStore`]: `fetch_worker` and `transcribe_worker` are called
+/// directly by `tests/pipeline_fakes/fetch_worker_tests.rs` and
+/// `transcribe_worker_tests.rs`, which now need to construct a handle for
+/// the 13th parameter each worker takes.
+#[derive(Clone)]
+pub struct Breaker {
+    streak: Arc<AtomicUsize>,
+    tripped: Arc<AtomicBool>,
+    threshold: usize,
+}
+
+impl Breaker {
+    pub fn new(threshold: usize) -> Self {
+        Self {
+            streak: Arc::new(AtomicUsize::new(0)),
+            tripped: Arc::new(AtomicBool::new(false)),
+            threshold,
+        }
+    }
+    fn note_failure(&self, token: &CancellationToken) {
+        let streak = self.streak.fetch_add(1, Ordering::Relaxed) + 1;
+        if self.threshold > 0
+            && streak >= self.threshold
+            && !self.tripped.swap(true, Ordering::Relaxed)
+        {
+            tracing::error!(
+                streak,
+                threshold = self.threshold,
+                "circuit breaker tripped: consecutive claims without success — cancelling run"
+            );
+            token.cancel();
+        }
+    }
+    fn note_success(&self) {
+        self.streak.store(0, Ordering::Relaxed);
+    }
+    fn is_tripped(&self) -> bool {
+        self.tripped.load(Ordering::Relaxed)
     }
 }
 
@@ -259,6 +304,7 @@ pub async fn fetch_worker(
     terminal_by_label: TerminalByLabel,
     claims_counter: Arc<AtomicUsize>,
     opts: Arc<ProcessOptions>,
+    breaker: Breaker,
 ) -> Result<()> {
     let worker_id = opts.worker_id.clone();
     loop {
@@ -442,6 +488,10 @@ pub async fn fetch_worker(
                             let mut m = terminal_by_label.lock().await;
                             *m.entry(label.clone()).or_insert(0) += 1;
                         }
+                        // Breaker ADR (0050): the triggering claim's state
+                        // write is already dispatched above — note_failure
+                        // sits after it, never before.
+                        breaker.note_failure(&token);
                     }
                     ClassifiedFailure::Retryable {
                         label,
@@ -476,6 +526,9 @@ pub async fn fetch_worker(
                             &stats_parked_for_cookies,
                             &stats_stale_after_failure,
                         )?;
+                        // Breaker ADR (0050): after the state-write
+                        // dispatch above, never before.
+                        breaker.note_failure(&token);
                     }
                 }
                 // continue to next iteration.
@@ -561,6 +614,7 @@ pub async fn transcribe_worker(
     stats_succeeded: Arc<AtomicUsize>,
     stats_failed: Arc<AtomicUsize>,
     opts: Arc<ProcessOptions>,
+    breaker: Breaker,
 ) -> Result<()> {
     let worker_id = opts.worker_id.clone();
 
@@ -712,6 +766,10 @@ pub async fn transcribe_worker(
                 } else {
                     stats_succeeded.fetch_add(1, Ordering::Relaxed);
                 }
+                // Breaker ADR (0050): the transport worked for BOTH
+                // outcomes here — StaleAfterSuccess included, since the
+                // breaker measures transport, not claim races.
+                breaker.note_success();
             }
             Err(TranscribeError::Cancelled) => {
                 // Coordinated shutdown, not a row failure. Row stays
@@ -802,6 +860,9 @@ pub async fn transcribe_worker(
                             &stats_parked_for_cookies,
                             &stats_stale_after_failure,
                         )?;
+                        // Breaker ADR (0050): after the state-write
+                        // dispatch above, never before.
+                        breaker.note_failure(&token);
                     }
                 }
                 // continue loop
@@ -985,6 +1046,9 @@ pub async fn run_pipelined(
     // not rows, and `ProcessStats`'s checkpoint fields are u64.
     let checkpoints_run = Arc::new(AtomicU64::new(0));
     let checkpoints_failed = Arc::new(AtomicU64::new(0));
+    // Breaker ADR (0050): run-global consecutive-no-success streak, shared
+    // across every fetch + transcribe worker via clones of this handle.
+    let breaker = Breaker::new(opts_arc.breaker_threshold);
     let mut join_set: JoinSet<Result<()>> = JoinSet::new();
 
     // Spawn the transcribe worker FIRST so the channel has a consumer
@@ -1002,6 +1066,7 @@ pub async fn run_pipelined(
         Arc::clone(&stats_succeeded),
         Arc::clone(&stats_failed),
         Arc::clone(&opts_arc),
+        breaker.clone(),
     ));
 
     // Spawn N fetch workers. Each gets its own `tx.clone()`; the
@@ -1021,6 +1086,7 @@ pub async fn run_pipelined(
             Arc::clone(&terminal_by_label),
             Arc::clone(&claims_counter),
             Arc::clone(&opts_arc),
+            breaker.clone(),
         ));
     }
     // Epic 5a: the periodic operator checkpoint hook, when configured. It
@@ -1059,10 +1125,18 @@ pub async fn run_pipelined(
     // Epic 5a: the checkpoint task loops until cancelled, so on a clean
     // drain nothing would ever cancel it and `join_next()` would block
     // forever. The workers ARE the batch: 1 transcribe + N fetch. Once
-    // that many tasks have joined, every worker is done (the checkpoint
-    // task cannot have joined before a cancel), so cancel the token to
-    // release it. `==` fires exactly once; on the first-Err path the token
-    // is already cancelled and this is a no-op.
+    // that many tasks have joined, every worker is done, so cancel the
+    // token to release the checkpoint task. `==` fires exactly once; on
+    // the first-Err path the token is already cancelled and this is a
+    // no-op. This is also the mid-run breaker-trip path (0025-load-bearing
+    // invariant): `breaker.note_failure` cancels the token directly, which
+    // is itself just another cancel — so the checkpoint task CAN be among
+    // the first `supervised_workers` joins here, unlike in the
+    // pre-breaker design this comment used to describe. That's fine: the
+    // cancel below is idempotent (`CancellationToken::cancel` on an
+    // already-cancelled token is a no-op) and this loop only ever drains
+    // `join_next()` to `None`, so an early or repeated cancel cannot
+    // corrupt the drain.
     let supervised_workers = 1 + opts_arc.download_workers;
     let mut joined_tasks = 0usize;
     while let Some(joined) = join_set.join_next().await {
@@ -1122,6 +1196,7 @@ pub async fn run_pipelined(
         terminal_by_label: terminal_by_label.lock().await.clone(),
         checkpoints_run: checkpoints_run.load(Ordering::Relaxed),
         checkpoints_failed: checkpoints_failed.load(Ordering::Relaxed),
+        breaker_tripped: breaker.is_tripped(),
     };
 
     if let Some(e) = first_error {

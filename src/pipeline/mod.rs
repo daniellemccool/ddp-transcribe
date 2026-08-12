@@ -46,7 +46,9 @@ mod serial;
 // `#[allow(unused_imports)]` stays per 0002 (suppressed-at-re-export, not
 // at definition).
 #[allow(unused_imports)]
-pub use pipelined::{fetch_worker, run_pipelined, transcribe_worker, FetchedItem, SharedStore};
+pub use pipelined::{
+    fetch_worker, run_pipelined, transcribe_worker, Breaker, FetchedItem, SharedStore,
+};
 // `run_serial` is no longer on the bin's hot path after T18 (the
 // Process arm calls `run_pipelined`). It stays compiled for the
 // integration tests in `tests/pipeline_fakes/serial_tests.rs` which
@@ -170,6 +172,12 @@ pub struct ProcessOptions {
     /// at run boundaries). Consumed by `run_pipelined`, which spawns one
     /// timer task for it; `run_serial` ignores it.
     pub checkpoint: Option<CheckpointConfig>,
+    /// Breaker ADR (0050): run-global consecutive-claims-without-a-success
+    /// streak that aborts the run. 0 disables; flag-tunable via
+    /// `--breaker-threshold` (default 50). Consumed by `run_pipelined`'s
+    /// `Breaker`, which cancels the ADR-0025 supervision token exactly
+    /// once when the streak reaches this value.
+    pub breaker_threshold: usize,
 }
 
 #[derive(Debug, Default)]
@@ -229,6 +237,12 @@ pub struct ProcessStats {
     /// (mid-run syncing is not happening), never a run failure: the hook
     /// path deliberately has no error return (see `run_pipelined`).
     pub checkpoints_failed: u64,
+    /// Breaker ADR (0050): whether the run-global consecutive-no-success
+    /// streak reached `ProcessOptions::breaker_threshold` this run and
+    /// cancelled the ADR-0025 supervision token. A bool outcome, not a
+    /// counter (0007 governs verb-named input-side counters; this is a
+    /// verdict) — census-visible per the ADR's DB-visible requirement.
+    pub breaker_tripped: bool,
 }
 
 /// Outcome of a single `process_one` call. `StaleAfterSuccess` is the
@@ -379,9 +393,17 @@ pub(crate) async fn acquire_audio(
     Option<crate::fetcher::MetadataCapture>,
     Result<FetchedAudio, FetchPhaseError>,
 ) {
-    let (capture, acquisition) = fetcher
-        .acquire(&claim.video_id, &claim.source_url, opts)
-        .await;
+    // ADR-0049: canonical claims fetch a derived, WAF-surviving transport
+    // URL keyed on video_id; the stored source_url stays untouched as
+    // provenance (read at :625 when the artifact is written). Non-canonical
+    // rows have no reliable video_id to derive from, so they fetch their
+    // stored URL verbatim.
+    let fetch_url = if claim.canonical {
+        crate::canonical::derived_fetch_url(&claim.video_id)
+    } else {
+        claim.source_url.clone()
+    };
+    let (capture, acquisition) = fetcher.acquire(&claim.video_id, &fetch_url, opts).await;
     let acquisition = match acquisition {
         // A failed acquire hands over no attempt dir: the fetcher removed
         // whatever it created before returning (see `VideoFetcher::acquire`'s
@@ -809,6 +831,7 @@ mod tests {
             source_url: "u".into(),
             attempt_count: 1,
             last_retryable_kind: kind.map(String::from),
+            canonical: true,
         };
         assert_eq!(
             cookie_opts_for(&mk(None), &table, Some(&cookie)).cookies_file,
@@ -853,6 +876,7 @@ mod tests {
             source_url: "u".into(),
             attempt_count: 1,
             last_retryable_kind: kind.map(String::from),
+            canonical: true,
         };
 
         let opts = cookie_opts_for(&mk(Some("NoDataBlocks")), &table, Some(&cookie));

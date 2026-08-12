@@ -35,6 +35,7 @@ Load the ADR(s) whose filename matches the area you are touching.
 - [0036 — Let the re-fetch judge liveness](./0036-retry-is-in-pipeline-capped-failure-time-requeue-the-re-fetch-is-the-liveness-oracle.md)
 - [0040 — Move in_window only via recompute-window](./0040-analysis-window-is-computed-at-ingest-recompute-window-is-the-only-flag-mutator.md)
 - [0046 — Default-deny requeue-failures](./0046-requeue-failures-is-a-forensic-default-deny-override-of-retry-eligibility.md)
+- [0048 — Claim newest-published first](./0048-claim-newest-published-first.md)
 
 ### Whisper engine
 
@@ -60,6 +61,7 @@ Load the ADR(s) whose filename matches the area you are touching.
 - [0041 — Keep status strictly read-only](./0041-status-is-the-read-only-operator-surface-the-archived-done-contract-lives-behind-verify.md)
 - [0044 — Keep checkpoint hooks non-fatal](./0044-in-run-checkpointing-is-an-operator-supplied-hook-that-can-never-abort-the-run.md)
 - [0047 — Wrap unbounded IO in spawn_blocking](./0047-blocking-io-on-the-worker-hot-path-runs-on-spawn-blocking-inline-only-when-nothing-can-be-starved.md)
+- [0050 — Trip the breaker, never burn the pool](./0050-trip-the-breaker-never-burn-the-pool.md)
 
 ### Failure classification
 
@@ -71,6 +73,7 @@ Load the ADR(s) whose filename matches the area you are touching.
 - [0035 — Send cookies on gated retries only](./0035-cookies-ride-only-requires-cookie-retries-with-argv-redaction.md)
 - [0038 — Keep frugal for NoDataBlocks only](./0038-fetch-format-is-download-first-the-frugal-selector-runs-only-on-nodatablocks-retries.md)
 - [0042 — Re-parse metadata, never re-fetch](./0042-fetch-time-metadata-is-captured-raw-first-parsing-is-a-replayable-post-run-step.md)
+- [0049 — Derive the fetch URL, never rewrite provenance](./0049-derive-the-fetch-url-never-rewrite-provenance.md)
 
 ### Ingest
 

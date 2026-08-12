@@ -36,19 +36,24 @@ fn claim_next_returns_pending_video_and_marks_in_progress() {
     assert_eq!(row.attempt_count, 1, "attempt_count incremented on claim");
 }
 
+/// Claim-order ADR: within an attempt tier, newest-published first.
+/// video_id is a snowflake (upper 32 bits = creation epoch), 19 digits
+/// wide (v7 migration guard), so DESC text order = DESC creation time.
 #[test]
-fn claim_next_orders_by_first_seen_at() {
-    let (_tmp, mut store) = fresh_store_with(&[]);
-    store
-        .upsert_video("7234567890123456789", "first", true)
-        .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(1100));
-    store
-        .upsert_video("7234567890123456788", "second", true)
-        .unwrap();
-
-    let first_claim = store.claim_next("w").unwrap().unwrap();
-    assert_eq!(first_claim.video_id, "7234567890123456789");
+fn claim_next_orders_by_recency_within_attempt_tier() {
+    // Deliberately inserted oldest-first with ascending first_seen_at to
+    // prove first_seen_at no longer participates.
+    let (_tmp, mut store) = fresh_store_with(&[
+        ("7600000000000000001", "https://example/old"),
+        ("7650000000000000001", "https://example/mid"),
+        ("7700000000000000001", "https://example/new"),
+    ]);
+    let first = store.claim_next("w").unwrap().expect("row available");
+    assert_eq!(first.video_id, "7700000000000000001", "newest claims first");
+    let second = store.claim_next("w").unwrap().expect("row available");
+    assert_eq!(second.video_id, "7650000000000000001");
+    let third = store.claim_next("w").unwrap().expect("row available");
+    assert_eq!(third.video_id, "7600000000000000001", "oldest claims last");
 }
 
 #[test]
@@ -719,6 +724,28 @@ fn sweep_stale_claims_with_zero_threshold_does_not_sweep_same_second_claim() -> 
     Ok(())
 }
 
+/// Fetch-URL ADR (0049): `claim_next` must surface each row's `canonical`
+/// flag so the pipeline can decide, at claim time, whether to derive the
+/// transport URL or fetch the stored `source_url` verbatim.
+#[test]
+fn claim_carries_canonical_flag() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let mut store = Store::open(&tmp.path().join("state.sqlite"))?;
+    store.upsert_video("7000000000000000010", "https://example.com/canonical", true)?;
+    store.upsert_video("7000000000000000020", "https://example.test/opaque", false)?;
+
+    // Newest-published-first (ADR-0048): the higher video_id claims first.
+    let first = store.claim_next("w1")?.expect("first claim");
+    assert_eq!(first.video_id, "7000000000000000020");
+    assert!(!first.canonical, "row seeded with canonical=false");
+
+    let second = store.claim_next("w1")?.expect("second claim");
+    assert_eq!(second.video_id, "7000000000000000010");
+    assert!(second.canonical, "row seeded with canonical=true");
+
+    Ok(())
+}
+
 #[test]
 fn claim_next_carries_last_retryable_kind() {
     use rusqlite::Connection;
@@ -784,6 +811,49 @@ fn fresh_rows_claim_before_requeued_retries() {
     );
     let second = store.claim_next("w1").unwrap().expect("second claim");
     assert_eq!(second.video_id, "vid_retry");
+}
+
+/// Final-review Finding 2 (ADR-0048 guidance): pin `claim_next`'s SELECT to
+/// its index. A drifted WHERE/ORDER BY that no longer matches
+/// `idx_videos_pending_v4` (status, attempt_count, video_id DESC) would
+/// silently fall back to a full scan + sort at production scale (1.93M+
+/// rows) — this makes that regression a test failure instead of something
+/// only caught by a manual `EXPLAIN QUERY PLAN` at review time.
+#[test]
+fn claim_next_query_plan_uses_pending_index() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let path = tmp.path().join("state.sqlite");
+    let mut store = Store::open(&path)?;
+    store.upsert_video("7000000000000000001", "https://example/a", true)?;
+
+    // Mirrors claim_next's SELECT verbatim (src/state/mod.rs).
+    let raw = rusqlite::Connection::open(&path)?;
+    let mut stmt = raw.prepare(
+        "EXPLAIN QUERY PLAN
+         SELECT video_id, source_url, attempt_count, last_retryable_kind, canonical
+         FROM videos
+         WHERE status = 'pending'
+         ORDER BY attempt_count ASC, video_id DESC
+         LIMIT 1",
+    )?;
+    let plan: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(3))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let plan = plan.join("\n");
+
+    assert!(
+        plan.contains("idx_videos_pending_v4"),
+        "claim_next SELECT must use idx_videos_pending_v4, got plan:\n{plan}"
+    );
+    assert!(
+        !plan.contains("USE TEMP B-TREE"),
+        "claim_next SELECT must not require a temp b-tree sort, got plan:\n{plan}"
+    );
+
+    // Keep `store` alive: dropping it before the raw connection reads risks
+    // an unrelated confusing WAL-checkpoint interaction on some platforms.
+    drop(store);
+    Ok(())
 }
 
 /// End-to-end attempt-counting invariant across one full

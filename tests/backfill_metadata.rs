@@ -60,6 +60,34 @@ fn tripwire_path(dir: &tempfile::TempDir) -> (String, std::path::PathBuf) {
     (path, marker)
 }
 
+/// Argv-recording shim: appends each argument yt-dlp was invoked with to
+/// `argv_log` (one per line, so the last line is the final positional
+/// arg — the URL) and then succeeds like the ordinary shim. The tripwire
+/// shim above proves only that yt-dlp *ran*; this proves *which URL* it
+/// received, which is what the derived-URL assertion needs.
+fn recording_shim_path(dir: &tempfile::TempDir) -> (String, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.path().join("recording-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = dir.path().join("yt-dlp-argv.log");
+    let shim = bin.join("yt-dlp");
+    std::fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\nfor a; do printf '%s\\n' \"$a\" >> \"{}\"; done\nprintf '{{\"id\":\"shim\",\"description\":\"backfilled by shim\"}}\\n'\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    (path, log)
+}
+
 /// v1 succeeded+envelope (not in cohort), v2 succeeded (cohort),
 /// v3 succeeded with a "dead" URL (cohort), v4 pending (not in cohort).
 fn seeded_db(dir: &tempfile::TempDir) -> std::path::PathBuf {
@@ -265,6 +293,50 @@ fn limit_caps_attempts() {
         .success();
     let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(out.contains("examined 1"), "stdout was: {out}");
+}
+
+/// Fetch-URL ADR (0049): a canonical backfill row's stored `source_url`
+/// may be a surviving share form, but the recovery fetch must use the
+/// derived `@x` transport form — the same form the fetch-path pipeline
+/// uses (`tests/pipeline_fakes/pipelined_tests.rs`), never a second
+/// URL-format literal.
+#[test]
+fn backfill_fetches_derived_canonical_url() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("state.sqlite");
+    let vid = "7700000000000000009";
+    let stored = format!("https://www.tiktokv.com/share/video/{vid}/");
+    {
+        let mut store = ddp_transcribe::state::Store::open(&db).unwrap();
+        store.upsert_video(vid, &stored, true).unwrap();
+    }
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE videos SET status = 'succeeded', attempt_count = 1, succeeded_at = 1750000000
+             WHERE video_id = ?1",
+            [vid],
+        )
+        .unwrap();
+
+    let (path, log) = recording_shim_path(&dir);
+
+    let assert = AssertCommand::cargo_bin("ddp-transcribe")
+        .unwrap()
+        .env("PATH", path)
+        .args(["--state-db", db.to_str().unwrap(), "backfill-metadata"])
+        .assert()
+        .success();
+    let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(out.contains("captured 1"), "stdout was: {out}");
+
+    let logged = std::fs::read_to_string(&log).unwrap();
+    let last_arg = logged.lines().last().expect("shim recorded argv");
+    assert_eq!(
+        last_arg,
+        format!("https://www.tiktok.com/@x/video/{vid}/"),
+        "backfill must fetch the derived canonical form, not the stored share URL"
+    );
 }
 
 #[test]
