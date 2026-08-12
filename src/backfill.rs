@@ -79,9 +79,18 @@ pub(crate) async fn backfill_metadata(
             }
             stats.videos_examined += 1;
 
+            // Fetch-URL ADR (0049): canonical rows re-derive the
+            // WAF-surviving `@x` transport form; the stored `source_url`
+            // stays untouched provenance (0042) either way.
+            let fetch_url = if video.canonical {
+                crate::canonical::derived_fetch_url(&video.video_id)
+            } else {
+                video.source_url.clone()
+            };
+
             let envelope = match run(CommandSpec {
                 program: "yt-dlp".to_string(),
-                args: build_metadata_only_args(&video.source_url),
+                args: build_metadata_only_args(&fetch_url),
                 timeout: ytdlp_timeout,
                 stderr_capture_bytes: 8 * 1024,
                 stdout_capture_bytes: STDOUT_CAP,

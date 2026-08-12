@@ -219,6 +219,10 @@ impl Store {
 pub struct MissingMetadataVideo {
     pub video_id: String,
     pub source_url: String,
+    /// Mirrors the row's `canonical` column (ADR-0049): true when
+    /// `source_url` may be re-derived to the WAF-surviving `@x` transport
+    /// form via `canonical::derived_fetch_url`.
+    pub canonical: bool,
 }
 
 impl Store {
@@ -260,6 +264,7 @@ impl Store {
             Ok(MissingMetadataVideo {
                 video_id: r.get(0)?,
                 source_url: r.get(1)?,
+                canonical: r.get::<_, i64>(2)? != 0,
             })
         };
         let rows = match after_video_id {
@@ -267,7 +272,7 @@ impl Store {
                 let mut stmt = self
                     .conn
                     .prepare_cached(
-                        "SELECT v.video_id, v.source_url FROM videos v
+                        "SELECT v.video_id, v.source_url, v.canonical FROM videos v
                          WHERE v.status = 'succeeded'
                            AND NOT EXISTS (SELECT 1 FROM video_metadata_raw m
                                            WHERE m.video_id = v.video_id)
@@ -286,7 +291,7 @@ impl Store {
                 let mut stmt = self
                     .conn
                     .prepare_cached(
-                        "SELECT v.video_id, v.source_url FROM videos v
+                        "SELECT v.video_id, v.source_url, v.canonical FROM videos v
                          WHERE v.status = 'succeeded'
                            AND v.video_id > ?1
                            AND NOT EXISTS (SELECT 1 FROM video_metadata_raw m
