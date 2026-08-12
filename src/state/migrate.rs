@@ -144,13 +144,16 @@ pub fn run_migrate(path: &Path) -> Result<()> {
     }
 
     if version == "6" {
-        // Recency order relies on fixed-width ids: lexicographic DESC on
-        // TEXT equals numeric DESC only when every id has the same length.
-        // Claim-order ADR (0048): refuse the migration rather than
-        // mis-order claims.
+        // Recency order relies on fixed-width DIGIT ids: lexicographic DESC
+        // on TEXT equals numeric DESC only when every id is the same length
+        // AND all-digits — a 19-character id with a trailing letter breaks
+        // the guarantee just as badly as the wrong width does. Claim-order
+        // ADR (0048): refuse the migration rather than mis-order claims.
         let bad: i64 = tx
             .query_row(
-                "SELECT COUNT(*) FROM videos WHERE canonical = 1 AND LENGTH(video_id) != 19",
+                "SELECT COUNT(*) FROM videos
+                 WHERE canonical = 1
+                   AND (LENGTH(video_id) != 19 OR video_id GLOB '*[^0-9]*')",
                 [],
                 |r| r.get(0),
             )
@@ -158,7 +161,7 @@ pub fn run_migrate(path: &Path) -> Result<()> {
         if bad != 0 {
             anyhow::bail!(
                 "v6→v7: {bad} canonical rows have non-19-digit video_ids; \
-                 recency claim order requires fixed-width ids — refusing to migrate"
+                 recency claim order requires fixed-width 19-digit ids — refusing to migrate"
             );
         }
         tx.execute_batch(

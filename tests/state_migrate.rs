@@ -1047,3 +1047,29 @@ fn migrate_v6_to_v7_rejects_non_19_digit_canonical_ids() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// ADR-0048: a 19-CHARACTER canonical id that isn't all digits must also
+/// be refused — lexicographic DESC on TEXT equals numeric DESC only for
+/// fixed-width DIGIT strings, so length alone isn't the invariant; a
+/// trailing letter (or any non-digit) breaks the guarantee just as badly
+/// as the wrong width does.
+#[test]
+fn migrate_v6_to_v7_rejects_19_char_non_numeric_canonical_ids() -> anyhow::Result<()> {
+    let tmp = TempDir::new()?;
+    let path = tmp.path().join("state.sqlite");
+    synthesize_v6_db(&path)?;
+    let conn = rusqlite::Connection::open(&path)?;
+    conn.execute(
+        "INSERT INTO videos (video_id, source_url, canonical, status, first_seen_at, updated_at)
+         VALUES ('765000000000000000X', 'https://example/nonnumeric', 1, 'pending', 0, 0)",
+        [],
+    )?;
+    drop(conn);
+    let err =
+        run_migrate(&path).expect_err("19-char non-numeric canonical id must refuse the migration");
+    assert!(
+        err.to_string().contains("19"),
+        "error names the width invariant: {err}"
+    );
+    Ok(())
+}
