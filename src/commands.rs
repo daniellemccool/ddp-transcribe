@@ -157,6 +157,12 @@ pub async fn dispatch(cli: Cli) -> Result<CommandExit> {
                 cmd,
                 every: checkpoint_every,
             });
+            // Spec D5 / transport-observability: best-effort startup echo of
+            // what yt-dlp the fetch workers will actually run and whether it
+            // can impersonate a browser. Never fatal (0044 posture) — any
+            // failure path yields None fields and the batch proceeds.
+            let (ytdlp_version, ytdlp_impersonation_available) =
+                fetcher::ytdlp::ytdlp_env_echo(std::time::Duration::from_secs(10)).await;
             let params_json = serde_json::json!({
                 "retries": retries,
                 "max_videos": max_videos,
@@ -166,6 +172,11 @@ pub async fn dispatch(cli: Cli) -> Result<CommandExit> {
                 "checkpoint_cmd": checkpoint.as_ref().map(|c| c.cmd.display().to_string()),
                 "checkpoint_every_secs": checkpoint.as_ref().map(|c| c.every.as_secs()),
                 "breaker_threshold": breaker_threshold,
+                // ADR-0049: transport form is code + params_json, not data —
+                // this is that echo.
+                "fetch_url_form": "canonical-v1",
+                "ytdlp_version": ytdlp_version,
+                "ytdlp_impersonation_available": ytdlp_impersonation_available,
             })
             .to_string();
             let run_id = store.open_batch_run(&params_json, classification.source_toml())?;

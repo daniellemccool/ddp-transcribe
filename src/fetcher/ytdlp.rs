@@ -162,6 +162,87 @@ fn build_yt_dlp_args(
     (args, wav_path, redact)
 }
 
+/// Parse `yt-dlp --list-impersonate-targets` output. Some(true) = at
+/// least one target line lacks "(unavailable)"; Some(false) = targets
+/// listed, all unavailable; None = nothing parseable (echo stays honest:
+/// unknown is unknown, per the transport-observability decision).
+pub(crate) fn impersonation_available_from_listing(stdout: &str) -> Option<bool> {
+    let lines: Vec<&str> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    Some(lines.iter().any(|l| !l.contains("(unavailable)")))
+}
+
+/// Startup environment echo (spec D5): what yt-dlp will the fetch workers
+/// actually run, and can it impersonate? Best-effort — every failure path
+/// is a warn + None, never fatal (same posture as ADR-0044 hooks). Both
+/// invocations are bounded per ADR-0021 (fixed capture caps, no unbounded
+/// reads) and never gate or delay the batch: the caller awaits this once
+/// at startup and proceeds regardless of outcome.
+pub(crate) async fn ytdlp_env_echo(timeout: Duration) -> (Option<String>, Option<bool>) {
+    let version = match run(CommandSpec {
+        program: "yt-dlp".to_string(),
+        args: vec!["--version".into()],
+        timeout,
+        stderr_capture_bytes: 8 * 1024,
+        stdout_capture_bytes: 8 * 1024,
+        redact_arg_indices: &[],
+    })
+    .await
+    {
+        Ok(o) if o.exit_code == 0 => o
+            .stdout
+            .as_deref()
+            .and_then(|b| std::str::from_utf8(b).ok())
+            .and_then(|s| s.lines().next())
+            .map(|s| s.trim().to_string()),
+        Ok(o) => {
+            tracing::warn!(
+                exit_code = o.exit_code,
+                "yt-dlp --version failed; env echo incomplete"
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "yt-dlp --version did not run; env echo incomplete");
+            None
+        }
+    };
+    let impersonation = match run(CommandSpec {
+        program: "yt-dlp".to_string(),
+        args: vec!["--list-impersonate-targets".into()],
+        timeout,
+        stderr_capture_bytes: 8 * 1024,
+        stdout_capture_bytes: 64 * 1024,
+        redact_arg_indices: &[],
+    })
+    .await
+    {
+        Ok(o) if o.exit_code == 0 => o
+            .stdout
+            .as_deref()
+            .and_then(|b| std::str::from_utf8(b).ok())
+            .and_then(impersonation_available_from_listing),
+        Ok(o) => {
+            tracing::warn!(
+                exit_code = o.exit_code,
+                "yt-dlp --list-impersonate-targets failed; env echo incomplete"
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "yt-dlp --list-impersonate-targets did not run; env echo incomplete");
+            None
+        }
+    };
+    (version, impersonation)
+}
+
 /// Argv for a metadata-only invocation (backfill-metadata): print the
 /// metadata line, transfer no media. `--skip-download` suppresses the
 /// transfer; `--no-simulate` keeps `--print` from downgrading the run
@@ -792,6 +873,29 @@ mod tests {
                 "https://www.tiktok.com/@u/video/123".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn impersonation_availability_parses_all_unavailable_as_false() {
+        let listing = "\
+chrome-136        (unavailable)
+chrome-133        (unavailable)
+safari-18         (unavailable)";
+        assert_eq!(impersonation_available_from_listing(listing), Some(false));
+    }
+
+    #[test]
+    fn impersonation_availability_parses_any_available_as_true() {
+        let listing = "\
+chrome-136
+chrome-133        (unavailable)";
+        assert_eq!(impersonation_available_from_listing(listing), Some(true));
+    }
+
+    #[test]
+    fn impersonation_availability_is_none_on_empty_output() {
+        assert_eq!(impersonation_available_from_listing(""), None);
+        assert_eq!(impersonation_available_from_listing("  \n"), None);
     }
 
     #[test]
