@@ -46,6 +46,30 @@ script actually emits.
 
 ---
 
+### `claim_next`'s doc comment states the 19-digit id guarantee unconditionally
+
+**Found in:** v0.5.0 census-completion Task 03 (recency claim order),
+parked by operator ruling.
+**Disposition:** Latent, not a bug today. `Store::claim_next`
+(`src/state/mod.rs:669-673`) documents the recency ordering as relying on
+"video_id is a 19-digit snowflake, so DESC text order = DESC creation
+time" — stated as a property of every row the function claims, with no
+`canonical` qualifier. The v6→v7 migration guard that actually enforces
+this (`src/state/migrate.rs`, the `v6→v7: canonical id-width census`) only
+censuses `WHERE canonical = 1` rows and refuses to migrate if any of
+*those* violate the width/digit assumption — non-canonical rows are never
+checked. Production `ingest` only ever inserts `canonical = true`
+(`src/ingest.rs:407`), so every pending row today is canonical and the doc
+comment's unconditional claim happens to be true in practice.
+**Trigger to revisit:** Plan C short-link resolution — the point where
+non-canonical (`canonical = 0`) rows start landing in `videos` and can
+reach `claim_next`'s pending set. At that point either scope the doc
+comment to canonical rows explicitly, or widen the migration guard (and
+`claim_next`'s ordering guarantee) to cover non-canonical ids too —
+whichever Plan C's actual non-canonical id shape turns out to need.
+
+---
+
 ### `output::shard` slices by bytes; panics on non-ASCII input
 
 **Found in:** T8 code quality review (opus).

@@ -1680,3 +1680,35 @@ the gated build was run on the paused SRC workspace at branch tip `2788483` —
 `tests/whisper_engine_init.rs` tests passed on the GPU, including the assertion
 test. Commits after `2788483` touch no `cfg(cuda)`-gated code; there is none in
 `src/` (the feature only toggles `whisper-rs-sys`'s build).
+
+---
+
+## Resolved by v0.5.0 — census-completion release (2026-08-12)
+
+### Mass-instant-failure circuit breaker for the fetch path
+
+**Found in:** the 2026-08-06 TLS-fingerprint 403 incident
+(`docs/operations/incident-2026-08-06-tiktok-tls-403.md`, filed on the
+still-unmerged `docs/incident-2026-08-06-tiktok-tls-403` branch — its
+`docs/FOLLOWUPS.md` / `docs/followups/production-run.md` edits never landed
+on this branch, so this entry is being archived directly rather than moved
+out of an active-scope line here; reconcile that branch's copy against this
+archive entry, don't re-open it, when it merges). The pipeline spent ~60
+hours failing every claim in ~250 ms at ~8/s — 1.81M attempts burned,
+sustained hammering of an endpoint that was rejecting us, and zero successes
+for two and a half days with no operator-visible signal (census only writes
+at run end).
+
+**Resolution:** ADR-0050 ("Trip the breaker, never burn the pool"),
+implemented in `04a457f`. `process` now aborts the run when a run-global
+streak of consecutive claims resolves without a single success —
+`--breaker-threshold` (default 50, `0` disables). Tripping cancels the
+ADR-0025 supervision token (same drain path, no second shutdown mechanism),
+the census (`batch_runs.census_json`) records `breaker_tripped`, and the
+process exits with code 4 — all exactly the sizing and DB-visibility this
+entry called for. The 2026-08-10 WAF incident (a second, faster-caught
+instance of the same failure mode) independently promoted this to
+"highest-value engineering item" before the fix landed; that incident's own
+record (also on an unmerged branch,
+`docs/incident-2026-08-10-waf-impersonation-block`) should likewise be
+reconciled against this resolution rather than treated as still-open.
