@@ -72,6 +72,7 @@ Load the ADR(s) whose filename matches the area you are touching.
 - [0035 — Send cookies on gated retries only](./0035-cookies-ride-only-requires-cookie-retries-with-argv-redaction.md)
 - [0038 — Keep frugal for NoDataBlocks only](./0038-fetch-format-is-download-first-the-frugal-selector-runs-only-on-nodatablocks-retries.md)
 - [0042 — Re-parse metadata, never re-fetch](./0042-fetch-time-metadata-is-captured-raw-first-parsing-is-a-replayable-post-run-step.md)
+- [0049 — Derive the fetch URL, never rewrite provenance](./0049-derive-the-fetch-url-never-rewrite-provenance.md)
 
 ### Ingest
 
