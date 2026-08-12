@@ -1688,12 +1688,12 @@ test. Commits after `2788483` touch no `cfg(cuda)`-gated code; there is none in
 ### Mass-instant-failure circuit breaker for the fetch path
 
 **Found in:** the 2026-08-06 TLS-fingerprint 403 incident
-(`docs/operations/incident-2026-08-06-tiktok-tls-403.md`, filed on the
-still-unmerged `docs/incident-2026-08-06-tiktok-tls-403` branch — its
-`docs/FOLLOWUPS.md` / `docs/followups/production-run.md` edits never landed
-on this branch, so this entry is being archived directly rather than moved
-out of an active-scope line here; reconcile that branch's copy against this
-archive entry, don't re-open it, when it merges). The pipeline spent ~60
+(`docs/operations/incident-2026-08-06-tiktok-tls-403.md`; at archive time
+that record was on a then-unmerged branch, so this entry was archived
+directly rather than moved from an active-scope line — **reconciled
+2026-08-12** when the incident branches merged: the incoming active entry
+was removed in the same merge, per the v0.5.0 PR's merge-ordering note; the
+original body text survives in the incident branch history). The pipeline spent ~60
 hours failing every claim in ~250 ms at ~8/s — 1.81M attempts burned,
 sustained hammering of an endpoint that was rejecting us, and zero successes
 for two and a half days with no operator-visible signal (census only writes
