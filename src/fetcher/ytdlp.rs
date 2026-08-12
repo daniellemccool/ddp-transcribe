@@ -162,20 +162,55 @@ fn build_yt_dlp_args(
     (args, wav_path, redact)
 }
 
-/// Parse `yt-dlp --list-impersonate-targets` output. Some(true) = at
-/// least one target line lacks "(unavailable)"; Some(false) = targets
-/// listed, all unavailable; None = nothing parseable (echo stays honest:
-/// unknown is unknown, per the transport-observability decision).
+/// Parse `yt-dlp --list-impersonate-targets` output. Only lines
+/// recognizable as target rows count toward the verdict — header text
+/// (`[info] Available impersonate targets`, the `Client  OS  Source`
+/// column header) and the dash separator row must never flip it (review
+/// finding, task 09 fix: a header/separator line that merely lacks
+/// "(unavailable)" is not evidence of an available target).
+///
+/// Recognition rule: a trimmed line counts as a target row iff it
+/// contains the substring `curl_cffi` — yt-dlp's request-handler name,
+/// which its `render_table` Source column embeds in every genuine row,
+/// available or unavailable (`yt_dlp/networking/_curlcffi.py`:
+/// `RH_NAME = 'curl_cffi'`, the only impersonate handler yt-dlp ships).
+/// Verified against this handler's own live
+/// `yt-dlp --list-impersonate-targets` output on 2026-08-12 (yt-dlp
+/// 2026.07.04 installed on this dev machine):
+/// ```text
+/// [info] Available impersonate targets
+/// Client    OS   Source
+/// --------------------------------------------
+/// Tor       -    curl_cffi>=0.11 (unavailable)
+/// Edge      -    curl_cffi (unavailable)
+/// Firefox   -    curl_cffi>=0.10 (unavailable)
+/// Safari    -    curl_cffi (unavailable)
+/// Chrome    -    curl_cffi (unavailable)
+/// ```
+/// none of the info/header/separator lines contain `curl_cffi`, so only
+/// the five data rows are recognized.
+///
+/// Some(true) = at least one recognized target row lacks "(unavailable)";
+/// Some(false) = at least one target row recognized, all unavailable;
+/// None = no line recognized as a target row (echo stays honest: unknown
+/// is unknown, per the transport-observability decision). This also
+/// fails closed if a future yt-dlp ships a differently-named handler —
+/// recognition silently yields None rather than mis-reading a reshaped
+/// header as a verdict.
 pub(crate) fn impersonation_available_from_listing(stdout: &str) -> Option<bool> {
-    let lines: Vec<&str> = stdout
+    let target_rows: Vec<&str> = stdout
         .lines()
         .map(str::trim)
-        .filter(|l| !l.is_empty())
+        .filter(|line| line.contains("curl_cffi"))
         .collect();
-    if lines.is_empty() {
+    if target_rows.is_empty() {
         return None;
     }
-    Some(lines.iter().any(|l| !l.contains("(unavailable)")))
+    Some(
+        target_rows
+            .iter()
+            .any(|line| !line.contains("(unavailable)")),
+    )
 }
 
 /// Startup environment echo (spec D5): what yt-dlp will the fetch workers
@@ -875,21 +910,53 @@ mod tests {
         );
     }
 
+    /// Regression fixture for the task-09 review finding: real captured
+    /// `yt-dlp --list-impersonate-targets` output (yt-dlp 2026.07.04,
+    /// verified live on this dev machine 2026-08-12), header + separator
+    /// above five all-unavailable target rows. The pre-fix parser (any
+    /// non-blank line lacking "(unavailable)") would have flagged the
+    /// header row `Client    OS   Source` as an available target and
+    /// returned `Some(true)` — wrong. The fixed parser recognizes only
+    /// `curl_cffi`-bearing rows, so it must still return `Some(false)`.
     #[test]
     fn impersonation_availability_parses_all_unavailable_as_false() {
         let listing = "\
-chrome-136        (unavailable)
-chrome-133        (unavailable)
-safari-18         (unavailable)";
+[info] Available impersonate targets
+Client    OS   Source
+--------------------------------------------
+Tor       -    curl_cffi>=0.11 (unavailable)
+Edge      -    curl_cffi (unavailable)
+Firefox   -    curl_cffi>=0.10 (unavailable)
+Safari    -    curl_cffi (unavailable)
+Chrome    -    curl_cffi (unavailable)";
         assert_eq!(impersonation_available_from_listing(listing), Some(false));
     }
 
+    /// Same realistic header/separator shape as above, but one target row
+    /// is available (no "(unavailable)" suffix) — must still parse as
+    /// `Some(true)`, not be dragged down by the all-unavailable rows.
     #[test]
     fn impersonation_availability_parses_any_available_as_true() {
         let listing = "\
-chrome-136
-chrome-133        (unavailable)";
+[info] Available impersonate targets
+Client    OS   Source
+--------------------------------------------
+Chrome-136    -    curl_cffi
+Chrome-133    -    curl_cffi (unavailable)";
         assert_eq!(impersonation_available_from_listing(listing), Some(true));
+    }
+
+    /// Review finding: a header/separator-only listing (no recognizable
+    /// target row at all) must yield `None`, never `Some(false)` — the
+    /// pre-fix parser would have returned `Some(false)` here (no line
+    /// contains "(unavailable)", but also no target rows to judge from).
+    #[test]
+    fn impersonation_availability_header_only_is_none() {
+        let listing = "\
+[info] Available impersonate targets
+Client    OS   Source
+--------------------------------------------";
+        assert_eq!(impersonation_available_from_listing(listing), None);
     }
 
     #[test]
