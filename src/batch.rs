@@ -554,6 +554,10 @@ mod tests {
         let json = serde_json::to_string(&census).unwrap();
         assert!(json.contains("\"swept_terminal\":2"));
         assert!(json.contains("\"IpBlockedMessage\":2"));
+        // Final-review Finding 3 (ADR-0050 DB-visibility requirement): pin
+        // that `breaker_tripped` actually lands in persisted census_json,
+        // not just the in-memory struct.
+        assert!(json.contains("\"breaker_tripped\":false"));
         let text = census.to_string();
         assert!(text.contains("swept_terminal"));
         assert!(text.contains("IpBlockedMessage"));

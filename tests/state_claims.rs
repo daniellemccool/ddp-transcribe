@@ -813,6 +813,49 @@ fn fresh_rows_claim_before_requeued_retries() {
     assert_eq!(second.video_id, "vid_retry");
 }
 
+/// Final-review Finding 2 (ADR-0048 guidance): pin `claim_next`'s SELECT to
+/// its index. A drifted WHERE/ORDER BY that no longer matches
+/// `idx_videos_pending_v4` (status, attempt_count, video_id DESC) would
+/// silently fall back to a full scan + sort at production scale (1.93M+
+/// rows) — this makes that regression a test failure instead of something
+/// only caught by a manual `EXPLAIN QUERY PLAN` at review time.
+#[test]
+fn claim_next_query_plan_uses_pending_index() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let path = tmp.path().join("state.sqlite");
+    let mut store = Store::open(&path)?;
+    store.upsert_video("7000000000000000001", "https://example/a", true)?;
+
+    // Mirrors claim_next's SELECT verbatim (src/state/mod.rs).
+    let raw = rusqlite::Connection::open(&path)?;
+    let mut stmt = raw.prepare(
+        "EXPLAIN QUERY PLAN
+         SELECT video_id, source_url, attempt_count, last_retryable_kind, canonical
+         FROM videos
+         WHERE status = 'pending'
+         ORDER BY attempt_count ASC, video_id DESC
+         LIMIT 1",
+    )?;
+    let plan: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(3))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let plan = plan.join("\n");
+
+    assert!(
+        plan.contains("idx_videos_pending_v4"),
+        "claim_next SELECT must use idx_videos_pending_v4, got plan:\n{plan}"
+    );
+    assert!(
+        !plan.contains("USE TEMP B-TREE"),
+        "claim_next SELECT must not require a temp b-tree sort, got plan:\n{plan}"
+    );
+
+    // Keep `store` alive: dropping it before the raw connection reads risks
+    // an unrelated confusing WAL-checkpoint interaction on some platforms.
+    drop(store);
+    Ok(())
+}
+
 /// End-to-end attempt-counting invariant across one full
 /// claim → fail → requeue → reclaim cycle. The pieces are exercised
 /// separately elsewhere; this pins the composition, because `attempt_count`

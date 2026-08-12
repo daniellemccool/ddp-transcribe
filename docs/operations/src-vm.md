@@ -131,7 +131,10 @@ order — do not skip to (3) on the first trip.
 now performs a best-effort yt-dlp environment echo at startup — two
 sequential probes (`yt-dlp --version`, then `yt-dlp --list-impersonate-targets`),
 10s timeout each — recorded into `batch_runs.params_json` as
-`ytdlp_version` / `ytdlp_impersonation_available`. A healthy yt-dlp answers
+`ytdlp_version` / `ytdlp_impersonation_available`, alongside `fetch_url_form`
+(currently always `"canonical-v1"` — ADR-0049's derived-URL echo; this is
+the field to check if you need to answer "which URL form is this run
+fetching?"). A healthy yt-dlp answers
 both in well under a second; if yt-dlp hangs, batch start is delayed by a
 bounded worst case of ~20s before the first claim. No operator action
 needed — this is the explanation if a batch appears to pause briefly right

@@ -8,6 +8,7 @@ applies_to:
     - src/canonical.rs
     - src/backfill.rs
     - src/state/mod.rs
+    - src/state/queries.rs
     - src/output/artifacts.rs
 priority: invariant
 ---

@@ -1125,10 +1125,18 @@ pub async fn run_pipelined(
     // Epic 5a: the checkpoint task loops until cancelled, so on a clean
     // drain nothing would ever cancel it and `join_next()` would block
     // forever. The workers ARE the batch: 1 transcribe + N fetch. Once
-    // that many tasks have joined, every worker is done (the checkpoint
-    // task cannot have joined before a cancel), so cancel the token to
-    // release it. `==` fires exactly once; on the first-Err path the token
-    // is already cancelled and this is a no-op.
+    // that many tasks have joined, every worker is done, so cancel the
+    // token to release the checkpoint task. `==` fires exactly once; on
+    // the first-Err path the token is already cancelled and this is a
+    // no-op. This is also the mid-run breaker-trip path (0025-load-bearing
+    // invariant): `breaker.note_failure` cancels the token directly, which
+    // is itself just another cancel — so the checkpoint task CAN be among
+    // the first `supervised_workers` joins here, unlike in the
+    // pre-breaker design this comment used to describe. That's fine: the
+    // cancel below is idempotent (`CancellationToken::cancel` on an
+    // already-cancelled token is a no-op) and this loop only ever drains
+    // `join_next()` to `None`, so an early or repeated cancel cannot
+    // corrupt the drain.
     let supervised_workers = 1 + opts_arc.download_workers;
     let mut joined_tasks = 0usize;
     while let Some(joined) = join_set.join_next().await {
