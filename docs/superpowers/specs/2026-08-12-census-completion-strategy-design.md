@@ -1,7 +1,7 @@
 # Census-completion strategy — design (2026-08-12)
 
-**Status: DRAFT for operator review.** Product of the 2026-08-12 holistic
-options session following the two WAF incidents. Companion evidence:
+**Status: APPROVED (operator, 2026-08-12) — D1–D6 binding.** Product of the
+2026-08-12 holistic options session following the two WAF incidents. Companion evidence:
 `docs/operations/incident-2026-08-06-tiktok-tls-403.md` and
 `docs/operations/incident-2026-08-10-tiktok-waf-impersonation-block.md`
 (the latter on branch `docs/incident-2026-08-10-waf-impersonation-block`
