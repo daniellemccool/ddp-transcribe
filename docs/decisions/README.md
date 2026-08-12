@@ -35,6 +35,7 @@ Load the ADR(s) whose filename matches the area you are touching.
 - [0036 — Let the re-fetch judge liveness](./0036-retry-is-in-pipeline-capped-failure-time-requeue-the-re-fetch-is-the-liveness-oracle.md)
 - [0040 — Move in_window only via recompute-window](./0040-analysis-window-is-computed-at-ingest-recompute-window-is-the-only-flag-mutator.md)
 - [0046 — Default-deny requeue-failures](./0046-requeue-failures-is-a-forensic-default-deny-override-of-retry-eligibility.md)
+- [0048 — Claim newest-published first](./0048-claim-newest-published-first.md)
 
 ### Whisper engine
 
