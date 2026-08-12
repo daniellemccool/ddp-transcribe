@@ -42,10 +42,13 @@ code plus `params_json`, not data.
   without their own evidence.
 - Cookie scoping (ADR-0035) and format policy (ADR-0038) read the claim,
   not the URL — derivation must not alter either decision point.
-- The `canonical` gate is the one boolean already on the claimed row
-  (`Video.canonical`, `src/state/mod.rs:33`) — the same field cookie and
-  format policy branch on. Derivation reads it; it does not add a second
-  canonical/non-canonical signal.
+- `Claim` (`src/state/mod.rs:424`, returned by `claim_next`) does not yet
+  expose the DB's `canonical` column — only `video_id`, `source_url`,
+  `attempt_count`, `last_retryable_kind`. Adding a `Claim.canonical` field
+  is this decision's own DB-to-claim plumbing, not a pre-existing input;
+  cookie scoping (ADR-0035) and format policy (ADR-0038) keep branching on
+  `last_retryable_kind` alone, unchanged — `canonical` must not become a
+  second input to either.
 
 ## Why
 
