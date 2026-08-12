@@ -36,19 +36,24 @@ fn claim_next_returns_pending_video_and_marks_in_progress() {
     assert_eq!(row.attempt_count, 1, "attempt_count incremented on claim");
 }
 
+/// Claim-order ADR: within an attempt tier, newest-published first.
+/// video_id is a snowflake (upper 32 bits = creation epoch), 19 digits
+/// wide (v7 migration guard), so DESC text order = DESC creation time.
 #[test]
-fn claim_next_orders_by_first_seen_at() {
-    let (_tmp, mut store) = fresh_store_with(&[]);
-    store
-        .upsert_video("7234567890123456789", "first", true)
-        .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(1100));
-    store
-        .upsert_video("7234567890123456788", "second", true)
-        .unwrap();
-
-    let first_claim = store.claim_next("w").unwrap().unwrap();
-    assert_eq!(first_claim.video_id, "7234567890123456789");
+fn claim_next_orders_by_recency_within_attempt_tier() {
+    // Deliberately inserted oldest-first with ascending first_seen_at to
+    // prove first_seen_at no longer participates.
+    let (_tmp, mut store) = fresh_store_with(&[
+        ("7600000000000000001", "https://example/old"),
+        ("7650000000000000001", "https://example/mid"),
+        ("7700000000000000001", "https://example/new"),
+    ]);
+    let first = store.claim_next("w").unwrap().expect("row available");
+    assert_eq!(first.video_id, "7700000000000000001", "newest claims first");
+    let second = store.claim_next("w").unwrap().expect("row available");
+    assert_eq!(second.video_id, "7650000000000000001");
+    let third = store.claim_next("w").unwrap().expect("row available");
+    assert_eq!(third.video_id, "7600000000000000001", "oldest claims last");
 }
 
 #[test]
