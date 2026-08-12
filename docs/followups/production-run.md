@@ -207,6 +207,84 @@ events = sweep, none = writer loss.
 
 ---
 
+### `--impersonate` belongs in `build_yt_dlp_args` (with its own ADR)
+
+**Found in:** the 2026-08-06 TLS-fingerprint 403 incident
+(`docs/operations/incident-2026-08-06-tiktok-tls-403.md`) — TikTok's edge
+began rejecting non-browser TLS fingerprints on `www.tiktokv.com`, killing
+every fetch's unimpersonated first hop; 1.81M rows burned one attempt over
+60 unattended hours.
+**Disposition:** The live mitigation is deliberately ops-level: a yt-dlp
+user config (`~/.config/yt-dlp/config` → `--impersonate chrome`) on the
+campaign VM, installed by the deploy repo's `ytdlp` role, working because
+the pipeline never passes `--ignore-config`. That keeps the pinned v0.3.0
+binary untouched mid-campaign (ADR-0043), but it is config-by-side-effect:
+invisible in `batch_runs.params_json`, invisible in the argv the subprocess
+layer logs, and silently absent on any host where the file is missing.
+**Trigger to revisit:** the next pipeline release that touches the fetcher
+(or Plan C multi-engine work, whichever first).
+
+The proper fix is `--impersonate <target>` as an explicit member of
+`build_yt_dlp_args` (`src/fetcher/ytdlp.rs`), with an ADR settling: whether
+it is unconditional or flag-gated, what happens on hosts without curl_cffi
+(yt-dlp hard-errors on `--impersonate` with no target available — the
+desktop currently has none installed), and whether the target string is
+operator-configurable. Note the interaction with the deploy role's
+provisioning check ("Verify yt-dlp impersonation targets are available"),
+which currently verifies a capability nothing in the pipeline explicitly
+uses. When the argv change lands, retire the config file in the same deploy
+change — two sources of the same flag is drift waiting to happen.
+
+---
+
+### yt-dlp version drift vs the classification-pattern pins
+
+**Found in:** the same incident's probe work. ADR-0033 pins the table's
+patterns to yt-dlp 2026.03.17 stderr; the deploy role installs yt-dlp
+unpinned at provisioning time (`pipx install`, `creates:` guard, never
+upgraded). Live fleet observed 2026-08-09: campaign VM 2026.07.04, old VM
+2026.06.09 — three versions in play including the dev pin, none chosen on
+purpose.
+**Disposition:** No observed mismatch — the campaign classified correctly
+throughout, and the incident's `HTTP Error` messages matched the table on
+both VM versions. This is drift *exposure*, not drift damage.
+**Trigger to revisit:** any yt-dlp upgrade or reinstall on a fetch host, or
+the first unexplained growth of `YtDlpOther` (the fallback catching what a
+drifted message no longer matches — cheap census query, worth adding to the
+operator's periodic checks).
+
+Options when triggered, in ascending effort: re-verify the table against
+the new version's stderr corpus (0033's own procedure); pin the version in
+the deploy role so drift becomes a deliberate act; both.
+
+---
+
+### Mass-instant-failure circuit breaker for the fetch path
+
+**Found in:** the same incident. The pipeline spent ~60 hours failing every
+claim in ~250 ms at ~8/s — 1.81M attempts burned, sustained hammering of an
+endpoint that was rejecting us, and zero successes for two and a half days
+with no operator-visible signal (census only writes at run end; tracing
+output is operationally invisible per the `swept_stale` entry's tmux
+ruling).
+**Disposition:** Design task, not a quick patch — the right shape needs
+thought (consecutive-failure threshold vs success-rate window; per-worker
+vs run-global; halt vs exponential backoff vs park-and-continue; how it
+interacts with `claim_next`-None drain semantics per ADR-0026 and the
+cancel/drain shutdown protocol per ADR-0025).
+**Trigger to revisit:** before the next long unattended campaign stretch;
+at latest, the next epic touching the fetch workers.
+
+Sizing note from the incident: at wave rates, even a crude "abort the run
+after N consecutive retryable fetch failures with zero successes" (N in
+the hundreds) would have cut the burn from 1.81M attempts to noise, ended
+the run (making the census visible), and — combined with the deploy-side
+run-log persistence followup — alerted the operator ~2 days earlier. Per
+the standing operator ruling, prefer a DB-visible signal (the census row)
+over a log warning.
+
+---
+
 ### `swept_stale` event/recovered-set invariant is enforced only in debug builds
 
 **Found in:** Epic 5a Task 03 review (2026-07-30), parked by operator ruling
@@ -228,3 +306,119 @@ back, so log warnings are operationally invisible.
 **Trigger to revisit:** next-campaign hardening pass, or any edit to
 `sweep_stale_claims`' SELECT/UPDATE predicate pair (ADR-0024's Guidance already
 rejects adding a condition to either side).
+
+---
+
+### Fetch-URL construction belongs in `build_yt_dlp_args` (with its own ADR)
+
+**Supersedes** the incident-1 entry "`--impersonate` belongs in
+`build_yt_dlp_args`". That entry assumed impersonation was the fix; the
+2026-08-10 WAF incident
+(`docs/operations/incident-2026-08-10-tiktok-waf-impersonation-block.md`)
+established it is the *failure*. Both decisions are now one ADR.
+
+**Found in:** the 2026-08-10 Akamai WAF block. TikTok serves a 537-byte
+"Site Maintenance" page with HTTP 200 to clients presenting curl_cffi's Chrome
+TLS fingerprint. The remedy is the canonical
+`www.tiktok.com/@<user>/video/<id>/` URL fetched **unimpersonated** — proven
+end-to-end through the pinned v0.3.0 binary (3 claimed / 2 succeeded with valid
+16 kHz mono WAVs and metadata envelopes / 1 correctly-classed
+`IpBlockedMessage`).
+
+**Disposition:** applied as **two ops-level changes**, both invisible to the
+code and to `batch_runs.params_json`:
+
+1. curl_cffi uninstalled from the pipx yt-dlp venv — the only lever, because
+   `impersonate=True` is hardcoded in yt-dlp's TikTok extractor
+   (`_extract_web_data_and_status`). No CLI flag disables it.
+2. `videos.source_url` rewritten to `https://www.tiktok.com/@x/video/<id>/`
+   for `pending`/`failed_retryable`/`in_progress` rows (1,928,670 rows;
+   rehearsed on a snapshot copy: 6m49s, `integrity_check ok`, +737 KB,
+   succeeded/terminal rows untouched).
+
+The proper fix builds the URL from `video_id` inside `build_yt_dlp_args`
+(`src/fetcher/ytdlp.rs:97`), leaving `source_url` as pure provenance, and
+retires the DB rewrite in the same change. The ADR must settle: whether the
+canonical form is unconditional or policy-selected; what username segment to
+emit (must be non-empty — `@/video/<id>` fetches but fails `CANONICAL_RE` in
+`src/canonical.rs:25`, classifying `Invalid`); whether impersonation is
+explicitly *disabled* in argv rather than by dependency absence; and what
+run-visible witness proves which mode is active (ADR-0013's precedent: an
+unverifiable claim about the backend is worthless).
+
+**Trigger to revisit:** **before the next ADR-0043 promotion.** 0043's step 5
+is delete-and-relaunch, which reinstates curl_cffi from the deploy repo's
+`ytdlp` role and returns the machine to 100% fetch failure — so the promotion
+itself becomes the outage unless the deploy repo is fixed first. Also blocks
+`backfill-metadata` (it reads `source_url` on `succeeded` rows, which were
+deliberately left on the 403-gated share form).
+
+---
+
+### Classification patterns for the two WAF-refusal messages
+
+**Found in:** the 2026-08-10 WAF incident. 1,360 rows in ~21 minutes fell to
+the `YtDlpOther` catch-all: 1,351 × `Unsupported URL:
+https://www.tiktok.com/share/video/<id>/` (the *generic* extractor's message
+when the redirect chain leaves it holding the middle hop) and 9 ×
+`Unexpected response from webpage request` (the *TikTok* extractor's message
+when handed the block page directly). Same event, two extractors.
+
+**Disposition:** the catch-all's `retryable` disposition was **correct** —
+these are refusals, not video death, and the whole wave is recoverable. So
+this is an observability fix, not a behavioral one: labelling them means a
+recurrence shows up in `status` instead of hiding in `YtDlpOther`. Evidence
+meets ADR-0033's bar (the dumped block page is in the incident record), and
+per ADR-0037 the table is operator-editable TOML — a `--classification` file
+needs no release.
+
+Keep `YtDlpOther` monitored regardless: the reason both incidents were
+survivable is that an unrecognised message defaults to retryable, and the
+reason both went unnoticed is that the same default is silent.
+
+**Trigger to revisit:** next classification-table edit, or the first
+recurrence.
+
+---
+
+### Two-form `source_url` corpus (researcher-visible provenance)
+
+**Found in:** the 2026-08-10 remedy. `source_url` is a provenance field
+written into every transcript JSON artifact (ADR-0010,
+`src/output/artifacts.rs:50`). After the rewrite, new artifacts carry
+`https://www.tiktok.com/@x/video/<id>/` while the existing 880,387 carry
+`https://www.tiktokv.com/share/video/<id>/`.
+
+**Disposition:** accepted deliberately, not stumbled into. It is lossless —
+the 2026-08-11 snapshot census confirmed all 2,982,461 rows are
+`canonical = 1`, all form-1, zero query strings, every URL containing its own
+`video_id`, so either form is exactly reconstructible from the primary key,
+and the DDP originals remain in Yoda. The rewrite was scoped to unfetched rows
+specifically to leave completed provenance untouched.
+
+**Trigger to revisit:** analysis handoff (flag it to the PI as a corpus note),
+or normalise when the pipeline-side fix lands and `source_url` becomes pure
+provenance again.
+
+---
+
+### Hourly census check (the alarm that was filed and never installed)
+
+**Found in:** the 2026-08-10 WAF incident — and, verbatim, in incident 1's own
+followups five days earlier, which named "the first unexplained growth of
+`YtDlpOther`" as a trigger and called it "a cheap census query, worth adding
+to the operator's periodic checks."
+
+**Disposition:** it was never added, and incident 2 ran undetected until the
+operator happened to look. That it cost ~7 minutes rather than incident 1's
+60 hours was luck, not instrumentation. The check is two queries against the
+state DB: successes in the last hour (zero = stop), and `YtDlpOther` in the
+last hour (nonzero = investigate). Per the standing operator ruling, prefer a
+DB-visible signal over a log warning.
+
+This is the cheap half of the detection gap; the mass-instant-failure circuit
+breaker is the durable half. Neither substitutes for the other — the breaker
+stops the burn, the check tells a human.
+
+**Trigger to revisit:** before the next unattended stretch. Until it exists,
+the operator is the circuit breaker (unchanged from incident 1).

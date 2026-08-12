@@ -540,7 +540,12 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite --transcripts ~/ddp-work/tran
 ## Known VM facts (hard-won; do not re-derive)
 
 - **`IpBlockedMessage` means the video was removed.** The yt-dlp stderr text is a
-  misfire; the IP is fine (ADR-0033 comment, 2026-07-07).
+  misfire; the IP is fine (ADR-0033 comment, 2026-07-07). A *real* block looks
+  entirely different — zero successes cliff-onset, uniform retryable `HttpError`
+  on the first hop, `no metadata envelope captured` on every fetch, terminal
+  writes stopped — and never says "IP" at all: 60 h / 1.8M real rejections
+  produced that text zero times (signature table in
+  `incident-2026-08-06-tiktok-tls-403.md`).
 - The census persists in the state DB's `batch_runs` table with the active
   policy TOML — attrition documentation survives tmux.
 - `/etc/rsc/cron_webdav.sh` and `cron_user.sh` curl processes are SURF platform
@@ -564,3 +569,56 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite --transcripts ~/ddp-work/tran
 - Bulk file transfer off the volume: iRODS/Yoda per-file overhead dominates below
   ~1 MB/file; parallelize disjoint shard ranges or use a bundle transfer. 120k
   files single-stream ≈ 24 h (measured 2026-07-07).
+- **`ddp-transcribe --version` reporting `0.1.0` is the v0.3.0 signature, not an
+  anomaly.** The Cargo.toml bump-in-tag-commit discipline started at v0.3.1;
+  rc1 and v0.3.0 both compiled with the manifest still at 0.1.0. On the pinned
+  campaign binary, `0.1.0` is *confirmation* of v0.3.0. (v0.3.1+ report their
+  real versions.)
+- **DO NOT IMPERSONATE, AND DO NOT INSTALL curl_cffi.** From 2026-08-10 19:14,
+  TikTok's Akamai WAF serves a 537-byte "Site Maintenance" block page **with
+  HTTP 200** to clients presenting curl_cffi's Chrome TLS fingerprint;
+  yt-dlp misreports it as `Unexpected response from webpage request` and asks
+  you to file an upstream bug (it is not a bug — it is a refusal). Reproduced
+  from residential *and* SURF egress with the same yt-dlp version, so it is
+  the fingerprint, not the IP. `impersonate=True` is **hardcoded** in yt-dlp's
+  TikTok extractor, so there is no flag to disable it — **removing curl_cffi
+  from the yt-dlp venv is the only lever**, and any `pipx upgrade`/reinstall
+  that pulls the extra silently re-breaks fetching. Positive witness that the
+  fix is in effect: `yt-dlp --list-impersonate-targets` shows every target
+  `(unavailable)`. Full record:
+  `incident-2026-08-10-tiktok-waf-impersonation-block.md`. The superseded
+  2026-08-09 `~/.config/yt-dlp/config` → `--impersonate chrome` mitigation has
+  been deleted; do not re-create it.
+  **ADR-0043 interaction — read before the next promotion:** the working
+  configuration is currently *hand-applied VM state* (a package that must stay
+  absent), so 0043's step 5 (delete-and-relaunch) will reinstate curl_cffi from
+  the `ytdlp` role and return the machine to 100% fetch failure. Fix the deploy
+  repo **before** promoting any release, or the promotion itself is the outage.
+  This is exactly the byte-equivalent-rebuild property 0043 exists to protect,
+  and the ops-level fix violates it — which is the argument for landing the
+  pipeline-side fix promptly rather than parking it.
+- **Fetch the canonical URL, not the DDP share URL.**
+  `www.tiktokv.com/share/video/<id>/` (the form DDP exports contain) 403s
+  python's TLS ClientHello from SURF egresses — still live, re-verified
+  2026-08-11. `www.tiktok.com/@<user>/video/<id>/` reaches TikTok's own
+  extractor directly, skips the gated host entirely, and works unimpersonated.
+  Use a **non-empty** username segment (`@x` is fine): `@/video/<id>` fetches
+  but fails `CANONICAL_RE` in `src/canonical.rs`, classifying `Invalid`. The
+  campaign pool's `source_url` values were rewritten to the `@x` form
+  (pending/retryable/in-progress rows only) as an ops-level fix; the
+  pipeline-side fix in `build_yt_dlp_args` is a FOLLOWUPS entry.
+- **A WAF denial can arrive as HTTP 200 with an HTML body.** Both 2026-08
+  outages were Akamai refusals: one as a 403 on `tiktokv.com`, one as a
+  200-with-block-page on `tiktok.com`. No status-code-based rule catches the
+  second. When diagnosing, dump the page —
+  `yt-dlp --write-pages --skip-download -v <url>` then read the `.dump`
+  (a healthy TikTok page is ~400 KB and contains
+  `__UNIVERSAL_DATA_FOR_REHYDRATION__`; a block page is ~537 bytes and says
+  "Site Maintenance"). Never enable `--write-pages` in the pipeline —
+  ~400 KB × 1.9M rows.
+- **`YtDlpOther` growth is the alarm that matters.** It is the classification
+  table's catch-all, so a brand-new upstream failure mode lands there
+  retryable (correct) and *silent* (expensive). Both 2026-08 incidents were
+  first visible as a `YtDlpOther`/`HttpError` spike with
+  `no metadata envelope captured` on every fetch. Check it hourly; zero
+  successes in the last hour is the other half of the same alarm.
