@@ -51,6 +51,9 @@ pub struct RunCensus {
     /// only from the pair.
     pub checkpoints_run: u64,
     pub checkpoints_failed: u64,
+    /// Breaker ADR (0050): DB-visible per the standing operator ruling —
+    /// the verdict must be answerable from `batch_runs.census_json` alone.
+    pub breaker_tripped: bool,
 }
 
 impl From<&ProcessStats> for RunCensus {
@@ -67,6 +70,7 @@ impl From<&ProcessStats> for RunCensus {
             stale_after_failure: s.stale_after_failure,
             checkpoints_run: s.checkpoints_run,
             checkpoints_failed: s.checkpoints_failed,
+            breaker_tripped: s.breaker_tripped,
         }
     }
 }
@@ -146,7 +150,8 @@ impl std::fmt::Display for BatchCensus {
             f,
             "    checkpoints_failed {:>6}",
             self.run.checkpoints_failed
-        )
+        )?;
+        writeln!(f, "    breaker_tripped    {:>6}", self.run.breaker_tripped)
     }
 }
 
@@ -543,6 +548,7 @@ mod tests {
                 stale_after_failure: 0,
                 checkpoints_run: 0,
                 checkpoints_failed: 0,
+                breaker_tripped: false,
             },
         };
         let json = serde_json::to_string(&census).unwrap();

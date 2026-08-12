@@ -46,7 +46,9 @@ mod serial;
 // `#[allow(unused_imports)]` stays per 0002 (suppressed-at-re-export, not
 // at definition).
 #[allow(unused_imports)]
-pub use pipelined::{fetch_worker, run_pipelined, transcribe_worker, FetchedItem, SharedStore};
+pub use pipelined::{
+    fetch_worker, run_pipelined, transcribe_worker, Breaker, FetchedItem, SharedStore,
+};
 // `run_serial` is no longer on the bin's hot path after T18 (the
 // Process arm calls `run_pipelined`). It stays compiled for the
 // integration tests in `tests/pipeline_fakes/serial_tests.rs` which
@@ -170,6 +172,12 @@ pub struct ProcessOptions {
     /// at run boundaries). Consumed by `run_pipelined`, which spawns one
     /// timer task for it; `run_serial` ignores it.
     pub checkpoint: Option<CheckpointConfig>,
+    /// Breaker ADR (0050): run-global consecutive-claims-without-a-success
+    /// streak that aborts the run. 0 disables; flag-tunable via
+    /// `--breaker-threshold` (default 50). Consumed by `run_pipelined`'s
+    /// `Breaker`, which cancels the ADR-0025 supervision token exactly
+    /// once when the streak reaches this value.
+    pub breaker_threshold: usize,
 }
 
 #[derive(Debug, Default)]
@@ -229,6 +237,12 @@ pub struct ProcessStats {
     /// (mid-run syncing is not happening), never a run failure: the hook
     /// path deliberately has no error return (see `run_pipelined`).
     pub checkpoints_failed: u64,
+    /// Breaker ADR (0050): whether the run-global consecutive-no-success
+    /// streak reached `ProcessOptions::breaker_threshold` this run and
+    /// cancelled the ADR-0025 supervision token. A bool outcome, not a
+    /// counter (0007 governs verb-named input-side counters; this is a
+    /// verdict) — census-visible per the ADR's DB-visible requirement.
+    pub breaker_tripped: bool,
 }
 
 /// Outcome of a single `process_one` call. `StaleAfterSuccess` is the

@@ -10,7 +10,7 @@ use tokio::sync::Mutex as TokioMutex;
 
 use ddp_transcribe::errors::TranscribeError;
 use ddp_transcribe::fetcher::{FakeFetcher, VideoFetcher};
-use ddp_transcribe::pipeline::{fetch_worker, FetchedItem, ProcessOptions, SharedStore};
+use ddp_transcribe::pipeline::{fetch_worker, Breaker, FetchedItem, ProcessOptions, SharedStore};
 use ddp_transcribe::state::Store;
 use ddp_transcribe::transcribe::{PerCallConfig, TranscribeOutput, Transcriber};
 
@@ -197,6 +197,7 @@ pub(crate) async fn run_single_fetch_worker(store: SharedStore, fetcher: Arc<dyn
         ),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     });
 
     let worker = tokio::spawn(fetch_worker(
@@ -212,6 +213,7 @@ pub(crate) async fn run_single_fetch_worker(store: SharedStore, fetcher: Arc<dyn
         Arc::new(TokioMutex::new(std::collections::BTreeMap::new())), // terminal_by_label
         Arc::new(AtomicUsize::new(0)), // claims_counter
         opts,
+        Breaker::new(0), // breaker (disabled)
     ));
 
     // Drain (0026 drain semantics: the worker closes the channel on exit).

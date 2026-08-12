@@ -514,6 +514,7 @@ mod tests {
             ),
             retries: 1,
             checkpoint: None,
+            breaker_threshold: 0,
         };
 
         // Use the same Claim returned by claim_next — process_one needs

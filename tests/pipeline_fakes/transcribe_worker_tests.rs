@@ -22,7 +22,7 @@ async fn transcribe_worker_processes_one_item_then_exits_on_channel_close() -> a
     use tokio_util::sync::CancellationToken;
 
     use ddp_transcribe::pipeline::{
-        transcribe_worker, FetchedAudio, FetchedItem, ProcessOptions, SharedStore,
+        transcribe_worker, Breaker, FetchedAudio, FetchedItem, ProcessOptions, SharedStore,
     };
 
     let tmp = TempDir::new()?;
@@ -57,6 +57,7 @@ async fn transcribe_worker_processes_one_item_then_exits_on_channel_close() -> a
         ),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     };
 
     let (tx, rx) = mpsc::channel::<FetchedItem>(2);
@@ -101,6 +102,7 @@ async fn transcribe_worker_processes_one_item_then_exits_on_channel_close() -> a
         Arc::new(AtomicUsize::new(0)), // succeeded
         Arc::new(AtomicUsize::new(0)), // failed
         Arc::new(opts),
+        Breaker::new(0),
     ));
 
     worker_handle.await.expect("join")?;
@@ -158,7 +160,9 @@ async fn transcribe_worker_exits_on_cancellation() -> anyhow::Result<()> {
     use tokio::sync::{mpsc, Mutex as TokioMutex};
     use tokio_util::sync::CancellationToken;
 
-    use ddp_transcribe::pipeline::{transcribe_worker, FetchedItem, ProcessOptions, SharedStore};
+    use ddp_transcribe::pipeline::{
+        transcribe_worker, Breaker, FetchedItem, ProcessOptions, SharedStore,
+    };
 
     let tmp = TempDir::new()?;
     let store = Store::open(&tmp.path().join("state.sqlite"))?;
@@ -182,6 +186,7 @@ async fn transcribe_worker_exits_on_cancellation() -> anyhow::Result<()> {
         ),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     };
 
     let (_tx, rx) = mpsc::channel::<FetchedItem>(2);
@@ -199,6 +204,7 @@ async fn transcribe_worker_exits_on_cancellation() -> anyhow::Result<()> {
         Arc::new(AtomicUsize::new(0)), // succeeded
         Arc::new(AtomicUsize::new(0)), // failed
         Arc::new(opts),
+        Breaker::new(0),
     ));
 
     // Fire cancellation; worker should exit promptly (parked on recv()).
@@ -239,7 +245,7 @@ async fn transcribe_worker_increments_stale_after_failure_on_swept_claim() -> an
     use tokio_util::sync::CancellationToken;
 
     use ddp_transcribe::pipeline::{
-        transcribe_worker, FetchedAudio, FetchedItem, ProcessOptions, SharedStore,
+        transcribe_worker, Breaker, FetchedAudio, FetchedItem, ProcessOptions, SharedStore,
     };
 
     let tmp = TempDir::new()?;
@@ -278,6 +284,7 @@ async fn transcribe_worker_increments_stale_after_failure_on_swept_claim() -> an
         ),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     };
 
     let (tx, rx) = mpsc::channel::<FetchedItem>(2);
@@ -316,6 +323,7 @@ async fn transcribe_worker_increments_stale_after_failure_on_swept_claim() -> an
         Arc::new(AtomicUsize::new(0)), // succeeded
         Arc::new(AtomicUsize::new(0)), // failed
         Arc::new(opts),
+        Breaker::new(0),
     ));
 
     let worker_result = worker_handle.await.expect("join");

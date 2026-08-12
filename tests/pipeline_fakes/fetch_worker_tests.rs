@@ -26,7 +26,9 @@ async fn fetch_worker_drains_pending_rows_and_exits() -> anyhow::Result<()> {
     use tokio::sync::{mpsc, Mutex as TokioMutex};
     use tokio_util::sync::CancellationToken;
 
-    use ddp_transcribe::pipeline::{fetch_worker, FetchedItem, ProcessOptions, SharedStore};
+    use ddp_transcribe::pipeline::{
+        fetch_worker, Breaker, FetchedItem, ProcessOptions, SharedStore,
+    };
 
     let tmp = TempDir::new()?;
     let mut store = Store::open(&tmp.path().join("state.sqlite"))?;
@@ -75,6 +77,7 @@ async fn fetch_worker_drains_pending_rows_and_exits() -> anyhow::Result<()> {
         ),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     };
 
     let worker_handle = tokio::spawn(fetch_worker(
@@ -90,6 +93,7 @@ async fn fetch_worker_drains_pending_rows_and_exits() -> anyhow::Result<()> {
         Arc::new(tokio::sync::Mutex::new(std::collections::BTreeMap::new())), // terminal_by_label
         Arc::clone(&claims_counter),
         Arc::new(opts),
+        Breaker::new(0),
     ));
 
     // Drain the channel — should get 2 items, then None when the worker drops
@@ -153,7 +157,9 @@ async fn fetch_worker_increments_stale_after_failure_on_swept_claim() -> anyhow:
     use tokio::sync::{mpsc, Mutex as TokioMutex};
     use tokio_util::sync::CancellationToken;
 
-    use ddp_transcribe::pipeline::{fetch_worker, FetchedItem, ProcessOptions, SharedStore};
+    use ddp_transcribe::pipeline::{
+        fetch_worker, Breaker, FetchedItem, ProcessOptions, SharedStore,
+    };
 
     let tmp = TempDir::new()?;
     let mut store = Store::open(&tmp.path().join("state.sqlite"))?;
@@ -183,6 +189,7 @@ async fn fetch_worker_increments_stale_after_failure_on_swept_claim() -> anyhow:
         ),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     };
 
     let counter_handle = Arc::clone(&stats_stale_after_failure);
@@ -200,6 +207,7 @@ async fn fetch_worker_increments_stale_after_failure_on_swept_claim() -> anyhow:
         Arc::new(tokio::sync::Mutex::new(std::collections::BTreeMap::new())), // terminal_by_label
         Arc::clone(&claims_counter),
         Arc::new(opts),
+        Breaker::new(0),
     ));
 
     // Wait until the worker has claimed the row and entered the gated
@@ -295,7 +303,7 @@ async fn fetch_worker_threads_cookies_on_sensitive_login_gated_retry() -> anyhow
     use tokio_util::sync::CancellationToken;
 
     use ddp_transcribe::fetcher::VideoFetcher;
-    use ddp_transcribe::pipeline::{fetch_worker, FetchedItem, ProcessOptions};
+    use ddp_transcribe::pipeline::{fetch_worker, Breaker, FetchedItem, ProcessOptions};
 
     let video_id = "7000000000000000012";
     let (store, tmp) = store_with_pending(&[video_id]);
@@ -359,6 +367,7 @@ async fn fetch_worker_threads_cookies_on_sensitive_login_gated_retry() -> anyhow
         ),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     });
 
     let worker = tokio::spawn(fetch_worker(
@@ -374,6 +383,7 @@ async fn fetch_worker_threads_cookies_on_sensitive_login_gated_retry() -> anyhow
         Arc::new(tokio::sync::Mutex::new(std::collections::BTreeMap::new())), // terminal_by_label
         Arc::new(AtomicUsize::new(0)), // claims_counter
         opts,
+        Breaker::new(0),
     ));
 
     while rx.recv().await.is_some() {}
@@ -504,6 +514,7 @@ async fn retry_requeues_then_recovers_in_same_batch() -> anyhow::Result<()> {
         ),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     };
 
     let stats = run_pipelined(Arc::clone(&shared), fetcher, transcriber, opts).await?;
@@ -573,6 +584,7 @@ async fn retry_exhausts_into_failed_retryable() -> anyhow::Result<()> {
         ),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     };
 
     let stats = run_pipelined(Arc::clone(&shared), fetcher, transcriber, opts).await?;
@@ -656,6 +668,7 @@ async fn requires_cookie_parks_without_cookies_and_requeues_with() -> anyhow::Re
         classification: table(),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     };
     let stats = run_pipelined(Arc::clone(&shared), failing, transcriber, opts).await?;
     assert_eq!(stats.parked_for_cookies, 1, "parked, not requeued");
@@ -715,6 +728,7 @@ async fn requires_cookie_parks_without_cookies_and_requeues_with() -> anyhow::Re
         classification: table(),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     };
     let stats2 = run_pipelined(
         Arc::clone(&shared),
@@ -761,7 +775,9 @@ async fn fetch_worker_stale_terminal_claim_not_counted_in_census() -> anyhow::Re
     use tokio::sync::{mpsc, Mutex as TokioMutex};
     use tokio_util::sync::CancellationToken;
 
-    use ddp_transcribe::pipeline::{fetch_worker, FetchedItem, ProcessOptions, SharedStore};
+    use ddp_transcribe::pipeline::{
+        fetch_worker, Breaker, FetchedItem, ProcessOptions, SharedStore,
+    };
 
     let tmp = TempDir::new()?;
     let mut store = Store::open(&tmp.path().join("state.sqlite"))?;
@@ -803,6 +819,7 @@ async fn fetch_worker_stale_terminal_claim_not_counted_in_census() -> anyhow::Re
         ),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     };
 
     let worker_handle = tokio::spawn(fetch_worker(
@@ -818,6 +835,7 @@ async fn fetch_worker_stale_terminal_claim_not_counted_in_census() -> anyhow::Re
         Arc::clone(&terminal_by_label),
         Arc::new(AtomicUsize::new(0)), // claims_counter
         Arc::new(opts),
+        Breaker::new(0),
     ));
 
     // Wait past the second-resolution timestamp boundary, then sweep the
@@ -871,7 +889,9 @@ async fn fetch_worker_discards_attempt_dir_when_channel_is_closed() -> anyhow::R
     use tokio::sync::{mpsc, Mutex as TokioMutex};
     use tokio_util::sync::CancellationToken;
 
-    use ddp_transcribe::pipeline::{fetch_worker, FetchedItem, ProcessOptions, SharedStore};
+    use ddp_transcribe::pipeline::{
+        fetch_worker, Breaker, FetchedItem, ProcessOptions, SharedStore,
+    };
 
     let tmp = TempDir::new()?;
     let mut store = Store::open(&tmp.path().join("state.sqlite"))?;
@@ -915,6 +935,7 @@ async fn fetch_worker_discards_attempt_dir_when_channel_is_closed() -> anyhow::R
         ),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     };
 
     let result = fetch_worker(
@@ -930,6 +951,7 @@ async fn fetch_worker_discards_attempt_dir_when_channel_is_closed() -> anyhow::R
         Arc::new(tokio::sync::Mutex::new(std::collections::BTreeMap::new())), // terminal_by_label
         Arc::new(AtomicUsize::new(0)), // claims_counter
         Arc::new(opts),
+        Breaker::new(0),
     )
     .await;
 

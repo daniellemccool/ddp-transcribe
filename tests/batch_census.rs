@@ -71,6 +71,7 @@ fn batch_lifecycle_persists_provenance_chain() {
             stale_after_failure: 0,
             checkpoints_run: 0,
             checkpoints_failed: 0,
+            breaker_tripped: false,
         },
     };
     let census_json = serde_json::to_string(&census).unwrap();

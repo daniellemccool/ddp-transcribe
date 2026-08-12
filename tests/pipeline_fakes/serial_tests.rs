@@ -62,6 +62,7 @@ async fn pipeline_processes_one_video_to_succeeded_with_fake_fetcher() {
         ),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts)
@@ -157,6 +158,7 @@ async fn pipeline_writes_raw_signals_to_json_artifact() {
         ),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts)
@@ -255,6 +257,7 @@ async fn run_serial_classifies_fetch_failure_as_retryable_and_continues() -> any
         // retries: 0 → immediate exhaust, isolating the marking behavior under test
         retries: 0,
         checkpoint: None,
+        breaker_threshold: 0,
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts).await?;
@@ -363,6 +366,7 @@ async fn run_serial_classifies_transcribe_failure_as_retryable_and_continues() -
         // retries: 0 → immediate exhaust, isolating the marking behavior under test
         retries: 0,
         checkpoint: None,
+        breaker_threshold: 0,
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts).await?;
@@ -439,6 +443,7 @@ async fn run_serial_writes_off_ip_blocked_as_terminal() -> anyhow::Result<()> {
         ),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts).await?;
@@ -499,6 +504,7 @@ async fn run_serial_escalates_transcribe_bug_as_err() -> anyhow::Result<()> {
         ),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     };
 
     let result = run_serial(&mut store, &fetcher, &transcriber, opts).await;
@@ -563,6 +569,7 @@ async fn max_videos_budget_counts_retries() -> anyhow::Result<()> {
         ),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     };
 
     // Run 1: budget of 1 is consumed by the first (failing) attempt; the row
@@ -640,6 +647,7 @@ async fn success_removes_the_whole_attempt_dir() -> anyhow::Result<()> {
         ),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts).await?;
@@ -702,6 +710,7 @@ async fn transcribe_failure_removes_the_attempt_dir() -> anyhow::Result<()> {
         ),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     };
 
     let stats = run_serial(&mut store, &fetcher, &transcriber, opts).await?;

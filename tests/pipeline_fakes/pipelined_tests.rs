@@ -111,6 +111,7 @@ async fn checkpoint_hook_fires_periodically_and_stops_on_cancel() -> anyhow::Res
             cmd: script,
             every: Duration::from_millis(300),
         }),
+        breaker_threshold: 0,
     };
 
     // Hold the one fetch worker inside `acquire` for ~1 s (three intervals),
@@ -202,6 +203,7 @@ async fn checkpoint_hook_failure_never_aborts_the_run() -> anyhow::Result<()> {
             cmd: script,
             every: Duration::from_millis(150),
         }),
+        breaker_threshold: 0,
     };
 
     let release = async {
@@ -296,6 +298,7 @@ async fn run_pipelined_honors_max_videos_cap() -> anyhow::Result<()> {
         ),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     };
 
     let stats = run_pipelined(Arc::clone(&shared), fetcher, transcriber, opts).await?;
@@ -384,6 +387,7 @@ async fn run_pipelined_drains_all_rows_and_returns_stats() -> anyhow::Result<()>
         ),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     };
 
     let stats = run_pipelined(Arc::clone(&shared), fetcher, transcriber, opts).await?;
@@ -455,6 +459,7 @@ async fn fetch_persists_metadata_raw_row_on_success() -> anyhow::Result<()> {
         ),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     };
 
     let stats = run_pipelined(Arc::clone(&shared), fetcher, transcriber, opts).await?;
@@ -544,6 +549,7 @@ async fn run_pipelined_with_transcriber(
         // written by the dispatch under test from any requeue bookkeeping.
         retries: 0,
         checkpoint: None,
+        breaker_threshold: 0,
     };
 
     let result = run_pipelined(Arc::clone(&shared), fetcher, transcriber, opts).await;
@@ -684,6 +690,7 @@ async fn fetch_persists_metadata_raw_row_on_classified_failure() -> anyhow::Resu
         ),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     };
 
     let stats = run_pipelined(Arc::clone(&shared), fetcher, transcriber, opts).await?;
@@ -773,6 +780,7 @@ async fn canonical_claim_fetches_derived_url_but_artifact_keeps_provenance() -> 
         ),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     };
 
     let stats = run_pipelined(
@@ -851,6 +859,7 @@ async fn non_canonical_claim_fetches_stored_url() -> anyhow::Result<()> {
         ),
         retries: 1,
         checkpoint: None,
+        breaker_threshold: 0,
     };
 
     let stats = run_pipelined(
@@ -871,6 +880,232 @@ async fn non_canonical_claim_fetches_stored_url() -> anyhow::Result<()> {
         vec![stored.to_string()],
         "non-canonical rows keep their stored source_url"
     );
+
+    Ok(())
+}
+
+/// Breaker ADR (0050): a run-global consecutive-no-success streak reaching
+/// `breaker_threshold` cancels the ADR-0025 supervision token exactly once.
+/// `run_pipelined` still returns `Ok` — a trip is an outcome, not an `Err`.
+/// `retries: 1` lets some claims requeue-then-exhaust, but every dispatched
+/// failure (requeue or exhaust) counts toward the streak, so 100
+/// always-failing rows trip the threshold-10 breaker quickly. Claims stop
+/// within one in-flight round of the trip: at most `threshold +
+/// download_workers` claims land, since up to `download_workers` fetch
+/// workers can already be past the `token.is_cancelled()` check when the
+/// tripping claim's failure fires.
+#[tokio::test]
+async fn breaker_trips_on_consecutive_failures_and_drains_cleanly() -> anyhow::Result<()> {
+    use std::sync::Arc;
+    use tokio::sync::Mutex as TokioMutex;
+
+    use ddp_transcribe::pipeline::{run_pipelined, ProcessOptions, SharedStore};
+
+    let tmp = TempDir::new()?;
+    std::fs::create_dir_all(tmp.path().join("transcripts"))?;
+
+    let mut store = Store::open(&tmp.path().join("state.sqlite"))?;
+    for i in 0..100 {
+        let vid = format!("vid_{i:03}");
+        store.upsert_video(&vid, &format!("https://example/{vid}"), false)?;
+    }
+    drop(store);
+
+    let shared: SharedStore = Arc::new(TokioMutex::new(Store::open(
+        &tmp.path().join("state.sqlite"),
+    )?));
+    let fetcher = Arc::new(FakeFetcher::always_fails());
+    let transcriber: Arc<dyn Transcriber> = Arc::new(FakeTranscriber::echo());
+
+    let opts = ProcessOptions {
+        worker_id: "orchestrator".into(),
+        transcripts_root: tmp.path().join("transcripts"),
+        max_videos: None,
+        compute_lang_probs: false,
+        transcribe_timeout: Duration::from_secs(5),
+        stale_claim_threshold: Duration::from_secs(60),
+        download_workers: 3,
+        channel_capacity: 2,
+        cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
+        retries: 1,
+        checkpoint: None,
+        breaker_threshold: 10,
+    };
+
+    let stats = run_pipelined(
+        Arc::clone(&shared),
+        fetcher as Arc<dyn VideoFetcher>,
+        transcriber,
+        opts,
+    )
+    .await?;
+
+    assert!(stats.breaker_tripped, "the breaker must have tripped");
+    assert!(
+        stats.claimed >= 10,
+        "streak must actually reach threshold, got {}",
+        stats.claimed
+    );
+    assert!(
+        stats.claimed <= 10 + 3,
+        "claims stop within one in-flight round of the trip: {}",
+        stats.claimed
+    );
+    assert_eq!(stats.succeeded, 0);
+
+    Ok(())
+}
+
+/// Breaker ADR (0050): `--breaker-threshold 0` disables the breaker
+/// entirely — a run that fails every single claim must still drain the
+/// whole queue instead of aborting. `retries: 0` keeps `claimed` exactly
+/// equal to the row count (no requeue-then-reclaim inflation), isolating
+/// the assertion to "did the breaker abort the drain" rather than retry
+/// bookkeeping.
+#[tokio::test]
+async fn breaker_disabled_at_zero_drains_everything() -> anyhow::Result<()> {
+    use std::sync::Arc;
+    use tokio::sync::Mutex as TokioMutex;
+
+    use ddp_transcribe::pipeline::{run_pipelined, ProcessOptions, SharedStore};
+
+    let tmp = TempDir::new()?;
+    std::fs::create_dir_all(tmp.path().join("transcripts"))?;
+
+    let mut store = Store::open(&tmp.path().join("state.sqlite"))?;
+    for i in 0..20 {
+        let vid = format!("vid_{i:03}");
+        store.upsert_video(&vid, &format!("https://example/{vid}"), false)?;
+    }
+    drop(store);
+
+    let shared: SharedStore = Arc::new(TokioMutex::new(Store::open(
+        &tmp.path().join("state.sqlite"),
+    )?));
+    let fetcher = Arc::new(FakeFetcher::always_fails());
+    let transcriber: Arc<dyn Transcriber> = Arc::new(FakeTranscriber::echo());
+
+    let opts = ProcessOptions {
+        worker_id: "orchestrator".into(),
+        transcripts_root: tmp.path().join("transcripts"),
+        max_videos: None,
+        compute_lang_probs: false,
+        transcribe_timeout: Duration::from_secs(5),
+        stale_claim_threshold: Duration::from_secs(60),
+        download_workers: 3,
+        channel_capacity: 2,
+        cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
+        retries: 0,
+        checkpoint: None,
+        breaker_threshold: 0,
+    };
+
+    let stats = run_pipelined(
+        Arc::clone(&shared),
+        fetcher as Arc<dyn VideoFetcher>,
+        transcriber,
+        opts,
+    )
+    .await?;
+
+    assert!(!stats.breaker_tripped);
+    assert_eq!(stats.claimed, 20, "disabled breaker never aborts the drain");
+
+    Ok(())
+}
+
+/// Breaker ADR (0050): the consecutive-no-success streak resets on every
+/// completed transcription. 30 rows are claimed in the deterministic
+/// `attempt_count ASC, video_id DESC` order (Task 03); a canned wav is
+/// staged for every SECOND video_id in that descending order (odd `i`
+/// under the `v{:02}` zero-padded naming below), the other half are
+/// absent from the canned map (a canned-miss is a retryable failure via
+/// `FetchError::ParseError`). `download_workers: 1` makes the claim/
+/// resolve interleaving strictly sequential so the alternation is exact:
+/// max observed streak is 1, well under `breaker_threshold: 10`, so the
+/// breaker must never trip. `retries: 0` keeps every failing row a single
+/// terminal-exhaust claim (no requeue-then-reclaim), so `claimed == 30`
+/// exactly.
+#[tokio::test]
+async fn breaker_streak_resets_on_success() -> anyhow::Result<()> {
+    use std::sync::Arc;
+    use tokio::sync::Mutex as TokioMutex;
+
+    use ddp_transcribe::pipeline::{run_pipelined, ProcessOptions, SharedStore};
+
+    let tmp = TempDir::new()?;
+    std::fs::create_dir_all(tmp.path().join("transcripts"))?;
+
+    let mut store = Store::open(&tmp.path().join("state.sqlite"))?;
+    let mut map = HashMap::new();
+    for i in 0..30 {
+        let vid = format!("v{i:02}");
+        store.upsert_video(&vid, &format!("https://example/{vid}"), false)?;
+        // Every SECOND video_id in descending order gets a canned wav —
+        // since claim order sorts video_id DESC and consecutive integers
+        // alternate parity, gating on `i % 2 == 1` alternates success/
+        // failure exactly as claims are resolved one at a time.
+        if i % 2 == 1 {
+            let wav = tmp.path().join(format!("{vid}.wav"));
+            std::fs::copy(silence_fixture(), &wav)?;
+            map.insert(vid, wav);
+        }
+    }
+    drop(store);
+
+    let shared: SharedStore = Arc::new(TokioMutex::new(Store::open(
+        &tmp.path().join("state.sqlite"),
+    )?));
+    let fetcher = Arc::new(FakeFetcher {
+        canned: Mutex::new(map),
+        always_fails: false,
+        first_call_gate: tokio::sync::Mutex::new(None),
+        canned_stderr: std::sync::Mutex::new(None),
+        received_opts: std::sync::Mutex::new(Vec::new()),
+        received_urls: std::sync::Mutex::new(Vec::new()),
+        fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
+        canned_metadata: std::sync::Mutex::new(None),
+    });
+    let transcriber: Arc<dyn Transcriber> = Arc::new(FakeTranscriber::echo());
+
+    let opts = ProcessOptions {
+        worker_id: "orchestrator".into(),
+        transcripts_root: tmp.path().join("transcripts"),
+        max_videos: None,
+        compute_lang_probs: false,
+        transcribe_timeout: Duration::from_secs(5),
+        stale_claim_threshold: Duration::from_secs(60),
+        download_workers: 1,
+        channel_capacity: 2,
+        cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
+        retries: 0,
+        checkpoint: None,
+        breaker_threshold: 10,
+    };
+
+    let stats = run_pipelined(
+        Arc::clone(&shared),
+        fetcher as Arc<dyn VideoFetcher>,
+        transcriber,
+        opts,
+    )
+    .await?;
+
+    assert!(!stats.breaker_tripped, "max streak is 1; must never trip");
+    assert_eq!(stats.claimed, 30);
+    assert_eq!(stats.succeeded, 15);
 
     Ok(())
 }

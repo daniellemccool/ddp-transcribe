@@ -22,6 +22,9 @@ pub enum CommandExit {
     Success,
     NoClaims,
     VerifyFailed,
+    /// Breaker ADR (0050): the run-global consecutive-no-success streak
+    /// reached `--breaker-threshold` and the run was aborted.
+    BreakerTripped,
 }
 
 impl CommandExit {
@@ -30,6 +33,7 @@ impl CommandExit {
             CommandExit::Success => 0,
             CommandExit::NoClaims => 3,
             CommandExit::VerifyFailed => 1,
+            CommandExit::BreakerTripped => 4,
         }
     }
 }
@@ -91,6 +95,7 @@ pub async fn dispatch(cli: Cli) -> Result<CommandExit> {
             retries,
             checkpoint_cmd,
             checkpoint_every,
+            breaker_threshold,
         } => {
             let mut store = state::Store::open(&cfg.state_db).context("opening state DB")?;
             std::fs::create_dir_all(&cfg.transcripts).context("creating transcripts dir")?;
@@ -160,6 +165,7 @@ pub async fn dispatch(cli: Cli) -> Result<CommandExit> {
                 "worker_host": hostname_or_default(),
                 "checkpoint_cmd": checkpoint.as_ref().map(|c| c.cmd.display().to_string()),
                 "checkpoint_every_secs": checkpoint.as_ref().map(|c| c.every.as_secs()),
+                "breaker_threshold": breaker_threshold,
             })
             .to_string();
             let run_id = store.open_batch_run(&params_json, classification.source_toml())?;
@@ -215,6 +221,7 @@ pub async fn dispatch(cli: Cli) -> Result<CommandExit> {
                 classification: std::sync::Arc::clone(&classification),
                 retries,
                 checkpoint,
+                breaker_threshold,
             };
 
             // ────────────────────────────────────────────────────────────
@@ -310,6 +317,10 @@ pub async fn dispatch(cli: Cli) -> Result<CommandExit> {
                 }
             }
             print!("{census}");
+
+            if stats.breaker_tripped {
+                return Ok(CommandExit::BreakerTripped);
+            }
 
             if stats.claimed == 0 {
                 return Ok(CommandExit::NoClaims);
@@ -584,4 +595,16 @@ fn hostname_or_default() -> String {
         }
     }
     std::env::var("HOSTNAME").unwrap_or_else(|_| "host".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Breaker ADR (0050): exit code 4 joins the existing map (0 success,
+    /// 1 verify-failed, 3 zero-claims) via `CommandExit`.
+    #[test]
+    fn breaker_tripped_maps_to_exit_4() {
+        assert_eq!(CommandExit::BreakerTripped.code(), 4);
+    }
 }
