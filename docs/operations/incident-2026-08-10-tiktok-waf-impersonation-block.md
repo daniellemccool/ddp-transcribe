@@ -205,6 +205,14 @@ budget.
 
 ### Remaining steps
 
+> **2026-08-12 — step 1 SUPERSEDED by ADR-0049** ("Derive the fetch URL,
+> never rewrite provenance"): v0.5.0 derives the canonical fetch URL from
+> `video_id` at claim time in code (`canonical::derived_fetch_url`), so the
+> `UPDATE` below **must never run** (again — the 2026-08-11 ops-level
+> execution predates the ADR and stands as history). `videos.source_url` is
+> immutable DDP provenance from v0.5.0 onward. The rest of this section
+> stands as the historical record.
+
 Rehearsed against a copy of the real snapshot: 1,928,670 rows, 6m49s,
 `integrity_check ok`, DB growth 737 KB (0.02%), succeeded/terminal rows
 untouched.

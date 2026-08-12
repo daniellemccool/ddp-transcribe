@@ -259,32 +259,6 @@ the deploy role so drift becomes a deliberate act; both.
 
 ---
 
-### Mass-instant-failure circuit breaker for the fetch path
-
-**Found in:** the same incident. The pipeline spent ~60 hours failing every
-claim in ~250 ms at ~8/s — 1.81M attempts burned, sustained hammering of an
-endpoint that was rejecting us, and zero successes for two and a half days
-with no operator-visible signal (census only writes at run end; tracing
-output is operationally invisible per the `swept_stale` entry's tmux
-ruling).
-**Disposition:** Design task, not a quick patch — the right shape needs
-thought (consecutive-failure threshold vs success-rate window; per-worker
-vs run-global; halt vs exponential backoff vs park-and-continue; how it
-interacts with `claim_next`-None drain semantics per ADR-0026 and the
-cancel/drain shutdown protocol per ADR-0025).
-**Trigger to revisit:** before the next long unattended campaign stretch;
-at latest, the next epic touching the fetch workers.
-
-Sizing note from the incident: at wave rates, even a crude "abort the run
-after N consecutive retryable fetch failures with zero successes" (N in
-the hundreds) would have cut the burn from 1.81M attempts to noise, ended
-the run (making the census visible), and — combined with the deploy-side
-run-log persistence followup — alerted the operator ~2 days earlier. Per
-the standing operator ruling, prefer a DB-visible signal (the census row)
-over a log warning.
-
----
-
 ### `swept_stale` event/recovered-set invariant is enforced only in debug builds
 
 **Found in:** Epic 5a Task 03 review (2026-07-30), parked by operator ruling
@@ -353,6 +327,30 @@ itself becomes the outage unless the deploy repo is fixed first. Also blocks
 `backfill-metadata` (it reads `source_url` on `succeeded` rows, which were
 deliberately left on the 403-gated share form).
 
+> **2026-08-12 (v0.5.0): URL-derivation half RESOLVED.** ADR-0049 ("Derive
+> the fetch URL, never rewrite provenance") landed the pipeline-side fix —
+> the canonical `@x` URL is derived from `video_id` at claim time
+> (`canonical::derived_fetch_url`, used by both pipeline paths and
+> `backfill-metadata`), `videos.source_url` is immutable provenance, and the
+> DB-rewrite remedy is superseded (must never run again). The ADR also
+> settled the witness question: `params_json` now records `fetch_url_form`
+> and `ytdlp_impersonation_available` (Task 09 env echo). The
+> `backfill-metadata` blocker above is resolved the same way — it derives
+> too, so share-form `succeeded` rows no longer matter.
+>
+> **What remains open in THIS entry, after v0.5.0:**
+> 1. **The deploy-repo trap (the live trigger — unchanged and urgent):** the
+>    `ytdlp` role still installs curl_cffi, and yt-dlp's TikTok extractor
+>    hardcodes `impersonate=True` when it is present — so a 0043
+>    delete-and-relaunch still re-breaks fetching regardless of the v0.5.0
+>    code. Fix `~/src/d3i-infra/researchcloud-ddp-transcribe` **before** the
+>    v0.5.0 promotion. Post-relaunch witness: `ytdlp_impersonation_available`
+>    must be `false` in the validation batch's `params_json`.
+> 2. **Explicit `--impersonate` flag machinery in `build_yt_dlp_args`:**
+>    still open and still **evidence-gated** — impersonation is currently the
+>    failure, not the fix (this incident), so the machinery waits for
+>    evidence it is ever needed again.
+
 ---
 
 ### Classification patterns for the two WAF-refusal messages
@@ -396,9 +394,13 @@ the 2026-08-11 snapshot census confirmed all 2,982,461 rows are
 and the DDP originals remain in Yoda. The rewrite was scoped to unfetched rows
 specifically to leave completed provenance untouched.
 
-**Trigger to revisit:** analysis handoff (flag it to the PI as a corpus note),
-or normalise when the pipeline-side fix lands and `source_url` becomes pure
-provenance again.
+**Trigger to revisit:** analysis handoff (flag it to the PI as a corpus note).
+~~or normalise when the pipeline-side fix lands~~ **2026-08-12: the
+normalisation option is retired** — ADR-0049 makes `source_url` immutable
+provenance (bulk rewrites are exactly what it forbids), and since v0.5.0
+derives the fetch URL from `video_id`, the stored form no longer affects
+fetching. The two-form corpus is permanent; the only remaining action is the
+PI corpus note.
 
 ---
 
@@ -418,7 +420,11 @@ DB-visible signal over a log warning.
 
 This is the cheap half of the detection gap; the mass-instant-failure circuit
 breaker is the durable half. Neither substitutes for the other — the breaker
-stops the burn, the check tells a human.
+stops the burn, the check tells a human. **2026-08-12: the breaker half
+landed in v0.5.0** (ADR-0050, `--breaker-threshold` default 50, exit code 4,
+`breaker_tripped` in the census — archived in
+`../archive/followups-resolved.md`). This check is now the only missing half.
 
 **Trigger to revisit:** before the next unattended stretch. Until it exists,
-the operator is the circuit breaker (unchanged from incident 1).
+the operator is the circuit breaker for anything the streak counter can't see
+(e.g. a partial-failure mix below the trip threshold).

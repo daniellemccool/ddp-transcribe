@@ -100,6 +100,12 @@ v0.5.0 promotion" below in place of an ordinary uncapped restart.
 Do not uncap the batch immediately after the v0.5.0 relaunch. Spec D6's
 staged validation, in order:
 
+0. **Precondition — fix the deploy repo first.** The `ytdlp` role must no
+   longer install curl_cffi before the delete-and-relaunch happens, or the
+   relaunch reinstates the WAF-blocked fingerprint and step 1 fails 100%
+   (see "DO NOT IMPERSONATE" under Known VM facts). Witness after relaunch:
+   `ytdlp_impersonation_available` is `false` in the validation batch's
+   `params_json`.
 1. **Validation batch:** `process --max-videos 50 --retries 2`. Expect
    ≥~70% success, zero `HttpError` / `YtDlpOther`, metadata envelopes
    captured. This confirms the canonical unimpersonated fetch path
@@ -585,7 +591,9 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite --transcripts ~/ddp-work/tran
   from the yt-dlp venv is the only lever**, and any `pipx upgrade`/reinstall
   that pulls the extra silently re-breaks fetching. Positive witness that the
   fix is in effect: `yt-dlp --list-impersonate-targets` shows every target
-  `(unavailable)`. Full record:
+  `(unavailable)` — and from v0.5.0 each batch records this automatically as
+  `ytdlp_impersonation_available` in `batch_runs.params_json` (must read
+  `false`; `true` after a relaunch means curl_cffi came back). Full record:
   `incident-2026-08-10-tiktok-waf-impersonation-block.md`. The superseded
   2026-08-09 `~/.config/yt-dlp/config` → `--impersonate chrome` mitigation has
   been deleted; do not re-create it.
@@ -605,8 +613,10 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite --transcripts ~/ddp-work/tran
   Use a **non-empty** username segment (`@x` is fine): `@/video/<id>` fetches
   but fails `CANONICAL_RE` in `src/canonical.rs`, classifying `Invalid`. The
   campaign pool's `source_url` values were rewritten to the `@x` form
-  (pending/retryable/in-progress rows only) as an ops-level fix; the
-  pipeline-side fix in `build_yt_dlp_args` is a FOLLOWUPS entry.
+  (pending/retryable/in-progress rows only) as an ops-level fix; **the
+  pipeline-side fix shipped in v0.5.0** (ADR-0049 — the canonical URL is
+  derived from `video_id` at claim time, `source_url` is immutable
+  provenance, and further bulk rewrites are forbidden).
 - **A WAF denial can arrive as HTTP 200 with an HTML body.** Both 2026-08
   outages were Akamai refusals: one as a 403 on `tiktokv.com`, one as a
   200-with-block-page on `tiktok.com`. No status-code-based rule catches the
