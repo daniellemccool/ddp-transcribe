@@ -724,6 +724,28 @@ fn sweep_stale_claims_with_zero_threshold_does_not_sweep_same_second_claim() -> 
     Ok(())
 }
 
+/// Fetch-URL ADR (0049): `claim_next` must surface each row's `canonical`
+/// flag so the pipeline can decide, at claim time, whether to derive the
+/// transport URL or fetch the stored `source_url` verbatim.
+#[test]
+fn claim_carries_canonical_flag() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let mut store = Store::open(&tmp.path().join("state.sqlite"))?;
+    store.upsert_video("7000000000000000010", "https://example.com/canonical", true)?;
+    store.upsert_video("7000000000000000020", "https://example.test/opaque", false)?;
+
+    // Newest-published-first (ADR-0048): the higher video_id claims first.
+    let first = store.claim_next("w1")?.expect("first claim");
+    assert_eq!(first.video_id, "7000000000000000020");
+    assert!(!first.canonical, "row seeded with canonical=false");
+
+    let second = store.claim_next("w1")?.expect("second claim");
+    assert_eq!(second.video_id, "7000000000000000010");
+    assert!(second.canonical, "row seeded with canonical=true");
+
+    Ok(())
+}
+
 #[test]
 fn claim_next_carries_last_retryable_kind() {
     use rusqlite::Connection;

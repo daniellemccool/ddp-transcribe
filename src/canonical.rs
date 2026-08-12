@@ -37,6 +37,14 @@ static SHORT_LINK_RE: Lazy<Regex> = Lazy::new(|| {
     .expect("short-link regex compiles")
 });
 
+/// The WAF-surviving fetch form (2026-08-10 incident): canonical host,
+/// non-empty placeholder user segment — CANONICAL_RE requires `@[^/]+`,
+/// and any non-empty segment fetches identically (verified 2026-08-11).
+/// Fetch-URL ADR: transport form lives here, provenance stays in the DB.
+pub(crate) fn derived_fetch_url(video_id: &str) -> String {
+    format!("https://www.tiktok.com/@x/video/{video_id}/")
+}
+
 // expect: capture group 1 is structurally present in CANONICAL_RE, so a successful
 // match guarantees it captured.
 #[allow(clippy::expect_used)]

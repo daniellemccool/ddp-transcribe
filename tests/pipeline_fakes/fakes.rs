@@ -148,6 +148,7 @@ pub(crate) fn fails_n_times_then_succeeds(
             n,
         )])),
         canned_metadata: std::sync::Mutex::new(None),
+        received_urls: std::sync::Mutex::new(Vec::new()),
     }
 }
 

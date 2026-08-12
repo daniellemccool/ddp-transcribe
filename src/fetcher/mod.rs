@@ -170,6 +170,11 @@ pub struct FakeFetcher {
     /// configure). Lets integration tests drive raw-row persistence
     /// through real worker dispatch.
     pub canned_metadata: std::sync::Mutex<Option<String>>,
+    /// Fetch-URL ADR (0049): records every `source_url` passed to
+    /// `acquire`, in call order — lets tests assert what the pipeline
+    /// actually threaded through (the derived canonical form vs. the
+    /// stored URL verbatim), rather than re-deriving the decision.
+    pub received_urls: std::sync::Mutex<Vec<String>>,
 }
 
 /// Attempt dir a `FakeFetcher` reports for a canned wav: its parent, but ONLY
@@ -202,6 +207,7 @@ impl FakeFetcher {
             received_opts: std::sync::Mutex::new(Vec::new()),
             fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
             canned_metadata: std::sync::Mutex::new(None),
+            received_urls: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -219,6 +225,7 @@ impl FakeFetcher {
             received_opts: std::sync::Mutex::new(Vec::new()),
             fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
             canned_metadata: std::sync::Mutex::new(None),
+            received_urls: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -236,6 +243,7 @@ impl FakeFetcher {
             received_opts: std::sync::Mutex::new(Vec::new()),
             fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
             canned_metadata: std::sync::Mutex::new(None),
+            received_urls: std::sync::Mutex::new(Vec::new()),
         };
         (fetcher, gate)
     }
@@ -250,7 +258,7 @@ impl VideoFetcher for FakeFetcher {
     async fn acquire(
         &self,
         video_id: &str,
-        _source_url: &str,
+        source_url: &str,
         opts: &FetchOpts,
     ) -> (Option<MetadataCapture>, Result<Acquisition, FetchError>) {
         // Recorder: pushed unconditionally, before any of the
@@ -260,6 +268,15 @@ impl VideoFetcher for FakeFetcher {
             .lock()
             .expect("received_opts mutex")
             .push(opts.clone());
+
+        // Fetch-URL ADR (0049) recorder: pushed unconditionally, before any
+        // of the fail/succeed branches below, so tests can assert what the
+        // caller actually threaded through (derived canonical form vs. the
+        // stored URL verbatim).
+        self.received_urls
+            .lock()
+            .expect("received_urls mutex")
+            .push(source_url.to_string());
 
         // Epic 4c: computed once and returned alongside EVERY outcome
         // below, mirroring the real fetcher (the envelope rides both the
@@ -386,6 +403,7 @@ mod tests {
             received_opts: std::sync::Mutex::new(Vec::new()),
             fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
             canned_metadata: std::sync::Mutex::new(None),
+            received_urls: std::sync::Mutex::new(Vec::new()),
         };
         let (capture, result) = fake
             .acquire("7234567890123456789", "url", &FetchOpts::default())
@@ -419,6 +437,7 @@ mod tests {
             received_opts: std::sync::Mutex::new(Vec::new()),
             fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
             canned_metadata: std::sync::Mutex::new(None),
+            received_urls: std::sync::Mutex::new(Vec::new()),
         };
         let (_, result) = fake.acquire("vid_a", "url", &FetchOpts::default()).await;
         match result.unwrap() {

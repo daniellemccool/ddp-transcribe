@@ -432,6 +432,13 @@ pub struct Claim {
     /// claimable again.
     // Read by `pipeline::cookie_opts_for`'s kind-gated cookie routing.
     pub last_retryable_kind: Option<String>,
+    /// Mirrors the row's `canonical` column (ADR-0049): true for rows whose
+    /// `video_id` is the parsed 19-digit form of a canonical DDP URL. Used
+    /// ONLY by `pipeline::acquire_audio` to decide whether to derive the
+    /// fetch URL from `video_id` or fetch `source_url` verbatim — must not
+    /// become a second input to cookie scoping (0035) or format policy
+    /// (0038), which read `last_retryable_kind` alone.
+    pub canonical: bool,
 }
 
 /// Outcome of `record_fetch_failure`'s one-transaction decision (Epic 4a):
@@ -674,20 +681,29 @@ impl Store {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .context("begin immediate for claim_next")?;
 
-        let candidate: Option<(String, String, i64, Option<String>)> = tx
+        let candidate: Option<(String, String, i64, Option<String>, bool)> = tx
             .query_row(
-                "SELECT video_id, source_url, attempt_count, last_retryable_kind
+                "SELECT video_id, source_url, attempt_count, last_retryable_kind, canonical
                  FROM videos
                  WHERE status = 'pending'
                  ORDER BY attempt_count ASC, video_id DESC
                  LIMIT 1",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get::<_, i64>(4)? != 0,
+                    ))
+                },
             )
             .optional()
             .context("claim_next: select oldest pending row")?;
 
-        let Some((video_id, source_url, prev_attempts, last_retryable_kind)) = candidate else {
+        let Some((video_id, source_url, prev_attempts, last_retryable_kind, canonical)) = candidate
+        else {
             tx.commit()
                 .context("commit claim transaction (no pending candidate)")?;
             return Ok(None);
@@ -720,6 +736,7 @@ impl Store {
             source_url,
             attempt_count: new_attempts,
             last_retryable_kind,
+            canonical,
         }))
     }
 

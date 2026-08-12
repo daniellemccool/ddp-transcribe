@@ -379,9 +379,17 @@ pub(crate) async fn acquire_audio(
     Option<crate::fetcher::MetadataCapture>,
     Result<FetchedAudio, FetchPhaseError>,
 ) {
-    let (capture, acquisition) = fetcher
-        .acquire(&claim.video_id, &claim.source_url, opts)
-        .await;
+    // ADR-0049: canonical claims fetch a derived, WAF-surviving transport
+    // URL keyed on video_id; the stored source_url stays untouched as
+    // provenance (read at :625 when the artifact is written). Non-canonical
+    // rows have no reliable video_id to derive from, so they fetch their
+    // stored URL verbatim.
+    let fetch_url = if claim.canonical {
+        crate::canonical::derived_fetch_url(&claim.video_id)
+    } else {
+        claim.source_url.clone()
+    };
+    let (capture, acquisition) = fetcher.acquire(&claim.video_id, &fetch_url, opts).await;
     let acquisition = match acquisition {
         // A failed acquire hands over no attempt dir: the fetcher removed
         // whatever it created before returning (see `VideoFetcher::acquire`'s
@@ -809,6 +817,7 @@ mod tests {
             source_url: "u".into(),
             attempt_count: 1,
             last_retryable_kind: kind.map(String::from),
+            canonical: true,
         };
         assert_eq!(
             cookie_opts_for(&mk(None), &table, Some(&cookie)).cookies_file,
@@ -853,6 +862,7 @@ mod tests {
             source_url: "u".into(),
             attempt_count: 1,
             last_retryable_kind: kind.map(String::from),
+            canonical: true,
         };
 
         let opts = cookie_opts_for(&mk(Some("NoDataBlocks")), &table, Some(&cookie));

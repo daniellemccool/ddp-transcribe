@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 
-use ddp_transcribe::fetcher::FakeFetcher;
+use ddp_transcribe::fetcher::{FakeFetcher, VideoFetcher};
 use ddp_transcribe::state::Store;
 use ddp_transcribe::transcribe::Transcriber;
 
@@ -59,6 +59,7 @@ fn gated_canned_fetcher(
         received_opts: std::sync::Mutex::new(Vec::new()),
         fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
         canned_metadata: std::sync::Mutex::new(None),
+        received_urls: std::sync::Mutex::new(Vec::new()),
     };
     (fetcher, gate)
 }
@@ -275,6 +276,7 @@ async fn run_pipelined_honors_max_videos_cap() -> anyhow::Result<()> {
         received_opts: std::sync::Mutex::new(Vec::new()),
         fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
         canned_metadata: std::sync::Mutex::new(None),
+        received_urls: std::sync::Mutex::new(Vec::new()),
     });
     let transcriber: Arc<dyn Transcriber> = Arc::new(FakeTranscriber::echo());
 
@@ -362,6 +364,7 @@ async fn run_pipelined_drains_all_rows_and_returns_stats() -> anyhow::Result<()>
         received_opts: std::sync::Mutex::new(Vec::new()),
         fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
         canned_metadata: std::sync::Mutex::new(None),
+        received_urls: std::sync::Mutex::new(Vec::new()),
     });
     let transcriber: Arc<dyn Transcriber> = Arc::new(FakeTranscriber::echo());
 
@@ -432,6 +435,7 @@ async fn fetch_persists_metadata_raw_row_on_success() -> anyhow::Result<()> {
         canned_metadata: std::sync::Mutex::new(Some(
             r#"{"schema":1,"printed":"{\"id\":\"vid_a\"}"}"#.to_string(),
         )),
+        received_urls: std::sync::Mutex::new(Vec::new()),
     });
     let transcriber: Arc<dyn Transcriber> = Arc::new(FakeTranscriber::echo());
 
@@ -519,6 +523,7 @@ async fn run_pipelined_with_transcriber(
         received_opts: std::sync::Mutex::new(Vec::new()),
         fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
         canned_metadata: std::sync::Mutex::new(None),
+        received_urls: std::sync::Mutex::new(Vec::new()),
     });
 
     let opts = ProcessOptions {
@@ -710,6 +715,162 @@ async fn fetch_persists_metadata_raw_row_on_classified_failure() -> anyhow::Resu
         |r| r.get(0),
     )?;
     assert!(raw.contains("schema"), "envelope stored verbatim: {raw}");
+
+    Ok(())
+}
+
+/// Fetch-URL ADR (0049): a canonical row's STORED `source_url` may be any
+/// surviving canonical form (here, the share form), but the fetcher must
+/// receive the derived `@x` transport form — and the artifact written to
+/// disk must still carry the STORED url as provenance (0042 unchanged).
+#[tokio::test]
+async fn canonical_claim_fetches_derived_url_but_artifact_keeps_provenance() -> anyhow::Result<()> {
+    use std::sync::Arc;
+    use tokio::sync::Mutex as TokioMutex;
+
+    use ddp_transcribe::pipeline::{run_pipelined, ProcessOptions, SharedStore};
+
+    let vid = "7700000000000000001";
+    let stored = "https://www.tiktokv.com/share/video/7700000000000000001/";
+
+    let tmp = TempDir::new()?;
+    std::fs::create_dir_all(tmp.path().join("transcripts"))?;
+    let db = tmp.path().join("state.sqlite");
+
+    let mut store = Store::open(&db)?;
+    store.upsert_video(vid, stored, true)?;
+    let wav = tmp.path().join(format!("{vid}.wav"));
+    std::fs::copy(silence_fixture(), &wav)?;
+    drop(store);
+
+    let shared: SharedStore = Arc::new(TokioMutex::new(Store::open(&db)?));
+    let fetcher = Arc::new(FakeFetcher {
+        canned: Mutex::new(HashMap::from([(vid.to_string(), wav)])),
+        always_fails: false,
+        first_call_gate: tokio::sync::Mutex::new(None),
+        canned_stderr: std::sync::Mutex::new(None),
+        received_opts: std::sync::Mutex::new(Vec::new()),
+        received_urls: std::sync::Mutex::new(Vec::new()),
+        fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
+        canned_metadata: std::sync::Mutex::new(None),
+    });
+    let transcriber: Arc<dyn Transcriber> = Arc::new(FakeTranscriber::echo());
+
+    let transcripts = tmp.path().join("transcripts");
+    let opts = ProcessOptions {
+        worker_id: "orchestrator".into(),
+        transcripts_root: transcripts.clone(),
+        max_videos: None,
+        compute_lang_probs: false,
+        transcribe_timeout: Duration::from_secs(5),
+        stale_claim_threshold: Duration::from_secs(60),
+        download_workers: 1,
+        channel_capacity: 2,
+        cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
+        retries: 1,
+        checkpoint: None,
+    };
+
+    let stats = run_pipelined(
+        Arc::clone(&shared),
+        Arc::clone(&fetcher) as Arc<dyn VideoFetcher>,
+        transcriber,
+        opts,
+    )
+    .await?;
+    assert_eq!(stats.succeeded, 1, "the one canonical row should succeed");
+
+    let urls = fetcher.received_urls.lock().unwrap().clone();
+    assert_eq!(
+        urls,
+        vec!["https://www.tiktok.com/@x/video/7700000000000000001/".to_string()],
+        "fetcher must receive the derived canonical form"
+    );
+
+    let json = std::fs::read_to_string(transcripts.join("01").join(format!("{vid}.json")))?;
+    assert!(
+        json.contains(stored),
+        "artifact source_url must stay the stored provenance: {json}"
+    );
+
+    Ok(())
+}
+
+/// Fetch-URL ADR (0049): a non-canonical row's fetcher call must receive
+/// the stored `source_url` verbatim — no derivation applies.
+#[tokio::test]
+async fn non_canonical_claim_fetches_stored_url() -> anyhow::Result<()> {
+    use std::sync::Arc;
+    use tokio::sync::Mutex as TokioMutex;
+
+    use ddp_transcribe::pipeline::{run_pipelined, ProcessOptions, SharedStore};
+
+    let vid = "7700000000000000002";
+    let stored = "https://example.test/opaque";
+
+    let tmp = TempDir::new()?;
+    std::fs::create_dir_all(tmp.path().join("transcripts"))?;
+    let db = tmp.path().join("state.sqlite");
+
+    let mut store = Store::open(&db)?;
+    store.upsert_video(vid, stored, false)?;
+    let wav = tmp.path().join(format!("{vid}.wav"));
+    std::fs::copy(silence_fixture(), &wav)?;
+    drop(store);
+
+    let shared: SharedStore = Arc::new(TokioMutex::new(Store::open(&db)?));
+    let fetcher = Arc::new(FakeFetcher {
+        canned: Mutex::new(HashMap::from([(vid.to_string(), wav)])),
+        always_fails: false,
+        first_call_gate: tokio::sync::Mutex::new(None),
+        canned_stderr: std::sync::Mutex::new(None),
+        received_opts: std::sync::Mutex::new(Vec::new()),
+        received_urls: std::sync::Mutex::new(Vec::new()),
+        fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
+        canned_metadata: std::sync::Mutex::new(None),
+    });
+    let transcriber: Arc<dyn Transcriber> = Arc::new(FakeTranscriber::echo());
+
+    let opts = ProcessOptions {
+        worker_id: "orchestrator".into(),
+        transcripts_root: tmp.path().join("transcripts"),
+        max_videos: None,
+        compute_lang_probs: false,
+        transcribe_timeout: Duration::from_secs(5),
+        stale_claim_threshold: Duration::from_secs(60),
+        download_workers: 1,
+        channel_capacity: 2,
+        cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
+        retries: 1,
+        checkpoint: None,
+    };
+
+    let stats = run_pipelined(
+        Arc::clone(&shared),
+        Arc::clone(&fetcher) as Arc<dyn VideoFetcher>,
+        transcriber,
+        opts,
+    )
+    .await?;
+    assert_eq!(
+        stats.succeeded, 1,
+        "the one non-canonical row should succeed"
+    );
+
+    let urls = fetcher.received_urls.lock().unwrap().clone();
+    assert_eq!(
+        urls,
+        vec![stored.to_string()],
+        "non-canonical rows keep their stored source_url"
+    );
 
     Ok(())
 }

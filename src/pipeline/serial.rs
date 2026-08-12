@@ -467,6 +467,7 @@ mod tests {
             received_opts: Mutex::new(Vec::new()),
             fail_first_n: Mutex::new(HashMap::new()),
             canned_metadata: Mutex::new(None),
+            received_urls: Mutex::new(Vec::new()),
         };
         let transcriber = ScriptedTranscriber {
             output: TranscribeOutput {
