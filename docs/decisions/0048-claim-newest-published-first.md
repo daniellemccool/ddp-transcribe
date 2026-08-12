@@ -15,21 +15,27 @@ priority: invariant
 
 ## Decision
 
-`claim_next` orders candidates `attempt_count ASC, video_id DESC` — retry
-tier first (unchanged), then publication recency, newest first, using the
-TikTok snowflake property that the upper 32 bits of `video_id` encode
-creation epoch (validated corpus-wide 2026-08-12: 0 of 4,580,091 watch
-events precede their video's decoded creation). `first_seen_at` leaves the
-claim order.
+`claim_next` orders candidates `attempt_count ASC, video_id DESC` — lower
+attempt_count claims first (unchanged), then publication recency, newest
+first, using the TikTok snowflake property that the upper 32 bits of
+`video_id` encode creation epoch (validated corpus-wide 2026-08-12: 0 of
+4,580,091 watch events precede their video's decoded creation).
+`first_seen_at` leaves the claim order.
 
 ## Guidance
 
-- A truncated campaign is a *complete census of all videos created after a
-  cutoff* — the ordering is the study's truncation-bias posture
-  (operator-ratified 2026-08-12; measurement in the census-completion spec
-  §2): removal hazard is front-loaded (~15% in month one, ~20% by six
-  months), so newest-first fetches the perishable stock first and
-  concentrates observation where removal-censoring is smallest.
+- Within each attempt tier, a truncated campaign is a *complete census of
+  all videos created after a cutoff* — `attempt_count ASC` has precedence
+  over recency, and the operator explicitly accepted a one-time deviation
+  from that guarantee: ~57k attempt-0 rows claim ahead of the
+  recency-ordered attempt-1 pool (census-completion spec §8, resolution
+  3, 2026-08-12 — see the third bullet for the attempt-count invariant
+  that bounds it). Outside that named, bounded exception, the ordering is
+  the study's truncation-bias posture (operator-ratified 2026-08-12;
+  measurement in the census-completion spec §2): removal hazard is
+  front-loaded (~15% in month one, ~20% by six months), so newest-first
+  fetches the perishable stock first and concentrates observation where
+  removal-censoring is smallest.
 - Lexicographic `video_id DESC` equals numeric order only at fixed width;
   the v7 migration asserts 19-digit uniformity over canonical rows and
   refuses otherwise. Review rejects ordering changes that reintroduce
