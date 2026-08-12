@@ -247,12 +247,16 @@ plus the staged validation batches on the VM (D6).
 1. ~~Breaker default threshold~~ — resolved 2026-08-12: operator set the
    default to **50** (trip in seconds at wave rates; false-trip probability
    ≈ 10⁻³² at the campaign's success rate).
-2. Version: v0.5.0 proposed (feature release from v0.4.0 main) — accept?
-3. D1 keeps `attempt_count ASC` precedence, so the 57k attempt-0 rows
-   (scattered ages) claim before the 1.85M attempt-1 wave rows on the
-   first post-upgrade run — acceptable one-time deviation from pure
-   recency (~1.3 days at measured rate), or should the migration reset the
-   wave rows' attempt counts (touches ADR-0046 territory — default-deny)?
-   Proposal: accept the deviation; do not touch attempt counts.
-4. Hourly alarm delivery mechanism (VM cron + mail? push?) — deploy-repo
-   handoff detail, operator's choice.
+2. ~~Version~~ — resolved 2026-08-12: **v0.5.0** accepted.
+3. ~~Attempt-0 precedence~~ — resolved 2026-08-12: accept the one-time
+   deviation (57k attempt-0 rows claim before the recency-ordered wave,
+   ~1.3 days at measured rate); attempt counts are not touched
+   (ADR-0046's default-deny stands).
+4. ~~Alarm delivery~~ — resolved 2026-08-12: **dead-man switch**, not
+   VM-originated mail (SURF blocks SMTP egress; a relay is exactly the
+   haphazard infrastructure this design avoids). Hourly cron queries the
+   census; while healthy it curls a healthchecks.io ping URL (outbound
+   443, proven available); a missing ping — failed check, dead cron, hung
+   run, or dead VM — triggers the service's email/push after a grace
+   period. Deploy-repo/VM-side implementation (cron + ~10-line script);
+   the pipeline's contribution remains the queryable census.
