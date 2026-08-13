@@ -662,6 +662,12 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite --transcripts ~/ddp-work/tran
   first visible as a `YtDlpOther`/`HttpError` spike with
   `no metadata envelope captured` on every fetch. Check it hourly; zero
   successes in the last hour is the other half of the same alarm.
+- **Run-script flags are overridable at invocation** (verified 2026-08-13):
+  the generated `run-pipeline-gpu*.sh` hardcode `--download-workers 3`
+  before `"$@"`, but clap resolves duplicate flags last-wins, so appending
+  e.g. `--download-workers 4` after `process` overrides the script's value
+  — no script edit needed. Always confirm what actually ran via
+  `params_json` (`download_workers` field), not the script text.
 - **`/usr/local/bin/ddp-transcribe` is a root-owned COPY, not a symlink** —
   provisioning installs it with `ansible.builtin.copy`, so rebuilding in
   `~/src/ddp-transcribe` does NOT update what your PATH runs. After any
