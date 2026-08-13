@@ -121,8 +121,18 @@ staged validation, in order:
    one A10; operator disclosure 2026-08-13) — so treat the first two-GPU
    round as the dual measurement: sum the two censuses over wall clock and
    size subsequent batches from that.
-3. **Capped batches as routine** thereafter — bounded unattended blast
-   radius. `--retries 2` is the floor throughout this whole sequence.
+3. **Capped batches as routine** thereafter. `--retries 2` is the floor
+   throughout this whole sequence. **Sizing (operator ruling 2026-08-13):**
+   caps can be large — 50k (~1 restart/GPU/day) or more — because the
+   protections that once required small caps live elsewhere now: the
+   breaker (ADR-0050) owns mass-failure, the hourly census glance owns
+   sub-breaker degradation, and durability is decoupled from batch length
+   by running syncs on a cadence instead of only at batch end — either
+   `--checkpoint-cmd` (in-run, non-fatal per ADR-0044) or the operator's
+   standing rhythm: `~/checkpoint-sync.sh` plus
+   `YODA_EXTRACT=0 YODA_THREADS=2 ~/push-to-yoda.sh` at regular intervals.
+   Batch ends still matter as census/attrition checkpoints — prefer caps
+   that end batches at least every day or two.
 
 **Detection:** the hourly dead-man census check (zero successes in the last
 hour, or any `YtDlpOther` growth) is **deploy-repo/VM-side** — a cron job
