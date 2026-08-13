@@ -583,6 +583,16 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite --transcripts ~/ddp-work/tran
 - Bulk file transfer off the volume: iRODS/Yoda per-file overhead dominates below
   ~1 MB/file; parallelize disjoint shard ranges or use a bundle transfer. 120k
   files single-stream ≈ 24 h (measured 2026-07-07).
+- **Terminal-class semantics, browser-verified 2026-08-13** (sampled from the
+  first v0.5.0 batches, checked from an NL vantage matching the VM's):
+  `VideoNotAvailable10231` = **region-gated** ("isn't available in your
+  country or region" — permanently unfetchable from this egress, terminal is
+  correct); `VideoNotAvailable10240` and `IpBlockedMessage` = deletion
+  flavors (generic "Video currently unavailable"). TikTok's web frontend
+  collapses all deletion-flavored states into one page — the distinct API
+  status codes preserve distinctions the browser cannot confirm. Relevant to
+  the researcher-facing attrition story: 10231 rows are "unreachable from
+  NL", not "gone".
 - **`ddp-transcribe --version` reporting `0.1.0` was the v0.3.0 signature, not
   an anomaly** (historical — the campaign binary prints `0.5.0` since
   2026-08-13). The Cargo.toml bump-in-tag-commit discipline started at v0.3.1;
