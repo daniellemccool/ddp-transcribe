@@ -110,7 +110,7 @@ ADR.
 
 **Found in:** T3 (WAV decoder) — codex-advisor code-quality review.
 **Disposition:** Deferred. yt-dlp's ffmpeg postprocessor emits PCM_S16LE in Plan B; the float path in `decode_wav` is dead code for production input and the cost-vs-benefit of validating it now is low.
-**Trigger to revisit:** If any future fetcher (Plan C API direct, alternate downloaders) introduces float-format WAV input, add finite/range validation to `src/audio.rs:decode_wav`'s `SampleFormat::Float` arm — reject `NaN`, `inf`, and out-of-`[-1.0, 1.0]` values with a new `AudioDecodeError` variant. The module is the audio invariant boundary; the float path should not trust whatever hound yields.
+**Trigger to revisit:** If any future fetcher (alternate downloaders — a Research-API fetcher is ruled out, see README "Why scrape") introduces float-format WAV input, add finite/range validation to `src/audio.rs:decode_wav`'s `SampleFormat::Float` arm — reject `NaN`, `inf`, and out-of-`[-1.0, 1.0]` values with a new `AudioDecodeError` variant. The module is the audio invariant boundary; the float path should not trust whatever hound yields.
 
 ---
 
@@ -175,7 +175,7 @@ immediately before `source_url.to_string()` in the `args` vector.
 ### `scrub_cookie_path` doesn't handle canonicalized/relative path variants
 
 **Found in:** Epic 3 final whole-branch review.
-**Disposition:** Deferred to Plan C (multi-engine / alternate fetcher work is the likeliest place a path gets re-derived in a different form before reaching the redaction call).
+**Disposition:** Deferred to Plan C (multi-engine / alternate fetcher work is the likeliest place a path gets re-derived in a different form before reaching the redaction call; note a Research-API fetcher is ruled out — README "Why scrape" — so the realistic trigger is the leak report or an alternate downloader).
 **Trigger to revisit:** Plan C multi-engine work, or any report of a cookie
 path leaking into logs/state despite `--cookies-file` being set.
 
