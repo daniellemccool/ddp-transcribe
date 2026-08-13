@@ -39,11 +39,11 @@ A separate `run_serial` topology exists as a single-threaded baseline (no orches
                      v                         |
        mpsc::Sender<FetchedItem> (cap = 2) ----+
                      |
-        FetchedItem { claim, samples: Vec<f32>,
-                      samples_len, wav_path, fetcher_name }
+        FetchedItem { claim, samples: Vec<f32>, samples_len,
+                      audio: FetchedAudio, fetcher_name, fetch_policy_tag }
 ```
 
-The channel payload is the `FetchedItem` struct (`src/pipeline/pipelined.rs:65`), not a bare tuple. It extends the `(Claim, Vec<f32>, PathBuf)` triple named in ADR 0027 with `samples_len` (so the transcribe worker derives `duration_s` without the moved `samples` Vec) and `fetcher_name` (so the artifact JSON's `fetcher` field is sourced from the producing fetcher, not a literal).
+The channel payload is the `FetchedItem` struct (`src/pipeline/pipelined.rs:65`), not a bare tuple. It extends the `(Claim, Vec<f32>, PathBuf)` triple named in ADR 0027 with `samples_len` (so the transcribe worker derives `duration_s` without the moved `samples` Vec), `fetcher_name` (so the artifact JSON's `fetcher` field is sourced from the producing fetcher, not a literal), and `fetch_policy_tag`.
 
 ## Control loop
 
@@ -72,11 +72,11 @@ This is the load-bearing section per ADR 0025. **Read the order from the code, n
 Source-order facts:
 
 1. **`drop(tx)`** — the orchestrator drops its own sender clone unconditionally, immediately after the spawn loop, *before* the join loop (`src/pipeline/pipelined.rs:552`). This is what lets the channel ever close.
-2. **`token.cancel()`** — fired *only inside* the join loop, on a worker `Err`/panic (`:572`, `:580`) or — only when the Epic 5a checkpoint task is running — once all `1 + download_workers` real workers have joined. It is conditional, not a guaranteed first step.
+2. **`token.cancel()`** — fired from exactly three sources: *inside the join loop*, on a worker `Err`/panic (`:572`, `:580`); *inside a fetch or transcribe worker*, from `Breaker::note_failure` the instant the run-global consecutive-no-success streak reaches `--breaker-threshold` (ADR 0050 — three call sites in `pipelined.rs`, swap-guarded so only the tripping call fires `cancel()`); or — only when the Epic 5a checkpoint task is running — once all `1 + download_workers` real workers have joined. It is conditional, not a guaranteed first step. The breaker's cancel uses the same token as every other source, so drain semantics are unchanged: workers observe it at the same poll points and finish writing their current row's state (ADR 0025/0026 stand).
 
 This yields two paths:
 
-- **Clean drain (no error):** `drop(tx)` at `:552` is already done → each fetch worker exits on `claim_next == None` (`:153`) and drops its sender clone → the channel closes once the last clone is gone → the transcribe worker's `recv()` returns `None` and it exits (`:311–316`) → `join_next` (`:559`) drains every worker `Ok`. **`cancel()` is never called on this path** — *unless* `--checkpoint-cmd` is set, in which case the supervisor cancels once the worker count has joined, purely to release the checkpoint timer (which loops until cancelled and would otherwise park `join_next` forever). No worker is alive to observe that cancel.
+- **Clean drain (no error):** `drop(tx)` at `:552` is already done → each fetch worker exits on `claim_next == None` (`:153`) and drops its sender clone → the channel closes once the last clone is gone → the transcribe worker's `recv()` returns `None` and it exits (`:311–316`) → `join_next` (`:559`) drains every worker `Ok`. **`cancel()` is never called on this path** — with two exceptions: *unless* `--checkpoint-cmd` is set, in which case the supervisor cancels once the worker count has joined, purely to release the checkpoint timer (which loops until cancelled and would otherwise park `join_next` forever), with no worker alive to observe that cancel; or *unless* the circuit breaker trips mid-drain (ADR 0050), in which case `Breaker::note_failure` cancels the token directly from inside the tripping worker, other workers observe it at their normal poll points and still return `Ok(())` (this is not the error path — `first_error` stays `None`), and `run_pipelined` returns `Ok(stats)` with `stats.breaker_tripped = true` for the caller to act on.
 - **Error / panic:** a worker returns `Err` (or panics) → the supervisor fires `token.cancel()` (`:572`/`:580`) → fetch workers observe it at the loop-top `is_cancelled()` poll (`:121`), the transcribe worker via the biased `cancelled()` arm (`:307`) or the in-flight transcribe select arm (`:344`) → workers exit → `join_next` drains them. The first error is re-raised after the drain (`:602–604`).
 - **Engine teardown (in the caller, `src/commands.rs`):** after the `run_pipelined` future resolves, the `Process` arm drops its own `Arc<dyn Transcriber>` clone (`src/commands.rs:264`) — the bridge that closes the engine's request channel once the workers have already dropped theirs — and *then* calls `engine.shutdown()` last (`src/commands.rs:270`), which consumes the engine by value and joins its worker thread.
 
@@ -93,6 +93,7 @@ The orchestrator turns worker outcomes into state-machine mutations via **three-
 - **`TranscribeError::Bug`** and store-call errors are Bug-class: the worker returns `Err`, which the supervisor turns into `token.cancel()` + drain.
 - **Panics** surface via the `JoinSet` join-error arm; the supervisor logs, records the first error, and cancels the token — treated as a fatal run error, not a per-row retryable failure.
 - **Stale-claim races** — when a failure mutator, `mark_terminal_failure` included, or `mark_succeeded` returns `Ok(0)` (the claim was swept and re-assigned mid-flight), the worker increments a monotonic `stale_after_failure` / `stale_after_success` counter (via `handle_mutator_result`, `src/pipeline/pipelined.rs:41`) and continues; it does *not* return `Err`.
+- **Circuit breaker (ADR 0050).** A run-global `Breaker` tracks the consecutive-claim streak with no success; `note_success` resets it on both success outcomes (including `StaleAfterSuccess`), `note_failure` runs at all three fetch/transcribe failure sites after each row's state write is dispatched. When the streak reaches `--breaker-threshold` (default 50; `0` disables it), `note_failure` fires `token.cancel()` directly from inside the worker, swap-guarded so only the tripping call logs and cancels. This is cooperative cancellation like any other — not a `Bug`-class `Err` — so workers still exit via their normal poll points and `run_pipelined` still returns `Ok(stats)`; `stats.breaker_tripped` is the caller's signal to abort the run (see Batch lifecycle §Close).
 - **Subprocess output** (yt-dlp's stdout/stderr) is bounded inside the fetcher per [ADR 0021](../../decisions/0021-subprocess-output-capture-is-bounded-by-construction.md) (covered in [`data-input.md`](data-input.md)); the orchestrator needs no separate handling.
 
 ## Batch lifecycle (Epic 4a)
@@ -104,7 +105,7 @@ Before the batch opens, the `Process` arm runs a startup tmp sweep — `output::
 1. **Open** — build the active classification table (operator `--classification` TOML or the compiled default; validated hard-fail *before* the model loads), then `open_batch_run` inserts a `batch_runs` row snapshotting the params JSON and the full policy TOML, returning a `run_id`.
 2. **Sweep** — `batch::run_sweep` (`src/batch.rs`) adjudicates every parked `failed_retryable` row through the table before the drain begins: terminal classes write off (`sweep_mark_terminal`), retryables and the cookie pool requeue under the lifetime cap (`sweep_requeue`), and requires-cookie rows with no cookies stay parked. This is where historical write-off pools and cross-batch stragglers die or re-enter on the first post-upgrade run — no operator subcommand needed.
 3. **Drain** — the pipelined orchestrator runs (fresh work first, then requeued retries per the `attempt_count ASC` claim ordering), dispatching failures through `record_fetch_failure` as above.
-4. **Close** — `close_batch_run` stamps the census JSON (sweep counters + run counters) and finish time onto the `batch_runs` row, and the census also prints for the operator. A census without its generating policy is not reproducible attrition documentation, so the policy TOML and the census ride in the same row.
+4. **Close** — `close_batch_run` stamps the census JSON (sweep counters + run counters) and finish time onto the `batch_runs` row, and the census also prints for the operator. A census without its generating policy is not reproducible attrition documentation, so the policy TOML and the census ride in the same row. The census now also carries `breaker_tripped` (ADR 0050); if the run-global consecutive-no-success streak hit `--breaker-threshold`, `stats.breaker_tripped` is `true` even though every worker returned `Ok(())`, and the `Process` arm returns exit code 4 (`CommandExit::BreakerTripped`, `src/commands.rs`) after the census is written and printed — the batch closes durably either way.
 
 ## Batch validation contract
 

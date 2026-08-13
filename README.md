@@ -20,6 +20,24 @@ TikTok is the currently supported source.
 > - Only the `Dev` profile is wired — `--profile` exists but has one value.
 > - `process` exits with code **3** when it claimed zero videos — intentional (nothing to do), not a failure.
 
+## Why scrape, and not TikTok's Research API?
+
+Because the Research API cannot do this study's job — evaluated and
+rejected, not overlooked. Research-API access confines analysis to
+TikTok's Virtual Compute Environment, which permits **aggregate outputs
+only** (descriptive/inferential statistics; "scripts that request
+individual data will be rejected"), offers **no network egress**, and has
+**no way to transcribe media** — its queryable surface is video metadata
+(ids, timestamps, counts, description text). An exposure study needs the
+join between an individual donor's watch history and the *spoken content*
+of the specific videos they watched; under the VCE that join is impossible
+by design. So the donor's DDP export supplies the individual-level half,
+and this pipeline supplies the content half by fetching the public pages
+of donated video ids with `yt-dlp`. There is no planned Research-API
+fetcher backend — early plan documents that gesture at a "multi-fetcher"
+future predate this evaluation. (TikTok's developer docs are mirrored
+under `docs/reference/tiktok-for-developers/` for reference.)
+
 ## Quickstart
 
 ### Prerequisites

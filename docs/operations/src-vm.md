@@ -19,22 +19,25 @@ with an age-gated startup sweep, and the ADR-0013 backend assertion actually
 firing on CUDA builds. Anything marked "v0.4.0" below is not on the workspace
 until that tag is cut and `pipeline_git_ref` is bumped.
 
-**Version state:** the workspace still runs **v0.3.0**. v0.3.1, v0.3.2, and
-v0.4.0 were all tagged but never deployed — each superseded by the next
-before its promotion window — and **v0.5.0** (census-completion release: D1
-recency claim order / schema v7, ADR-0049 claim-time canonical fetch-URL
-derivation, ADR-0050 the mass-failure circuit breaker, transport
-observability) now exists too. So the next upgrade jumps **0.3.0 → 0.5.0**
-in one promotion, and every intermediate tag's release notes apply
-cumulatively (per ADR-0043). After relaunch: `-V` must print `0.5.0`, `-h`
-must list `backfill-metadata` and `requeue-failures`, and `process -h` must
-show `--checkpoint-cmd` and `--breaker-threshold`. The DB needs exactly one
-`migrate` call to go from v6 to v7 — idempotent, and it **refuses to run**
-if any `canonical = 1` row's `video_id` is not a fixed-width 19-digit
-numeric string (the recency claim order's width guard, ADR-0048; see
-"Update procedure" below for the migration ladder). Anything below marked
-"as of v0.3.1" / "as of v0.3.2" / "v0.4.0" therefore all arrive with this
-same jump.
+**Version state:** the workspace runs **v0.5.0** (deployed 2026-08-13 by
+**in-place tag checkout** — operator decision to avoid the delete-and-relaunch
+that would reinstate curl_cffi; sequence: `git fetch --tags && git checkout
+v0.5.0`, CUDA rebuild, `sudo cp` to `/usr/local/bin`, one `migrate` (v6→v7,
+~100 s), D6 validation batch 42/50 with zero `HttpError`/`YtDlpOther` and
+`ytdlp_impersonation_available: false` in `params_json`). The jump was
+0.3.0 → 0.5.0 in one move: v0.3.1, v0.3.2, and v0.4.0 were tagged but never
+deployed, so every intermediate tag's release notes applied cumulatively
+(per ADR-0043). Post-upgrade signatures, verified live: `-V` prints
+`0.5.0`, `-h` lists `backfill-metadata` and `requeue-failures`, `process -h`
+shows `--checkpoint-cmd` and `--breaker-threshold`. The v6→v7 `migrate` is
+idempotent and **refuses to run** if any `canonical = 1` row's `video_id`
+is not a fixed-width 19-digit numeric string (the recency claim order's
+width guard, ADR-0048; see "Update procedure" below for the migration
+ladder). **Still pending after this deployment:** the SRC catalog's
+`pipeline_git_ref` bump to `v0.5.0` and the deploy repo's `ytdlp`-role
+curl_cffi fix — until both land, an involuntary rebuild (crash,
+restore-from-storage) reverts the machine to v0.3.0 *and* re-breaks
+fetching; see step 0 of the resume sequence.
 
 ## Topology (what actually exists)
 
@@ -90,10 +93,10 @@ Verify after every relaunch:
 ddp-transcribe -V && ddp-transcribe -h | head -12   # subcommand list matches expectations
 ```
 
-After the pending 0.3.0 → 0.3.2 upgrade, `-V` must print **0.3.2**, `-h` must
-list `backfill-metadata`, and `process -h` must show `--checkpoint-cmd`.
-After the eventual 0.3.0 → 0.5.0 promotion, see "Resume sequence after the
-v0.5.0 promotion" below in place of an ordinary uncapped restart.
+The 0.3.0 → 0.5.0 promotion happened 2026-08-13 (in-place tag checkout; see
+"Version state" above). For the post-promotion restart discipline, follow
+"Resume sequence after the v0.5.0 promotion" below in place of an ordinary
+uncapped restart.
 
 ### Resume sequence after the v0.5.0 promotion (spec D6)
 
@@ -113,8 +116,23 @@ staged validation, in order:
 2. **Rate measurement:** `process --max-videos 10000` — establishes the
    current fetch/day rate under the new transport and claim order
    (ADR-0048) before sizing batches for the remaining ~1.93M-video census.
-3. **Capped batches as routine** thereafter — bounded unattended blast
-   radius. `--retries 2` is the floor throughout this whole sequence.
+   This measures ONE instance. **Dual-GPU scaling is unmeasured** — the
+   July "1.32×" figure was the download-worker A/B (both instances shared
+   one A10; operator disclosure 2026-08-13) — so treat the first two-GPU
+   round as the dual measurement: sum the two censuses over wall clock and
+   size subsequent batches from that.
+3. **Capped batches as routine** thereafter. `--retries 2` is the floor
+   throughout this whole sequence. **Sizing (operator ruling 2026-08-13):**
+   caps can be large — 50k (~1 restart/GPU/day) or more — because the
+   protections that once required small caps live elsewhere now: the
+   breaker (ADR-0050) owns mass-failure, the hourly census glance owns
+   sub-breaker degradation, and durability is decoupled from batch length
+   by running syncs on a cadence instead of only at batch end — either
+   `--checkpoint-cmd` (in-run, non-fatal per ADR-0044) or the operator's
+   standing rhythm: `~/checkpoint-sync.sh` plus
+   `YODA_EXTRACT=0 YODA_THREADS=2 ~/push-to-yoda.sh` at regular intervals.
+   Batch ends still matter as census/attrition checkpoints — prefer caps
+   that end batches at least every day or two.
 
 **Detection:** the hourly dead-man census check (zero successes in the last
 hour, or any `YtDlpOther` growth) is **deploy-repo/VM-side** — a cron job
@@ -564,9 +582,9 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite --transcripts ~/ddp-work/tran
   `migrate`/`status`/`recompute-window`/`load-metadata` no longer log
   `whisper_model_path` (resolved; was a cosmetic false-alarm risk in Epic 3/4a
   logs).
-- Global flags became true clap globals in v0.3.1 (and stay so in v0.3.2), so
-  `ddp-transcribe process --state-db …` now parses. On any binary older than
-  that (rc1, v0.3.0 — including the workspace's current binary) only the
+- Global flags became true clap globals in v0.3.1, so
+  `ddp-transcribe process --state-db …` parses on the current (v0.5.0)
+  binary. On anything older (rc1, v0.3.0) only the
   before-the-subcommand placement every example here uses works —
   `process --state-db …` fails with
   `error: unexpected argument '--state-db' found`, which is a version signal,
@@ -575,11 +593,23 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite --transcripts ~/ddp-work/tran
 - Bulk file transfer off the volume: iRODS/Yoda per-file overhead dominates below
   ~1 MB/file; parallelize disjoint shard ranges or use a bundle transfer. 120k
   files single-stream ≈ 24 h (measured 2026-07-07).
-- **`ddp-transcribe --version` reporting `0.1.0` is the v0.3.0 signature, not an
-  anomaly.** The Cargo.toml bump-in-tag-commit discipline started at v0.3.1;
-  rc1 and v0.3.0 both compiled with the manifest still at 0.1.0. On the pinned
-  campaign binary, `0.1.0` is *confirmation* of v0.3.0. (v0.3.1+ report their
-  real versions.)
+- **Terminal-class semantics, browser-verified 2026-08-13** (sampled from the
+  first v0.5.0 batches, checked from an NL vantage matching the VM's):
+  `VideoNotAvailable10231` = **region-gated** ("isn't available in your
+  country or region" — permanently unfetchable from this egress, terminal is
+  correct); `VideoNotAvailable10240` and `IpBlockedMessage` = deletion
+  flavors (generic "Video currently unavailable"). TikTok's web frontend
+  collapses all deletion-flavored states into one page — the distinct API
+  status codes preserve distinctions the browser cannot confirm. Relevant to
+  the researcher-facing attrition story: 10231 rows are "unreachable from
+  NL", not "gone".
+- **`ddp-transcribe --version` reporting `0.1.0` was the v0.3.0 signature, not
+  an anomaly** (historical — the campaign binary prints `0.5.0` since
+  2026-08-13). The Cargo.toml bump-in-tag-commit discipline started at v0.3.1;
+  rc1 and v0.3.0 both compiled with the manifest still at 0.1.0, so on the
+  v0.3.0-era binary `0.1.0` was *confirmation*, and seeing it today means a
+  stale binary (check `/usr/local/bin` against the tag — see the stale-copy
+  bullet below).
 - **DO NOT IMPERSONATE, AND DO NOT INSTALL curl_cffi.** From 2026-08-10 19:14,
   TikTok's Akamai WAF serves a 537-byte "Site Maintenance" block page **with
   HTTP 200** to clients presenting curl_cffi's Chrome TLS fingerprint;
@@ -632,3 +662,27 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite --transcripts ~/ddp-work/tran
   first visible as a `YtDlpOther`/`HttpError` spike with
   `no metadata envelope captured` on every fetch. Check it hourly; zero
   successes in the last hour is the other half of the same alarm.
+- **`/usr/local/bin/ddp-transcribe` is a root-owned COPY, not a symlink** —
+  provisioning installs it with `ansible.builtin.copy`, so rebuilding in
+  `~/src/ddp-transcribe` does NOT update what your PATH runs. After any
+  rebuild: `sudo cp ~/src/ddp-transcribe/target/release/ddp-transcribe
+  /usr/local/bin/ddp-transcribe`, then verify `-V`. (Bit us 2026-08-13 and
+  at least once before.)
+- **First `process` start after a reboot/cold cache is silent for minutes —
+  working, not wedged.** Startup reads the whole state DB (3.4 GB as of
+  2026-08-13, growing) plus the ~570 MB model from a ~35 MB/s disk before
+  the first log line; warm restarts take seconds. Separately, after any
+  mass-failure stretch the startup temp sweep must enumerate one leftover
+  `.work/ytdlp-<id>` dir per failed attempt — after the August incidents
+  that was ~1.5–2M dirs and 25+ minutes of `getdents64` with zero output
+  (verified via `/proc/<pid>/stack`). Remedy: `mv ~/ddp-work/transcripts/.work`
+  aside (instant) and `rm -rf` it in the background; the pipeline recreates
+  it. FOLLOWUPS carries the log-line/bounding fix.
+- **Scale projections (measured 2026-08-13, 903k videos in):**
+  `video_metadata_raw` runs 622 B/row → ~1.8 GB at census end; the DB
+  overall projects to ~6–8 GB (`video_events` grows with attempts, not
+  videos); transcripts are TWO files per success (json ~5–11 KB + txt) →
+  ~4.6M files / +~13 GB at census end. Disk is 96 GB with headroom; the
+  binding constraint is the Yoda transfer's per-file overhead (see the
+  bulk-transfer bullet above) — bundle or parallelize by shard range
+  before handoff.
