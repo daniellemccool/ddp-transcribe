@@ -66,6 +66,12 @@ math, which had assumed a GPU each; the action is to pin one instance per GPU
 at the next restart. The PI write-up is unblocked. Status: **HOLD** pending
 only the PI's window decision. Archive this entry once the PI summary ships.
 
+**2026-08-13 clarification:** the 1.32× is download-worker scaling only —
+**dual-GPU throughput has never been measured** (the A/B's instances shared
+one A10). The first two-GPU round of the v0.5.0 campaign is the dual
+measurement: sum both censuses over wall clock (runbook resume-sequence
+step 2 note).
+
 ---
 
 ### `video_metadata_raw` prune / VACUUM decision
@@ -401,6 +407,39 @@ provenance (bulk rewrites are exactly what it forbids), and since v0.5.0
 derives the fetch URL from `video_id`, the stored form no longer affects
 fetching. The two-form corpus is permanent; the only remaining action is the
 PI corpus note.
+
+---
+
+### v0.5.0 startup: silent pre-batch phases (unbounded `.work` sweep + suspected unindexed scan)
+
+**Found in:** the 2026-08-13 v0.5.0 VM validation — the first `process` start
+after the in-place tag promotion sat **silent for ~25 minutes** after
+`config resolved`, with no way to tell working from wedged except `/proc`.
+
+**Verified half:** the kernel stack showed `getdents64`/`ext4_readdir`
+against `~/ddp-work/transcripts/.work` — the startup temp sweep enumerating
+incident-era residue: one `ytdlp-<id>` work dir per failed attempt from the
+Aug 6–11 outages (>65k subdirs by ext4's nlink=1 signal; 146 MB directory
+inode ≈ 1.5–2M entries) on a ~35 MB/s disk. Remedy applied live: `mv .work`
+aside (instant rename), delete offline; the restart reached the GPU banner
+in 4 s. The sweep cost recurs after any future mass-failure stretch — that
+is exactly when a restart happens.
+
+**Hypothesis (unverified):** the ~3.4 GB of sequential reads *before* the
+directory walk was a full-table scan of the state DB during startup —
+suspect a `status = 'in_progress'` predicate (stale-claim sweep) that no
+index covers (the pending partial index is `WHERE status='pending'`).
+Verify with `EXPLAIN QUERY PLAN` before acting; cold-cache disk speed may
+be the whole story.
+
+**Fix candidates, cheapest first:** log lines bracketing each startup phase
+(the silence, not the time, was the operator cost — the existing
+`start-of-batch sweep complete` line shows the idiom); progress-log every N
+entries in the temp sweep; if the scan hypothesis verifies, weigh an index
+against accepting the cold-cache cost.
+
+**Trigger to revisit:** next epic touching worker/startup code, or before
+the next long unattended campaign stretch.
 
 ---
 
