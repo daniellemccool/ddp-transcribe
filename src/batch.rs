@@ -85,10 +85,11 @@ impl From<&ProcessStats> for RunCensus {
 /// a `BatchCensus` recording one can never be constructed — this struct
 /// always describes a run that reached its normal end. The row is not
 /// left dangling on a Bug abort, though: `commands::dispatch`'s Process
-/// arm closes it on that path via the separate `aborted_census_json`
-/// marker below (a different, smaller JSON shape — sweep counters plus
-/// the error string, no `run` section), so `finished_at` still gets
-/// stamped even when this struct itself was never built.
+/// arm makes a best-effort close on that path via the separate
+/// `aborted_census_json` marker below (a different, smaller JSON shape —
+/// sweep counters plus the error string, no `run` section), so
+/// `finished_at` usually still gets stamped even when this struct itself
+/// was never built.
 #[derive(Debug, Serialize)]
 pub struct BatchCensus {
     pub sweep: SweepStats,

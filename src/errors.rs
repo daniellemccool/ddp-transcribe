@@ -97,7 +97,7 @@ pub enum TranscribeError {
     #[error("whisper.cpp produced no transcript")]
     EmptyOutput,
 
-    #[error("transcription cancelled (deadline elapsed or operator-initiated)")]
+    #[error("transcription cancelled (per-request cancellation / coordinated shutdown)")]
     Cancelled,
 
     #[error("audio decode failure: {detail}")]

@@ -1051,11 +1051,12 @@ impl WhisperEngine {
                     // returns to avoid leaking ~16 bytes per request.
                     // `abort_fired` is set INSIDE the callback when the predicate
                     // first returns true. Post-inference we attribute an Err to
-                    // Cancelled only when the callback actually fired — not
+                    // Timeout or Cancelled (per which predicate fired — see
+                    // below) only when the callback actually fired — not
                     // merely when the deadline happens to have elapsed by the
                     // time state.full returns. (codex review of T7: without
-                    // this, a non-cancellation Err that returns just after the
-                    // deadline would be misclassified as Cancelled.)
+                    // this, a non-abort Err that returns just after the
+                    // deadline would be misclassified as Timeout/Cancelled.)
                     let abort_fired = Arc::new(AtomicBool::new(false));
                     let abort_fired_for_cb = Arc::clone(&abort_fired);
                     let cancel_for_abort = Arc::clone(&req.cancel);
@@ -1211,10 +1212,10 @@ impl WhisperEngine {
                     // actually return true during inference?", which avoids the
                     // race where Instant::now() crosses req.deadline after
                     // state.full returned with an unrelated Err.
-                    let was_cancelled = abort_fired.load(std::sync::atomic::Ordering::Relaxed);
+                    let abort_was_fired = abort_fired.load(std::sync::atomic::Ordering::Relaxed);
 
                     match run_result {
-                        Err(_) if was_cancelled => {
+                        Err(_) if abort_was_fired => {
                             // The abort callback fired. Attribute by cause: a
                             // set cancel flag means coordinated shutdown
                             // (ADR 0012); otherwise the deadline is the only
