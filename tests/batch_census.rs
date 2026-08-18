@@ -104,7 +104,7 @@ fn aborted_close_stamps_finished_at_and_marker() -> anyhow::Result<()> {
 
     let sweep_stats = batch::run_sweep(&mut store, &table, 1, false)?;
 
-    let json = batch::aborted_census_json(&sweep_stats, "boom")?;
+    let json = batch::aborted_census_json_for_test(&sweep_stats, "boom")?;
     let closed = store.close_batch_run(run_id, &json)?;
     assert_eq!(closed, 1);
 

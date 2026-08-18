@@ -81,9 +81,14 @@ impl From<&ProcessStats> for RunCensus {
 /// reproducible attrition documentation.
 ///
 /// Deliberately no bug-escalation counter (spec §4 deviation, disclosed):
-/// a Bug aborts the run before close_batch_run, so a census recording one
-/// can never be written — the honest bug record is the batch_runs row
-/// left with finished_at IS NULL.
+/// a Bug aborts the run before `stats` (the run-side counters) exists, so
+/// a `BatchCensus` recording one can never be constructed — this struct
+/// always describes a run that reached its normal end. The row is not
+/// left dangling on a Bug abort, though: `commands::dispatch`'s Process
+/// arm closes it on that path via the separate `aborted_census_json`
+/// marker below (a different, smaller JSON shape — sweep counters plus
+/// the error string, no `run` section), so `finished_at` still gets
+/// stamped even when this struct itself was never built.
 #[derive(Debug, Serialize)]
 pub struct BatchCensus {
     pub sweep: SweepStats,
@@ -176,12 +181,21 @@ pub(crate) fn truncate_to_char_boundary(s: &mut String, max_bytes: usize) {
 /// unrecoverable — the `aborted` marker plus the error string is the
 /// DB-visible record that this row's absence of run counters is a crash,
 /// not a zero-work run. Consumed by `commands::dispatch`'s Process arm.
-pub fn aborted_census_json(sweep: &SweepStats, error: &str) -> serde_json::Result<String> {
+pub(crate) fn aborted_census_json(sweep: &SweepStats, error: &str) -> serde_json::Result<String> {
     serde_json::to_string(&serde_json::json!({
         "aborted": true,
         "error": error,
         "sweep": sweep,
     }))
+}
+
+/// Cross-crate re-export of `aborted_census_json` for `tests/batch_census.rs`
+/// (0005: `pub(crate)` is invisible from an integration-test compilation
+/// unit; this is the purpose-built escape hatch, not a production API
+/// widening — same idiom as `Store::get_video_for_test`).
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn aborted_census_json_for_test(sweep: &SweepStats, error: &str) -> serde_json::Result<String> {
+    aborted_census_json(sweep, error)
 }
 
 /// Start-of-batch sweep (Epic 4a, spec §3): adjudicate every parked
