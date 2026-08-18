@@ -92,3 +92,31 @@ fn batch_lifecycle_persists_provenance_chain() {
     assert_eq!(parsed["sweep"]["swept_terminal"], 1);
     assert!(finished_at.is_some());
 }
+
+#[test]
+fn aborted_close_stamps_finished_at_and_marker() -> anyhow::Result<()> {
+    let tmp = TempDir::new().unwrap();
+    let mut store = Store::open(&tmp.path().join("state.sqlite")).unwrap();
+    let table = ClassificationTable::compiled_default().unwrap();
+
+    let params_json = serde_json::json!({"retries": 1, "max_videos": null}).to_string();
+    let run_id = store.open_batch_run(&params_json, table.source_toml())?;
+
+    let sweep_stats = batch::run_sweep(&mut store, &table, 1, false)?;
+
+    let json = batch::aborted_census_json(&sweep_stats, "boom")?;
+    let closed = store.close_batch_run(run_id, &json)?;
+    assert_eq!(closed, 1);
+
+    let conn = rusqlite::Connection::open(tmp.path().join("state.sqlite")).unwrap();
+    let (census_json_stored, finished_at): (Option<String>, Option<i64>) = conn.query_row(
+        "SELECT census_json, finished_at FROM batch_runs WHERE run_id = ?1",
+        [run_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+
+    assert!(finished_at.is_some());
+    let stored = census_json_stored.unwrap();
+    assert!(stored.contains("\"aborted\":true"));
+    Ok(())
+}

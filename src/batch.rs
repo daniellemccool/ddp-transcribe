@@ -171,6 +171,19 @@ pub(crate) fn truncate_to_char_boundary(s: &mut String, max_bytes: usize) {
     s.truncate(cut);
 }
 
+/// Census JSON for a run that died before its stats existed (worker Err
+/// path). Sweep counters are real (computed pre-workers); run counters are
+/// unrecoverable — the `aborted` marker plus the error string is the
+/// DB-visible record that this row's absence of run counters is a crash,
+/// not a zero-work run. Consumed by `commands::dispatch`'s Process arm.
+pub fn aborted_census_json(sweep: &SweepStats, error: &str) -> serde_json::Result<String> {
+    serde_json::to_string(&serde_json::json!({
+        "aborted": true,
+        "error": error,
+        "sweep": sweep,
+    }))
+}
+
 /// Start-of-batch sweep (Epic 4a, spec §3): adjudicate every parked
 /// failed_retryable row through the active table. Terminal dispositions
 /// terminalize (this is where historical write-off classes die on the
@@ -562,5 +575,51 @@ mod tests {
         assert!(text.contains("swept_terminal"));
         assert!(text.contains("IpBlockedMessage"));
         assert!(text.contains("examined"));
+    }
+
+    #[test]
+    fn aborted_census_json_carries_marker_error_and_sweep() {
+        let by_label = std::collections::BTreeMap::from([("IpBlockedMessage".to_string(), 2usize)]);
+        let sweep = SweepStats {
+            examined: 5,
+            swept_terminal: 2,
+            swept_terminal_by_label: by_label.clone(),
+            requeued_for_retry: 1,
+            parked_for_cookies: 1,
+            kept_capped: 1,
+        };
+        let json = aborted_census_json(&sweep, "fetch→transcribe channel closed").unwrap();
+        assert!(json.contains("\"aborted\":true"));
+        assert!(json.contains("channel closed"));
+        assert!(json.contains("\"sweep\""));
+
+        // The success-path census must NOT gain the marker (guard against
+        // the marker leaking into BatchCensus itself).
+        let sweep_for_census = SweepStats {
+            examined: 5,
+            swept_terminal: 2,
+            swept_terminal_by_label: by_label,
+            requeued_for_retry: 1,
+            parked_for_cookies: 1,
+            kept_capped: 1,
+        };
+        let census = BatchCensus {
+            sweep: sweep_for_census,
+            run: RunCensus {
+                claimed: 3,
+                succeeded: 2,
+                failed: 1,
+                requeued_for_retry: 1,
+                exhausted_retries: 0,
+                parked_for_cookies: 0,
+                terminal_by_label: std::collections::BTreeMap::new(),
+                stale_after_success: 0,
+                stale_after_failure: 0,
+                checkpoints_run: 0,
+                checkpoints_failed: 0,
+                breaker_tripped: false,
+            },
+        };
+        assert!(!serde_json::to_string(&census).unwrap().contains("aborted"));
     }
 }

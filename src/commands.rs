@@ -287,7 +287,29 @@ pub async fn dispatch(cli: Cli) -> Result<CommandExit> {
             // None, and the join completes.
             engine.shutdown();
 
-            let stats = stats_result?;
+            let stats = match stats_result {
+                Ok(stats) => stats,
+                Err(run_err) => {
+                    // The run died (worker Err path). Close the batch row
+                    // with an aborted census so `finished_at` is stamped
+                    // and the crash is DB-visible (mirrors ADR-0050's
+                    // census-visibility posture), then re-raise. Store
+                    // lock: workers have exited (run_pipelined only
+                    // returns after its drain), same reasoning as the
+                    // success path's try_lock below.
+                    let json = batch::aborted_census_json(&sweep_stats, &format!("{run_err:#}"))
+                        .context("serializing aborted census")?;
+                    let mut guard = shared.try_lock().context(
+                        "store lock free after run_pipelined resolved — workers have exited",
+                    )?;
+                    let closed = guard.close_batch_run(run_id, &json)?;
+                    if closed == 0 {
+                        tracing::warn!(run_id, "aborted-census close matched no open row");
+                    }
+                    tracing::error!(run_id, "run aborted; batch row closed with aborted census");
+                    return Err(run_err);
+                }
+            };
             tracing::info!(
                 claimed = stats.claimed,
                 succeeded = stats.succeeded,
