@@ -132,6 +132,13 @@ fn build_yt_dlp_args(
         // is inert on the current data set.
         "-S".into(),
         "+size,+br,+res,+fps".into(),
+        // Cap yt-dlp's internal retry loop (default 10): our claim-level retry
+        // (ADR-0036) re-adjudicates transient failures anyway, and 10×20 s
+        // connect timeouts stalled a download worker ~3.5 min per occurrence
+        // (observed 2026-08-13). Argv is code + params_json — never a config
+        // file (incident-2 lesson).
+        "--retries".into(),
+        "3".into(),
         "-x".into(),
         "--audio-format".into(),
         "wav".into(),
@@ -296,6 +303,8 @@ pub(crate) fn build_metadata_only_args(source_url: &str) -> Vec<String> {
         "--no-simulate".to_string(),
         "--print".to_string(),
         METADATA_PRINT_TEMPLATE.to_string(),
+        "--retries".to_string(),
+        "3".to_string(),
         source_url.to_string(),
     ]
 }
@@ -638,6 +647,14 @@ mod tests {
             args.last().map(String::as_str),
             Some("https://example.com/v")
         );
+
+        // Retries cap (task 04): yt-dlp's default internal retry is 10;
+        // we cap it at 3 since claim-level retry re-adjudicates anyway.
+        let retries_pos = args
+            .iter()
+            .position(|a| a == "--retries")
+            .expect("--retries present in fetch argv");
+        assert_eq!(args[retries_pos + 1], "3", "internal retry cap is 3");
     }
 
     /// `FetchPolicy::Frugal` (the NoDataBlocks-retry experiment variant,
@@ -905,9 +922,19 @@ mod tests {
                 "--no-simulate".to_string(),
                 "--print".to_string(),
                 METADATA_PRINT_TEMPLATE.to_string(),
+                "--retries".to_string(),
+                "3".to_string(),
                 "https://www.tiktok.com/@u/video/123".to_string(),
             ]
         );
+
+        // Retries cap: yt-dlp's default internal retry is 10;
+        // we cap it at 3 since claim-level retry re-adjudicates anyway.
+        let retries_pos = args
+            .iter()
+            .position(|a| a == "--retries")
+            .expect("--retries present in metadata-only argv");
+        assert_eq!(args[retries_pos + 1], "3", "internal retry cap is 3");
     }
 
     /// Regression fixture for the task-09 review finding: real captured
