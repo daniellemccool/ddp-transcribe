@@ -39,6 +39,12 @@ curl_cffi fix — until both land, an involuntary rebuild (crash,
 restore-from-storage) reverts the machine to v0.3.0 *and* re-breaks
 fetching; see step 0 of the resume sequence.
 
+**v0.5.1 exists (deadline-attribution patch).** The VM update is the
+in-place tag-checkout sequence proven on 2026-08-13: `git fetch --tags &&
+git checkout v0.5.1`, CUDA rebuild, `sudo cp` to `/usr/local/bin`, `-V`
+prints `0.5.1`. **No schema change — no `migrate` needed** (schema stays
+v7).
+
 ## Topology (what actually exists)
 
 - **Source of truth:** GitHub `daniellemccool/ddp-transcribe`. The VM's working
@@ -570,6 +576,11 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite --transcripts ~/ddp-work/tran
   writes stopped — and never says "IP" at all: 60 h / 1.8M real rejections
   produced that text zero times (signature table in
   `incident-2026-08-06-tiktok-tls-403.md`).
+- **A per-item transcription that exceeds the 600 s deadline is a
+  retryable `Timeout` since v0.5.1** (before: it killed the run — 2026-08-17
+  incident). An aborted run now closes its `batch_runs` row with
+  `"aborted": true` in the census JSON, so `finished_at IS NULL` no longer
+  occurs and the crash marker is queryable.
 - The census persists in the state DB's `batch_runs` table with the active
   policy TOML — attrition documentation survives tmux.
 - `/etc/rsc/cron_webdav.sh` and `cron_user.sh` curl processes are SURF platform

@@ -1712,3 +1712,32 @@ instance of the same failure mode) independently promoted this to
 record (also on an unmerged branch,
 `docs/incident-2026-08-10-waf-impersonation-block`) should likewise be
 reconciled against this resolution rather than treated as still-open.
+
+---
+
+## Resolved by v0.5.1 — deadline-attribution patch (2026-08-18)
+
+### yt-dlp's internal retry count is uncapped in our argv (default 10)
+
+**Found in:** the 2026-08-13 v0.5.0 rate batches. A flaky connection to
+`webapp-sg.tiktok.com` produced `Giving up after 10 retries` after ~3.5
+minutes of silent grinding (10 × 20 s connect timeout) — observed 3 times
+in 1,458 claims, each one a multi-minute stall of one download worker and
+a `YtDlpOther` retryable (correct disposition; our claim-level retry then
+re-adjudicates, so the internal 10 are largely redundant with ADR-0036's
+fetch-as-oracle loop).
+**Disposition:** add `--retries <small N>` (and consider `--socket-timeout`)
+to `build_yt_dlp_args` in the next release — argv is code + `params_json`,
+per ADR-0049's posture; do NOT do this via a yt-dlp config file
+(config-by-side-effect is the incident-2 anti-pattern, runbook forbids it).
+**Trigger to revisit:** next release touching the fetcher argv, or if the
+stall frequency grows enough to matter for throughput.
+
+**Resolved by:** `8b7f57a` (`fix(fetcher): cap yt-dlp internal retries at 3
+in both argv builders`). `--retries 3` was added to both `build_yt_dlp_args`
+(the fetch/download argv) and `build_metadata_only_args` (the
+metadata-only argv), landing as an explicit argv element — code +
+`params_json`, per ADR-0049's posture — never via a yt-dlp config file; the
+config-file route considered in the original entry's Disposition was
+explicitly not taken. `--socket-timeout` was not added; not evidenced as
+needed by the observed failure mode.
