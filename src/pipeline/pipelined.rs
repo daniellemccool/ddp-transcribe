@@ -570,17 +570,22 @@ pub async fn fetch_worker(
 /// (per ADR 0012) fires the per-request `Arc<AtomicBool>`, and
 /// whisper.cpp's `abort_callback` aborts inference within milliseconds.
 ///
-/// **Error classification (Epic 3 T07; Epic 4a T06).**
-/// - [`TranscribeError::Cancelled`]: row stays `in_progress`, sweep
-///   recovers on next startup. Worker returns `Ok(())` — coordinated
-///   shutdown is not a Bug.
+/// **Error classification (Epic 3 T07; Epic 4a T06; re-attributed v0.5.1).**
+/// - [`TranscribeError::Cancelled`]: as of v0.5.1 this means the
+///   per-request cancel flag was set — coordinated shutdown (future drop
+///   or the select arm above), never a deadline elapse. Row stays
+///   `in_progress`, sweep recovers on next startup. Worker returns
+///   `Ok(())` — coordinated shutdown is not a Bug.
 /// - [`TranscribeError::Bug`]: worker returns `Err` — the orchestrator
 ///   reacts per 0025 (cancel all + drain JoinSet).
 /// - Other variants (currently `Timeout`, `Failed`, `EmptyOutput`,
 ///   `AudioDecode`): run through `classify_transcribe_error`, which never
 ///   produces `Unavailable` and only produces `Bug` for the
 ///   already-excluded `TranscribeError::Bug` case — both arms are
-///   `unreachable!()` in this match. The live path is `Retryable`:
+///   `unreachable!()` in this match. As of v0.5.1 a per-request deadline
+///   elapse arrives here as `Timeout { duration }` (the embedded engine
+///   now constructs it whenever the cancel flag is NOT set), not as
+///   `Cancelled` — see `src/errors.rs`. The live path is `Retryable`:
 ///   `record_fetch_failure` decides requeue-vs-exhaust-vs-park (Epic 4a);
 ///   the outcome routes to the retry counters via
 ///   [`handle_record_fetch_failure_outcome`], whose `StaleClaim` arm

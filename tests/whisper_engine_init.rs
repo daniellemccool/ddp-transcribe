@@ -157,17 +157,20 @@ async fn transcribe_respects_short_deadline() {
         "transcribe took {elapsed:?} — possible cancellation regression or test-harness contention"
     );
 
-    // Expect either Cancelled (most likely) or successful very short completion
+    // Expect either Timeout (most likely) or successful very short completion
     // on extremely fast hardware. Key invariant: we did NOT hang past a
     // reasonable wallclock.
     match result {
         Ok(_) => {
             eprintln!("inference completed within 100ms — fine on very fast hardware");
         }
-        Err(TranscribeError::Cancelled) => {
-            // The expected path.
+        Err(e) => {
+            assert!(
+                matches!(e, TranscribeError::Timeout { .. }),
+                "a deadline-fired abort must attribute as Timeout (retryable), not \
+                 Cancelled (coordinated shutdown); got: {e:?}"
+            );
         }
-        Err(e) => panic!("expected Cancelled or Ok, got {e:?}"),
     }
 
     engine.shutdown();
