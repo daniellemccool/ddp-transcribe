@@ -263,6 +263,18 @@ Options when triggered, in ascending effort: re-verify the table against
 the new version's stderr corpus (0033's own procedure); pin the version in
 the deploy role so drift becomes a deliberate act; both.
 
+**2026-08-19 — the trigger FIRED:** the campaign VM was upgraded to
+nightly 2026.08.18.122307 (the 2026-08-18 header-fingerprint incident's
+remedy — see `../operations/incident-2026-08-18-tiktok-header-fingerprint-block.md`),
+a ~13-month jump past the 2026.03.17 pattern corpus. First-order
+verification passed the same day: `IpBlockedMessage` stderr text is
+byte-identical on the nightly (probe), and the 50-video validation census
+classified 8/8 terminals correctly with zero `YtDlpOther`. Standing watch:
+`YtDlpOther` share in the full-cap censuses. The deploy-role pin option is
+now mandatory rather than optional — the role must install ≥ nightly
+2026.08.18 (stable 2026.07.04 cannot fetch TikTok at all post-rollout);
+tracked with the curl_cffi removal in the deploy repo.
+
 ---
 
 ### `swept_stale` event/recovered-set invariant is enforced only in debug builds

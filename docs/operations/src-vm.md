@@ -33,11 +33,23 @@ shows `--checkpoint-cmd` and `--breaker-threshold`. The v6→v7 `migrate` is
 idempotent and **refuses to run** if any `canonical = 1` row's `video_id`
 is not a fixed-width 19-digit numeric string (the recency claim order's
 width guard, ADR-0048; see "Update procedure" below for the migration
-ladder). **Still pending after this deployment:** the SRC catalog's
-`pipeline_git_ref` bump to `v0.5.0` and the deploy repo's `ytdlp`-role
-curl_cffi fix — until both land, an involuntary rebuild (crash,
-restore-from-storage) reverts the machine to v0.3.0 *and* re-breaks
-fetching; see step 0 of the resume sequence.
+ladder). The SRC catalog's `pipeline_git_ref` bump was **done 2026-08-14**
+(operator), so a rebuild reproduces v0.5.0. **Still pending:** the deploy
+repo's `ytdlp` role — it must both drop curl_cffi AND pin yt-dlp ≥ nightly
+2026.08.18 (it currently installs stable 2026.07.04, which cannot fetch
+TikTok since the 2026-08-18 header-fingerprint block) — until that lands,
+an involuntary rebuild re-breaks fetching two independent ways; see step 0
+of the resume sequence and
+`incident-2026-08-18-tiktok-header-fingerprint-block.md`.
+
+**yt-dlp on the VM: nightly 2026.08.18.122307 since 2026-08-19** —
+out-of-band ops upgrade (`pipx install --force --pip-args=--pre yt-dlp`, no
+`[curl-cffi]` extra), the remedy for the 2026-08-18 incident (first live
+breaker trip, both instances, ~100 attempts total). The nightly randomizes
+HTTP header fingerprints and fetches unimpersonated by upstream default
+(PR #17452 adopted this campaign's incident-2 posture). Validation batch
+2026-08-19: 41/50, zero `YtDlpOther`, classification patterns verified at
+first order against the new extractor.
 
 **v0.5.1 exists (deadline-attribution patch).** The VM update is the
 in-place tag-checkout sequence proven on 2026-08-13: `git fetch --tags &&
@@ -645,6 +657,13 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite --transcripts ~/ddp-work/tran
   `incident-2026-08-10-tiktok-waf-impersonation-block.md`. The superseded
   2026-08-09 `~/.config/yt-dlp/config` → `--impersonate chrome` mitigation has
   been deleted; do not re-create it.
+  **2026-08-19 update:** upstream PR #17452 (in nightly ≥ 2026.08.18, now
+  on this VM) *removed* impersonation from TikTok webpage requests — the
+  posture this bullet mandates is now yt-dlp's own default, and the
+  "hardcoded `impersonate=True`" sentence above is historical. Keep
+  curl_cffi uninstalled anyway (defense in depth; the witness stays
+  meaningful). Full record:
+  `incident-2026-08-18-tiktok-header-fingerprint-block.md`.
   **ADR-0043 interaction — read before the next promotion:** the working
   configuration is currently *hand-applied VM state* (a package that must stay
   absent), so 0043's step 5 (delete-and-relaunch) will reinstate curl_cffi from
@@ -680,6 +699,14 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite --transcripts ~/ddp-work/tran
   first visible as a `YtDlpOther`/`HttpError` spike with
   `no metadata envelope captured` on every fetch. Check it hourly; zero
   successes in the last hour is the other half of the same alarm.
+- **Log rotation is manual, at batch-restart boundaries** (practice since
+  2026-08-19): tee each new batch to a dated file
+  (`... 2>&1 | tee -a ~/logs/gpuN-$(date -u +%Y%m%d).log`); when both
+  instances are stopped, `xz -T0` the previous era's files into `~/logs/`
+  (~15× compression; `xzgrep` still searches them). Archive, don't delete —
+  the raw interleaved timelines carried the diagnosis of both the
+  2026-08-17 deadline kill and the 2026-08-18 breaker trip. Never compress
+  a file a live `tee` holds open.
 - **`/usr/local/bin/ddp-transcribe` is a root-owned COPY, not a symlink** —
   provisioning installs it with `ansible.builtin.copy`, so rebuilding in
   `~/src/ddp-transcribe` does NOT update what your PATH runs. After any
