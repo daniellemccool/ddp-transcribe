@@ -1022,6 +1022,118 @@ async fn breaker_disabled_at_zero_drains_everything() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// v0.5.1 regression: a per-item transcribe timeout must never terminate
+/// the run. Before the fix (2026-08-17 incident) a deadline-fired abort was
+/// attributed as `TranscribeError::Cancelled`, which `transcribe_worker`
+/// treated as a clean early-exit — the worker returned `Ok(())` without
+/// dispatching a failure, the fetch workers then died on the closed
+/// channel, and `run_pipelined` returned `Err` with rows stranded
+/// `in_progress`. After the fix, a deadline abort is attributed as
+/// `TranscribeError::Timeout`, which `classify_transcribe_error` maps to a
+/// `Retryable` outcome dispatched through `record_fetch_failure` like any
+/// other transcription failure — the run drains normally and returns `Ok`.
+///
+/// `breaker_threshold: 0` disables the breaker (every claim fails here, so
+/// the default threshold would trip on an unrelated path — this test is
+/// about the timeout attribution, not the breaker, which has its own tests
+/// above).
+#[tokio::test]
+async fn per_item_transcribe_timeout_does_not_kill_the_run() -> anyhow::Result<()> {
+    use std::sync::Arc;
+    use tokio::sync::Mutex as TokioMutex;
+
+    use ddp_transcribe::pipeline::{run_pipelined, ProcessOptions, SharedStore};
+
+    let tmp = TempDir::new()?;
+    std::fs::create_dir_all(tmp.path().join("transcripts"))?;
+    let db = tmp.path().join("state.sqlite");
+
+    let mut store = Store::open(&db)?;
+    let mut map = HashMap::new();
+    for i in 0..6 {
+        let vid = format!("vid_{i}");
+        store.upsert_video(&vid, &format!("https://example/{i}"), false)?;
+        let wav = tmp.path().join(format!("{vid}.wav"));
+        std::fs::copy(silence_fixture(), &wav)?;
+        map.insert(vid, wav);
+    }
+    drop(store);
+
+    let shared: SharedStore = Arc::new(TokioMutex::new(Store::open(&db)?));
+    let fetcher = Arc::new(FakeFetcher {
+        canned: Mutex::new(map),
+        always_fails: false,
+        first_call_gate: tokio::sync::Mutex::new(None),
+        canned_stderr: std::sync::Mutex::new(None),
+        received_opts: std::sync::Mutex::new(Vec::new()),
+        fail_first_n: std::sync::Mutex::new(std::collections::HashMap::new()),
+        canned_metadata: std::sync::Mutex::new(None),
+        received_urls: std::sync::Mutex::new(Vec::new()),
+    });
+    let transcriber: Arc<dyn Transcriber> = Arc::new(FakeTranscriber::always_fails_timeout());
+
+    let opts = ProcessOptions {
+        worker_id: "orchestrator".into(),
+        transcripts_root: tmp.path().join("transcripts"),
+        max_videos: None,
+        compute_lang_probs: false,
+        transcribe_timeout: Duration::from_secs(5),
+        stale_claim_threshold: Duration::from_secs(60),
+        download_workers: 2,
+        channel_capacity: 2,
+        cookies_file: None,
+        classification: std::sync::Arc::new(
+            ddp_transcribe::classification::ClassificationTable::compiled_default()
+                .expect("default table"),
+        ),
+        retries: 1,
+        checkpoint: None,
+        breaker_threshold: 0,
+    };
+
+    let run_result = run_pipelined(Arc::clone(&shared), fetcher, transcriber, opts).await;
+
+    // MUST be Ok — the old bug returned Err (channel closed) here, since a
+    // `Cancelled`-attributed timeout let the transcribe worker exit `Ok(())`
+    // without dispatching a failure, killing the fetch workers on the
+    // closed channel. This is the assertion arm that bites on regression.
+    let stats = run_result?;
+
+    assert_eq!(stats.succeeded, 0, "every transcription timed out");
+    assert!(
+        stats.claimed >= 6,
+        "all rows were claimed (plus in-batch retries)"
+    );
+    assert_eq!(
+        stats.stale_after_failure, 0,
+        "no rows were left in_progress for the sweep — timeouts were \
+         recorded as ordinary retryable failures"
+    );
+    // retries: 1 → every one of the 6 rows requeues once, then exhausts on
+    // the second attempt (observed on first green run: 6 claimed as
+    // fresh + 6 reclaimed after requeue = 12 total claims).
+    assert_eq!(
+        stats.requeued_for_retry, 6,
+        "every row requeues exactly once before exhausting"
+    );
+    assert_eq!(
+        stats.exhausted_retries, 6,
+        "every row exhausts on its second attempt"
+    );
+
+    // The state machine must show every row parked/requeued/exhausted —
+    // NOT in_progress (the old bug's signature).
+    let conn = rusqlite::Connection::open(&db)?;
+    let stranded: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM videos WHERE status='in_progress'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(stranded, 0, "no stranded in_progress rows after the run");
+
+    Ok(())
+}
+
 /// Breaker ADR (0050): the consecutive-no-success streak resets on every
 /// completed transcription. 30 rows are claimed in the deterministic
 /// `attempt_count ASC, video_id DESC` order (Task 03); a canned wav is

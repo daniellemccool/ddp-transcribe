@@ -74,13 +74,17 @@ pub enum TranscribeError {
     // legacy `transcribe()` fn). Epic 3 (ADR 0033) closed without rebuilding
     // this enum; as of Epic 4a the failure taxonomy is label strings driven by
     // the classification table (`src/classification.rs`), with structural
-    // errors code-mapped in `src/failure.rs` — Epic 1's whisper-rs path
-    // surfaces deadline-elapse via `Cancelled` and internal failures via
-    // `Bug`, so `Timeout`, `Failed`, `EmptyOutput` are unconstructed by the
-    // embedded engine. `Timeout` is matched by
-    // `failure::classify_transcribe_error`; `Failed` is constructed by this
-    // file's unit test and `EmptyOutput` by `tests/pipeline_fakes/fakes.rs`.
-    // Revisit if a subprocess engine returns.
+    // errors code-mapped in `src/failure.rs`. As of v0.5.1 the embedded
+    // engine attributes by cause: `Timeout { duration }` means the
+    // per-request deadline elapsed (constructed by the engine whenever an
+    // abort or early-exit fires and the per-request cancel flag is NOT
+    // set; classified Retryable by `failure::classify_transcribe_error`);
+    // `Cancelled` means the per-request cancel flag was set (coordinated
+    // shutdown / future drop — ADR 0012). `Failed` and `EmptyOutput` remain
+    // unconstructed by the embedded engine — `Failed` is constructed by
+    // this file's unit test and `EmptyOutput` by
+    // `tests/pipeline_fakes/fakes.rs`. Revisit if a subprocess engine
+    // returns.
     #[error("whisper.cpp timed out after {duration:?}")]
     Timeout { duration: Duration },
 
@@ -93,7 +97,7 @@ pub enum TranscribeError {
     #[error("whisper.cpp produced no transcript")]
     EmptyOutput,
 
-    #[error("transcription cancelled (deadline elapsed or operator-initiated)")]
+    #[error("transcription cancelled (per-request cancellation / coordinated shutdown)")]
     Cancelled,
 
     #[error("audio decode failure: {detail}")]

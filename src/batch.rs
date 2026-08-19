@@ -81,9 +81,15 @@ impl From<&ProcessStats> for RunCensus {
 /// reproducible attrition documentation.
 ///
 /// Deliberately no bug-escalation counter (spec §4 deviation, disclosed):
-/// a Bug aborts the run before close_batch_run, so a census recording one
-/// can never be written — the honest bug record is the batch_runs row
-/// left with finished_at IS NULL.
+/// a Bug aborts the run before `stats` (the run-side counters) exists, so
+/// a `BatchCensus` recording one can never be constructed — this struct
+/// always describes a run that reached its normal end. The row is not
+/// left dangling on a Bug abort, though: `commands::dispatch`'s Process
+/// arm makes a best-effort close on that path via the separate
+/// `aborted_census_json` marker below (a different, smaller JSON shape —
+/// sweep counters plus the error string, no `run` section), so
+/// `finished_at` usually still gets stamped even when this struct itself
+/// was never built.
 #[derive(Debug, Serialize)]
 pub struct BatchCensus {
     pub sweep: SweepStats,
@@ -169,6 +175,28 @@ pub(crate) fn truncate_to_char_boundary(s: &mut String, max_bytes: usize) {
         cut -= 1;
     }
     s.truncate(cut);
+}
+
+/// Census JSON for a run that died before its stats existed (worker Err
+/// path). Sweep counters are real (computed pre-workers); run counters are
+/// unrecoverable — the `aborted` marker plus the error string is the
+/// DB-visible record that this row's absence of run counters is a crash,
+/// not a zero-work run. Consumed by `commands::dispatch`'s Process arm.
+pub(crate) fn aborted_census_json(sweep: &SweepStats, error: &str) -> serde_json::Result<String> {
+    serde_json::to_string(&serde_json::json!({
+        "aborted": true,
+        "error": error,
+        "sweep": sweep,
+    }))
+}
+
+/// Cross-crate re-export of `aborted_census_json` for `tests/batch_census.rs`
+/// (0005: `pub(crate)` is invisible from an integration-test compilation
+/// unit; this is the purpose-built escape hatch, not a production API
+/// widening — same idiom as `Store::get_video_for_test`).
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn aborted_census_json_for_test(sweep: &SweepStats, error: &str) -> serde_json::Result<String> {
+    aborted_census_json(sweep, error)
 }
 
 /// Start-of-batch sweep (Epic 4a, spec §3): adjudicate every parked
@@ -562,5 +590,51 @@ mod tests {
         assert!(text.contains("swept_terminal"));
         assert!(text.contains("IpBlockedMessage"));
         assert!(text.contains("examined"));
+    }
+
+    #[test]
+    fn aborted_census_json_carries_marker_error_and_sweep() {
+        let by_label = std::collections::BTreeMap::from([("IpBlockedMessage".to_string(), 2usize)]);
+        let sweep = SweepStats {
+            examined: 5,
+            swept_terminal: 2,
+            swept_terminal_by_label: by_label.clone(),
+            requeued_for_retry: 1,
+            parked_for_cookies: 1,
+            kept_capped: 1,
+        };
+        let json = aborted_census_json(&sweep, "fetch→transcribe channel closed").unwrap();
+        assert!(json.contains("\"aborted\":true"));
+        assert!(json.contains("channel closed"));
+        assert!(json.contains("\"sweep\""));
+
+        // The success-path census must NOT gain the marker (guard against
+        // the marker leaking into BatchCensus itself).
+        let sweep_for_census = SweepStats {
+            examined: 5,
+            swept_terminal: 2,
+            swept_terminal_by_label: by_label,
+            requeued_for_retry: 1,
+            parked_for_cookies: 1,
+            kept_capped: 1,
+        };
+        let census = BatchCensus {
+            sweep: sweep_for_census,
+            run: RunCensus {
+                claimed: 3,
+                succeeded: 2,
+                failed: 1,
+                requeued_for_retry: 1,
+                exhausted_retries: 0,
+                parked_for_cookies: 0,
+                terminal_by_label: std::collections::BTreeMap::new(),
+                stale_after_success: 0,
+                stale_after_failure: 0,
+                checkpoints_run: 0,
+                checkpoints_failed: 0,
+                breaker_tripped: false,
+            },
+        };
+        assert!(!serde_json::to_string(&census).unwrap().contains("aborted"));
     }
 }

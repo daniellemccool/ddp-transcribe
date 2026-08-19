@@ -157,17 +157,32 @@ async fn transcribe_respects_short_deadline() {
         "transcribe took {elapsed:?} — possible cancellation regression or test-harness contention"
     );
 
-    // Expect either Cancelled (most likely) or successful very short completion
+    // Expect either Timeout (most likely) or successful very short completion
     // on extremely fast hardware. Key invariant: we did NOT hang past a
-    // reasonable wallclock.
+    // reasonable wallclock. An `Ok` is only accepted when it lands close to
+    // the 100ms deadline — a generous-but-bounded tolerance for genuinely
+    // fast hardware finishing just past the deadline before the abort
+    // callback is polled. An `Ok` that took seconds means the abort callback
+    // did not actually interrupt inference (it ran to natural completion),
+    // which is the regression this test exists to catch.
     match result {
         Ok(_) => {
+            assert!(
+                elapsed <= Duration::from_millis(500),
+                "transcribe returned Ok after {elapsed:?}, far past the 100ms \
+                 deadline — the abort callback likely did not fire and \
+                 inference ran to natural completion instead of being \
+                 interrupted (abort-callback regression)"
+            );
             eprintln!("inference completed within 100ms — fine on very fast hardware");
         }
-        Err(TranscribeError::Cancelled) => {
-            // The expected path.
+        Err(e) => {
+            assert!(
+                matches!(e, TranscribeError::Timeout { .. }),
+                "a deadline-fired abort must attribute as Timeout (retryable), not \
+                 Cancelled (coordinated shutdown); got: {e:?}"
+            );
         }
-        Err(e) => panic!("expected Cancelled or Ok, got {e:?}"),
     }
 
     engine.shutdown();

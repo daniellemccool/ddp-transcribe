@@ -287,7 +287,66 @@ pub async fn dispatch(cli: Cli) -> Result<CommandExit> {
             // None, and the join completes.
             engine.shutdown();
 
-            let stats = stats_result?;
+            let stats = match stats_result {
+                Ok(stats) => stats,
+                Err(run_err) => {
+                    // The run died (worker Err path). Log the real failure
+                    // FIRST, unconditionally — everything below is
+                    // best-effort bookkeeping (close the batch row with an
+                    // aborted census so `finished_at` is stamped and the
+                    // crash is DB-visible, mirroring ADR-0050's
+                    // census-visibility posture). If any cleanup step
+                    // itself fails, log-and-continue rather than `?`:
+                    // `run_err` — the actual pipeline crash — must never be
+                    // silently replaced by a secondary error, and must
+                    // always be what this arm re-raises. Store lock:
+                    // workers have exited (run_pipelined only returns
+                    // after its drain), same reasoning as the success
+                    // path's try_lock below.
+                    let run_err_text = format!("{run_err:#}");
+                    tracing::error!(
+                        run_id,
+                        error = %run_err_text,
+                        "run aborted; closing batch row with aborted census"
+                    );
+                    match batch::aborted_census_json(&sweep_stats, &run_err_text) {
+                        Ok(json) => match shared.try_lock() {
+                            Ok(mut guard) => match guard.close_batch_run(run_id, &json) {
+                                Ok(closed) => {
+                                    if closed == 0 {
+                                        tracing::warn!(
+                                            run_id,
+                                            "aborted-census close matched no open row"
+                                        );
+                                    }
+                                }
+                                Err(close_err) => {
+                                    tracing::error!(
+                                        run_id,
+                                        error = %close_err,
+                                        "aborted-census: close_batch_run failed; batch row left open"
+                                    );
+                                }
+                            },
+                            Err(lock_err) => {
+                                tracing::error!(
+                                    run_id,
+                                    error = %lock_err,
+                                    "aborted-census: store lock unavailable; batch row left open"
+                                );
+                            }
+                        },
+                        Err(json_err) => {
+                            tracing::error!(
+                                run_id,
+                                error = %json_err,
+                                "aborted-census: serializing census failed; batch row left open"
+                            );
+                        }
+                    }
+                    return Err(run_err);
+                }
+            };
             tracing::info!(
                 claimed = stats.claimed,
                 succeeded = stats.succeeded,

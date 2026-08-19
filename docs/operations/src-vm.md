@@ -39,6 +39,12 @@ curl_cffi fix — until both land, an involuntary rebuild (crash,
 restore-from-storage) reverts the machine to v0.3.0 *and* re-breaks
 fetching; see step 0 of the resume sequence.
 
+**v0.5.1 exists (deadline-attribution patch).** The VM update is the
+in-place tag-checkout sequence proven on 2026-08-13: `git fetch --tags &&
+git checkout v0.5.1`, CUDA rebuild, `sudo cp` to `/usr/local/bin`, `-V`
+prints `0.5.1`. **No schema change — no `migrate` needed** (schema stays
+v7).
+
 ## Topology (what actually exists)
 
 - **Source of truth:** GitHub `daniellemccool/ddp-transcribe`. The VM's working
@@ -549,7 +555,10 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite --transcripts ~/ddp-work/tran
 - `status` (no flags) is DB-only and read-only: counts by status, claim ages
   for in-progress rows, and the full `batch_runs` history — an interrupted
   run's open row renders honestly (`finished_at` NULL, no census) rather than
-  being skipped.
+  being skipped. This is still the outcome for an out-of-band process death
+  (kill/OOM/VM loss) or a failed closeout since v0.5.1; see the Timeout/
+  aborted-census bullet under "Known VM facts" below for the one path
+  (a returned worker error) that now closes the row instead.
 - `status --retryable` lists the `failed_retryable` pool by kind. The
   301 cookie-parked rows from the pilot batch carry the legacy placeholder
   kind `Fetch` (pre-Epic-3 rows never re-classified) — annotated
@@ -570,6 +579,15 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite --transcripts ~/ddp-work/tran
   writes stopped — and never says "IP" at all: 60 h / 1.8M real rejections
   produced that text zero times (signature table in
   `incident-2026-08-06-tiktok-tls-403.md`).
+- **A per-item transcription that exceeds the 600 s deadline is a
+  retryable `Timeout` since v0.5.1** (before: it killed the run — 2026-08-17
+  incident). A returned worker error now closes the `batch_runs` row with an
+  `"aborted": true` census (sweep counters + error string), so the crash
+  marker is queryable; if that closeout itself fails (JSON-serialize, store
+  lock, or `close_batch_run` error) or the process dies out-of-band
+  (kill/OOM/VM loss — never reaches this arm at all), the row still remains
+  open with `finished_at` NULL, same as the "Status quickstart" section
+  above describes.
 - The census persists in the state DB's `batch_runs` table with the active
   policy TOML — attrition documentation survives tmux.
 - `/etc/rsc/cron_webdav.sh` and `cron_user.sh` curl processes are SURF platform

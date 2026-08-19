@@ -290,6 +290,10 @@ pub(crate) struct TranscribeRequest {
     /// Per-call deadline (0012 comment-2). T7's abort_callback polls
     /// `Instant::now() >= deadline` directly — no separate timer task.
     pub deadline: Instant,
+    /// The configured per-call budget `deadline` was computed from —
+    /// carried so a deadline-fired abort can construct
+    /// `TranscribeError::Timeout { duration }`.
+    pub timeout: Duration,
     pub reply: oneshot::Sender<Result<TranscribeOutput, TranscribeError>>,
 }
 
@@ -983,13 +987,24 @@ impl WhisperEngine {
 
                     // Early cancellation check: if the caller already dropped
                     // the future (CancelOnDrop fired) or the deadline elapsed
-                    // before we even dequeued the request, return Cancelled
-                    // without doing any encoder work — including the opt-in
-                    // lang_detect pass.
-                    if req.cancel.load(std::sync::atomic::Ordering::Relaxed)
-                        || Instant::now() >= req.deadline
-                    {
+                    // before we even dequeued the request, return without
+                    // doing any encoder work — including the opt-in
+                    // lang_detect pass. Attribute by cause: a set cancel flag
+                    // means coordinated shutdown (ADR 0012); otherwise the
+                    // deadline is the only other predicate — a per-item
+                    // timeout (Retryable).
+                    if req.cancel.load(std::sync::atomic::Ordering::Relaxed) {
                         reply_and_log(req, Err(TranscribeError::Cancelled), request_seq, started);
+                        continue;
+                    }
+                    if Instant::now() >= req.deadline {
+                        let duration = req.timeout;
+                        reply_and_log(
+                            req,
+                            Err(TranscribeError::Timeout { duration }),
+                            request_seq,
+                            started,
+                        );
                         continue;
                     }
 
@@ -1036,11 +1051,12 @@ impl WhisperEngine {
                     // returns to avoid leaking ~16 bytes per request.
                     // `abort_fired` is set INSIDE the callback when the predicate
                     // first returns true. Post-inference we attribute an Err to
-                    // Cancelled only when the callback actually fired — not
+                    // Timeout or Cancelled (per which predicate fired — see
+                    // below) only when the callback actually fired — not
                     // merely when the deadline happens to have elapsed by the
                     // time state.full returns. (codex review of T7: without
-                    // this, a non-cancellation Err that returns just after the
-                    // deadline would be misclassified as Cancelled.)
+                    // this, a non-abort Err that returns just after the
+                    // deadline would be misclassified as Timeout/Cancelled.)
                     let abort_fired = Arc::new(AtomicBool::new(false));
                     let abort_fired_for_cb = Arc::clone(&abort_fired);
                     let cancel_for_abort = Arc::clone(&req.cancel);
@@ -1155,15 +1171,31 @@ impl WhisperEngine {
                     // Re-check cancellation after the opt-in lang_detect pass.
                     // pcm_to_mel + lang_detect can take seconds; if the caller
                     // dropped the future or the deadline elapsed during that
-                    // work, surface Cancelled before paying for primary inference.
-                    if req.cancel.load(std::sync::atomic::Ordering::Relaxed)
-                        || Instant::now() >= req.deadline
-                    {
+                    // work, surface the cause before paying for primary
+                    // inference. Attribute by cause: a set cancel flag means
+                    // coordinated shutdown (ADR 0012); otherwise the deadline
+                    // is the only other predicate — a per-item timeout
+                    // (Retryable).
+                    if req.cancel.load(std::sync::atomic::Ordering::Relaxed) {
                         // Reclaim the abort closure box even on the early-exit
                         // path; whisper.cpp's abort_callback won't fire here
                         // (state.full not yet called) so this is safe.
                         drop(unsafe { Box::from_raw(abort_user_data) });
                         reply_and_log(req, Err(TranscribeError::Cancelled), request_seq, started);
+                        continue;
+                    }
+                    if Instant::now() >= req.deadline {
+                        // Reclaim the abort closure box even on the early-exit
+                        // path; whisper.cpp's abort_callback won't fire here
+                        // (state.full not yet called) so this is safe.
+                        drop(unsafe { Box::from_raw(abort_user_data) });
+                        let duration = req.timeout;
+                        reply_and_log(
+                            req,
+                            Err(TranscribeError::Timeout { duration }),
+                            request_seq,
+                            started,
+                        );
                         continue;
                     }
 
@@ -1180,16 +1212,22 @@ impl WhisperEngine {
                     // actually return true during inference?", which avoids the
                     // race where Instant::now() crosses req.deadline after
                     // state.full returned with an unrelated Err.
-                    let was_cancelled = abort_fired.load(std::sync::atomic::Ordering::Relaxed);
+                    let abort_was_fired = abort_fired.load(std::sync::atomic::Ordering::Relaxed);
 
                     match run_result {
-                        Err(_) if was_cancelled => {
-                            reply_and_log(
-                                req,
-                                Err(TranscribeError::Cancelled),
-                                request_seq,
-                                started,
-                            );
+                        Err(_) if abort_was_fired => {
+                            // The abort callback fired. Attribute by cause: a
+                            // set cancel flag means coordinated shutdown
+                            // (ADR 0012); otherwise the deadline is the only
+                            // other predicate — a per-item timeout.
+                            let err = if req.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                                TranscribeError::Cancelled
+                            } else {
+                                TranscribeError::Timeout {
+                                    duration: req.timeout,
+                                }
+                            };
+                            reply_and_log(req, Err(err), request_seq, started);
                         }
                         Err(e) => {
                             reply_and_log(
@@ -1468,6 +1506,7 @@ async fn transcribe_via_tx(
         config,
         cancel,
         deadline,
+        timeout,
         reply: reply_tx,
     };
 
@@ -1840,6 +1879,7 @@ mod reply_path_tests {
                 config: PerCallConfig::default(),
                 cancel: Arc::new(AtomicBool::new(false)),
                 deadline: Instant::now() + Duration::from_secs(60),
+                timeout: Duration::from_secs(60),
                 reply,
             },
             rx,
