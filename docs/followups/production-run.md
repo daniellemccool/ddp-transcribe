@@ -455,6 +455,52 @@ the next long unattended campaign stretch.
 
 ---
 
+### `VideoNotAvailable10240` composition: stratified redirect sample
+
+**Found in:** the 2026-08-26 post-incident-4 validation batch (browser
+verification of its 17 write-offs). The class is format-mixed — photo-mode
+posts confirmed among it, at least one sampled id not photo-routed — and
+the n=6 sample (one ~hour-wide creation window) cannot estimate the
+105,851-row cohort's composition. Full evidence:
+`~/projects/crime-and-policing/methodology/10240-photo-posts-note.md` and
+the incident-4 record.
+**Disposition:** analysis-side sampling task, no pipeline change. A HEAD
+request to `/video/<id>` classifies format by whether the location
+resolves to `/photo/` (no yt-dlp, no media transfer); stratify by creation
+cohort (snowflake-decoded year). Caveat carried from the evidence: a
+non-redirect is ambiguous (dead video vs routing-stripped photo post), so
+the sample bounds the photo fraction from below.
+**Why it matters:** 10240 is 27% of all terminals and 4.5% of the
+2026-cohort attempted — its composition moves the removal-rate headline by
+several points and gates the differential-removal (crime-content) claim's
+interpretation.
+**Trigger to revisit:** methodology writing for the removal/attrition
+section; before any removal-rate number ships.
+
+---
+
+### Photo-post share of SUCCESSES: envelope-based classification
+
+**Found in:** the same 2026-08-26 verification — a known-live photo
+carousel extracts successfully through the pipeline's URL form
+(`Downloading 1 format(s): audio`), so the transcript corpus already
+contains carousel-soundtrack transcripts (music lyrics / TTS), unknown
+fraction.
+**Disposition:** no fetching needed — classify from the captured raw
+metadata envelopes (`video_metadata_raw`, ADR-0042 replayability): photo
+posts' info dicts should be distinguishable (format list shape / image
+fields; derive the discriminator from the known-live specimen's envelope
+once one is captured, or fetch that one specimen's envelope ad hoc).
+Output: a per-video format flag joinable to transcripts for the content
+analysis.
+**Why it matters:** soundtrack transcripts are a different exposure
+object than spoken-video transcripts; the content analysis needs to
+distinguish them (or justify pooling).
+**Trigger to revisit:** before transcript-content analysis begins; pairs
+with the `load-metadata` decision at campaign close.
+
+---
+
 ### Hourly census check (the alarm that was filed and never installed)
 
 **Found in:** the 2026-08-10 WAF incident — and, verbatim, in incident 1's own

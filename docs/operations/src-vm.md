@@ -34,22 +34,25 @@ idempotent and **refuses to run** if any `canonical = 1` row's `video_id`
 is not a fixed-width 19-digit numeric string (the recency claim order's
 width guard, ADR-0048; see "Update procedure" below for the migration
 ladder). The SRC catalog's `pipeline_git_ref` bump was **done 2026-08-14**
-(operator), so a rebuild reproduces v0.5.0. **Still pending:** the deploy
-repo's `ytdlp` role — it must both drop curl_cffi AND pin yt-dlp ≥ nightly
-2026.08.18 (it currently installs stable 2026.07.04, which cannot fetch
-TikTok since the 2026-08-18 header-fingerprint block) — until that lands,
-an involuntary rebuild re-breaks fetching two independent ways; see step 0
-of the resume sequence and
-`incident-2026-08-18-tiktok-header-fingerprint-block.md`.
+(operator), so a rebuild reproduces v0.5.0. **Still pending — now the
+critical path:** the deploy repo's `ytdlp` role. As of 2026-08-26 it is
+wrong on every axis: it must pin yt-dlp ≥ nightly 2026.08.25, **install**
+curl_cffi (`pipx inject` — the 2026-08-25 incident REVERSED the
+incident-2 exclusion), and provision Deno. It currently installs stable
+2026.07.04 alone, so an involuntary rebuild is a total fetch outage; see
+step 0 of the resume sequence and the incident records
+(`incident-2026-08-18-…`, `incident-2026-08-25-…`).
 
-**yt-dlp on the VM: nightly 2026.08.18.122307 since 2026-08-19** —
-out-of-band ops upgrade (`pipx install --force --pip-args=--pre yt-dlp`, no
-`[curl-cffi]` extra), the remedy for the 2026-08-18 incident (first live
-breaker trip, both instances, ~100 attempts total). The nightly randomizes
-HTTP header fingerprints and fetches unimpersonated by upstream default
-(PR #17452 adopted this campaign's incident-2 posture). Validation batch
-2026-08-19: 41/50, zero `YtDlpOther`, classification patterns verified at
-first order against the new extractor.
+**Fetch stack on the VM (since 2026-08-26):** yt-dlp nightly
+**2026.08.25.233329** (`pipx install --force --pip-args=--pre yt-dlp`)
+**+ curl_cffi** (`pipx inject yt-dlp curl_cffi`) **+ Deno 2.9.5**
+(userland install, symlinked into `~/.local/bin`) — the remedy stack for
+the 2026-08-25 challenge rung
+(`incident-2026-08-25-tiktok-challenge-requires-impersonation.md`, which
+also carries the full four-rung arms-race ledger). Validation batch
+2026-08-26: 33/50, zero `YtDlpOther`, zero retryables, normal pace.
+Historical: nightly 2026.08.18 ran unimpersonated 2026-08-19 → 08-25
+(header-randomization era, validation 41/50).
 
 **v0.5.1 exists (deadline-attribution patch).** The VM update is the
 in-place tag-checkout sequence proven on 2026-08-13: `git fetch --tags &&
@@ -121,12 +124,15 @@ uncapped restart.
 Do not uncap the batch immediately after the v0.5.0 relaunch. Spec D6's
 staged validation, in order:
 
-0. **Precondition — fix the deploy repo first.** The `ytdlp` role must no
-   longer install curl_cffi before the delete-and-relaunch happens, or the
-   relaunch reinstates the WAF-blocked fingerprint and step 1 fails 100%
-   (see "DO NOT IMPERSONATE" under Known VM facts). Witness after relaunch:
-   `ytdlp_impersonation_available` is `false` in the validation batch's
-   `params_json`.
+0. **Precondition — fix the deploy repo first.** The `ytdlp` role must
+   provision the current fetch stack (yt-dlp ≥ nightly 2026.08.25 +
+   curl_cffi + Deno — see "Version state" above; posture history in the
+   impersonation bullet under Known VM facts) or the relaunch cannot fetch
+   at all. **Witness after relaunch (reading REVERSED 2026-08-26):**
+   `ytdlp_impersonation_available` must be **`true`** in the validation
+   batch's `params_json` — `true` has meant healthy since the 2026-08-25
+   incident; from 2026-08-10 to 2026-08-25 the healthy reading was
+   `false`. Check the batch's `ytdlp_version` field in the same query.
 1. **Validation batch:** `process --max-videos 50 --retries 2`. Expect
    ≥~70% success, zero `HttpError` / `YtDlpOther`, metadata envelopes
    captured. This confirms the canonical unimpersonated fetch path
@@ -627,12 +633,22 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite --transcripts ~/ddp-work/tran
   first v0.5.0 batches, checked from an NL vantage matching the VM's):
   `VideoNotAvailable10231` = **region-gated** ("isn't available in your
   country or region" — permanently unfetchable from this egress, terminal is
-  correct); `VideoNotAvailable10240` and `IpBlockedMessage` = deletion
-  flavors (generic "Video currently unavailable"). TikTok's web frontend
-  collapses all deletion-flavored states into one page — the distinct API
-  status codes preserve distinctions the browser cannot confirm. Relevant to
-  the researcher-facing attrition story: 10231 rows are "unreachable from
-  NL", not "gone".
+  correct); `IpBlockedMessage` = deletion flavor (generic "Video currently
+  unavailable"). **`VideoNotAvailable10240` = format-MIXED, composition
+  unresolved (corrected 2026-08-26):** TikTok photo-mode posts are
+  confirmed among it (browser redirects `/video/<id>` → `/photo/<id>`,
+  empty page; placeholder-handle rendering controlled for), at least one
+  sampled id does not redirect, and the n=6 sample spans one ~hour-wide
+  creation window — do NOT read 10240 as purely "deleted videos" or purely
+  "photo posts". Verified separately: **live** photo posts extract
+  successfully through the pipeline (soundtrack audio) and never produce
+  10240, so the write-offs are correct either way and some successes are
+  carousel soundtracks. Resolution instruments are filed in FOLLOWUPS;
+  study-facing note: `~/projects/crime-and-policing/methodology/`
+  `10240-photo-posts-note.md`. TikTok's web frontend collapses unavailable
+  states into one page — the distinct API status codes preserve
+  distinctions the browser cannot confirm. Attrition story: 10231 rows are
+  "unreachable from NL", not "gone".
 - **`ddp-transcribe --version` reporting `0.1.0` was the v0.3.0 signature, not
   an anomaly** (historical — the campaign binary prints `0.5.0` since
   2026-08-13). The Cargo.toml bump-in-tag-commit discipline started at v0.3.1;
@@ -640,38 +656,39 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite --transcripts ~/ddp-work/tran
   v0.3.0-era binary `0.1.0` was *confirmation*, and seeing it today means a
   stale binary (check `/usr/local/bin` against the tag — see the stale-copy
   bullet below).
-- **DO NOT IMPERSONATE, AND DO NOT INSTALL curl_cffi.** From 2026-08-10 19:14,
-  TikTok's Akamai WAF serves a 537-byte "Site Maintenance" block page **with
-  HTTP 200** to clients presenting curl_cffi's Chrome TLS fingerprint;
-  yt-dlp misreports it as `Unexpected response from webpage request` and asks
-  you to file an upstream bug (it is not a bug — it is a refusal). Reproduced
-  from residential *and* SURF egress with the same yt-dlp version, so it is
-  the fingerprint, not the IP. `impersonate=True` is **hardcoded** in yt-dlp's
-  TikTok extractor, so there is no flag to disable it — **removing curl_cffi
-  from the yt-dlp venv is the only lever**, and any `pipx upgrade`/reinstall
-  that pulls the extra silently re-breaks fetching. Positive witness that the
-  fix is in effect: `yt-dlp --list-impersonate-targets` shows every target
-  `(unavailable)` — and from v0.5.0 each batch records this automatically as
-  `ytdlp_impersonation_available` in `batch_runs.params_json` (must read
-  `false`; `true` after a relaunch means curl_cffi came back). Full record:
-  `incident-2026-08-10-tiktok-waf-impersonation-block.md`. The superseded
-  2026-08-09 `~/.config/yt-dlp/config` → `--impersonate chrome` mitigation has
-  been deleted; do not re-create it.
-  **2026-08-19 update:** upstream PR #17452 (in nightly ≥ 2026.08.18, now
-  on this VM) *removed* impersonation from TikTok webpage requests — the
-  posture this bullet mandates is now yt-dlp's own default, and the
-  "hardcoded `impersonate=True`" sentence above is historical. Keep
-  curl_cffi uninstalled anyway (defense in depth; the witness stays
-  meaningful). Full record:
-  `incident-2026-08-18-tiktok-header-fingerprint-block.md`.
-  **ADR-0043 interaction — read before the next promotion:** the working
-  configuration is currently *hand-applied VM state* (a package that must stay
-  absent), so 0043's step 5 (delete-and-relaunch) will reinstate curl_cffi from
-  the `ytdlp` role and return the machine to 100% fetch failure. Fix the deploy
-  repo **before** promoting any release, or the promotion itself is the outage.
-  This is exactly the byte-equivalent-rebuild property 0043 exists to protect,
-  and the ops-level fix violates it — which is the argument for landing the
-  pipeline-side fix promptly rather than parking it.
+- **IMPERSONATION POSTURE — current (2026-08-26): REQUIRED. This bullet
+  has reversed twice; always read the dated history, never the habit.**
+  - *2026-08-10 → 08-18 (ban era):* TikTok served a 537-byte block page
+    (HTTP 200) to curl_cffi's Chrome TLS fingerprint, reproduced from
+    residential and SURF egress alike; `impersonate=True` was hardcoded in
+    the extractor, so removing curl_cffi from the venv was the only lever.
+    Record: `incident-2026-08-10-tiktok-waf-impersonation-block.md`.
+  - *2026-08-19 → 08-25 (unimpersonated era):* upstream PR #17452 removed
+    impersonation from TikTok webpage requests and randomized header
+    fingerprints; the ban posture became yt-dlp's own default.
+    Record: `incident-2026-08-18-tiktok-header-fingerprint-block.md`.
+  - *2026-08-25 → now (required era):* TikTok's challenge flow demands a
+    browser-grade client; the nightly reintroduced impersonation and warns
+    when no target is available. Working stack: nightly ≥ 2026.08.25 +
+    `pipx inject yt-dlp curl_cffi` + Deno (challenge solver's JS runtime;
+    necessity-today unverified, kept deliberately). Record:
+    `incident-2026-08-25-tiktok-challenge-requires-impersonation.md`,
+    including the four-rung arms-race ledger.
+  - **Witness (reading REVERSED 2026-08-26):** each batch records
+    `ytdlp_impersonation_available` in `batch_runs.params_json`. Healthy
+    is now **`true`**; a `false` after a rebuild means the deploy role's
+    stale posture reasserted itself and fetching is broken. (From
+    2026-08-10 to 08-25 healthy was `false` — old dashboards/habits built
+    on that reading are inverted.)
+  - The superseded 2026-08-09 `~/.config/yt-dlp/config` mitigation stays
+    deleted — transport configuration lives in the installed stack and
+    `params_json`, never in side-effect config files (incident-2 lesson,
+    unchanged by the reversals).
+  - **ADR-0043 interaction:** the working stack is hand-applied VM state;
+    a delete-and-relaunch provisions the `ytdlp` role's stale posture and
+    breaks fetching entirely. Fix the deploy repo before any relaunch —
+    this violation of the byte-equivalent-rebuild property is the standing
+    argument for landing the role update promptly.
 - **Fetch the canonical URL, not the DDP share URL.**
   `www.tiktokv.com/share/video/<id>/` (the form DDP exports contain) 403s
   python's TLS ClientHello from SURF egresses — still live, re-verified
