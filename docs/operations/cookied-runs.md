@@ -152,11 +152,19 @@ snapshot backup reduced to **exactly the 18,700-row gated cohort**
 (18,461 `SensitiveLoginGated` + 239 legacy-kind `Fetch`, per §1; pending,
 succeeded, and terminal rows deleted; vacuumed to 26 MB, rebuilt
 2026-08-10).
-The trim is mandatory, not cosmetic: claim order is `attempt_count ASC`, so
-against a full snapshot copy the fresh pending rows (attempt 0) would
-starve the requeued gated rows and a small rehearsal would never send a
-cookie. Never rehearse against the sync target — the sweep requeues the
-ENTIRE parked pool even under `--max-videos`, and there is no DB merge.
+The trim is mandatory. Post-drain (`pending = 0`) the reasons are: (a) it
+makes the sweep-census check exact — a trimmed DB must report
+`requeued_for_retry` = the cohort count, while a full copy would requeue
+the entire parked pool, non-gated residue included; (b) it keeps
+rehearsal attempts structurally away from the ~14k non-cookie residue;
+(c) a small throwaway file beside a 5.4 GB authoritative one is hard to
+mis-target. (The original pre-drain rationale — millions of pending
+attempt-0 rows starving the gated tiers under `attempt_count ASC` claim
+order — no longer applies to a drained snapshot.) The trim deletes rows
+only; `attempt_count` is never reset — the rehearsal must exercise the
+real §2 arithmetic, and attempt history is forensic (0046 discipline).
+Never rehearse against the sync target — the sweep requeues the ENTIRE
+parked pool even under `--max-videos`, and there is no DB merge.
 
 ⚠ 2026-08-30 — the prepared workspace is STALE and the rehearsal is
 UNPROVEN under the current transport; both must be redone before anything
