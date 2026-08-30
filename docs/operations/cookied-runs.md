@@ -3,9 +3,12 @@
 **Stage: ACTIVE** (written 2026-08-04 during the campaign; refreshed
 2026-08-30 at campaign close). The §6 trigger has FIRED: the fetch queue
 drained 2026-08-30 (2,446,943/2,982,461 transcribed), the final sync landed
-on Yoda, and the VM is paused. No batch runs until the final snapshot is
-pulled to the desktop and every ⚠-marked number below is re-verified
-against it. Read with ADR-0035 (cookie scoping — invariant), ADR-0036
+on Yoda, and the VM is paused. The final snapshot was pulled to the desktop
+and every DB-derived number below was re-verified read-only against it
+(2026-08-30, schema v7, 5.4 GB). Remaining gates before the first batch:
+transport-stack install + rebuilt rehearsal (§4) and the operator's
+batch-calculus re-ruling (§5). Read with ADR-0035 (cookie scoping —
+invariant), ADR-0036
 (retry authority), ADR-0046 (requeue-failures), ADR-0033 (evidence-derived
 classification), and the README's `requeue-failures` arithmetic. The
 desktop ops-model revision (writer role moving from the VM to the desktop
@@ -59,34 +62,38 @@ sweep behaved correctly on both versions;
 (claim order `attempt_count ASC` puts the remaining ~134k attempt-0 rows
 first), so the trimmed-rehearsal starvation logic in §4 is unchanged.
 
-**2026-08-30 campaign-close addendum** (counts from the close notes,
-`~/projects/crime-and-policing/methodology/campaign-close-2026-08-30.md` —
-⚠ every number here must be re-verified read-only against the final
-snapshot once pulled, before the first batch):
+**2026-08-30 campaign-close addendum** (verified read-only against the
+final snapshot on the desktop, 2026-08-30; narrative context in
+`~/projects/crime-and-policing/methodology/campaign-close-2026-08-30.md`):
 
 - Final state table at drain (`pending = 0`): succeeded **2,446,943**
   (82.1% of the 2,982,461 corpus), `failed_terminal` 468,450,
   `failed_retryable` 67,063, `in_progress` 5 (stale claims from the final
   runs' last moments — harmless bookkeeping residue).
-- The gated pool is now **≈53k rows** (~2.8× the 18,700 above) and attempt
-  counts are **heterogeneous** — the every-row-at-`attempt_count = 1`
-  premise behind §2's drafted `--retries 2` floor is dead. ⚠ Re-derive the
-  floor per §2 from the final snapshot; the per-attempt distribution is
-  pending the pull.
-- The rest of the parked pool is NOT cookied cohort: ~11.4k rows at the
-  lifetime retry cap — a MIXED pool (live audio-less photo posts confirmed
-  4/4 among the `NoVideoFormats` exhaustees, plus genuinely-transient
-  residue) — and small other residue.
-- Terminal-semantics refresh (browser-verified spot checks
-  2026-08-13/26/29/30): `IpBlockedMessage` reads **removed-OR-private**
-  (~4/5 of late checks private, not IP blocking); `VideoNotAvailable10240`
-  is **format-mixed** (photo-mode posts confirmed among it, photo/video
-  split unresolved; 105k+); `10231` stays region-gated (~22k). None of
-  this changes the gated cohort — the do-not-relitigate stance below
-  stands, on refreshed evidence.
-- Schema: the final DB is **v7** — the desktop binary must be v0.5.x
-  lineage. Use the **v0.5.1** tag (cut 2026-08-30; see §6 for why v0.5.0
-  is not acceptable).
+- The gated pool is **53,051 rows** (52,812 `SensitiveLoginGated` + 239
+  legacy-kind `Fetch`, still all at attempt 1 — ~2.8× the 18,700 above)
+  and attempt counts are **heterogeneous**: `SensitiveLoginGated` sits at
+  attempt 1 × 20,264 / attempt 2 × 32,436 / attempt 3 × 112. Max
+  `attempt_count` = 3 → **`--retries 4` is the floor** (§2).
+- The rest of the parked pool is NOT cookied cohort: **14,012 rows** at
+  attempts 3–4 — a MIXED pool (`NoVideoFormats` 7,206, with live
+  audio-less photo posts confirmed 4/4 among its exhaustees;
+  `NoPermission` 5,776; `YtDlpOther` 513; `FfprobePostprocess` 334;
+  `HttpError` 176; `ToolTimeout` 7 — including the §2 deadline-killer).
+  Note `--retries 4` makes this residue sweep-reachable too; in
+  `attempt_count ASC` claim order it drains behind the gated tiers.
+- Terminal counts (exactly three classes, still none gating-shaped):
+  `IpBlockedMessage` 330,772 / `VideoNotAvailable10240` 111,639 /
+  `VideoNotAvailable10231` 26,039. Semantics refresh (browser-verified
+  spot checks 2026-08-13/26/29/30): `IpBlockedMessage` reads
+  **removed-OR-private** (~4/5 of late checks private, not IP blocking);
+  `10240` is **format-mixed** (photo-mode posts confirmed among it,
+  photo/video split unresolved); `10231` stays region-gated. None of this
+  changes the gated cohort — the do-not-relitigate stance below stands,
+  on refreshed evidence.
+- Schema: the final DB is **v7** (verified) — the desktop binary must be
+  v0.5.x lineage. Use the **v0.5.1** tag (cut 2026-08-30; see §6 for why
+  v0.5.0 is not acceptable).
 
 ## 2. `--retries` arithmetic
 
@@ -101,19 +108,21 @@ With the whole cohort at `attempt_count = 1`:
   fetch re-parks (2 < 3) and stays sweep-reachable for one more session,
   then caps at attempt 3.
 
-⚠ 2026-08-30: **`--retries 2` is STALE.** The worked example above only
-holds while the cohort's max `attempt_count` is 1; attempt counts are
-heterogeneous at campaign close (§1 addendum). Re-derive from the final
-snapshot: the floor is the smallest `--retries` that *strictly exceeds*
-the gated cohort's max `attempt_count` — that requeues the whole pool, and
-a failed cookied fetch on the highest-attempt rows still re-parks once
-before capping.
+2026-08-30, verified against the final snapshot: **`--retries 2` is STALE
+— the floor is now `--retries 4`.** The worked example above only holds
+while the cohort's max `attempt_count` is 1; the final gated cohort tops
+out at attempt 3 (§1 addendum). The rule: the floor is the smallest
+`--retries` that *strictly exceeds* the cohort's max `attempt_count` —
+`--retries 4` requeues the whole pool (3 < 5), and a failed cookied fetch
+on the attempt-3 rows re-parks (4 < 5) before capping at attempt 5.
+Re-derive before each session block: the max climbs as batches run.
 
-Raising `--retries` also un-parks the high-attempt residue, including
-video `7645028780246895894` — the 2026-08-17 deadline-killer, parked at
-attempt 3. Under v0.5.0 its deadline elapse is misattributed as
-`Cancelled` and terminates the whole run; **v0.5.1 (the fix) is therefore
-mandatory for every cookied invocation**, rehearsal included (§6).
+Raising `--retries` also un-parks the 14,012-row non-gated residue (§1
+addendum), including video `7645028780246895894` — the 2026-08-17
+deadline-killer, verified still parked at attempt 3 (`ToolTimeout`, 300 s).
+Under v0.5.0 its deadline elapse is misattributed as `Cancelled` and
+terminates the whole run; **v0.5.1 (the fix) is therefore mandatory for
+every cookied invocation**, rehearsal included (§6).
 
 ## 3. Project account + jar procedure
 
@@ -154,9 +163,10 @@ UNPROVEN under the current transport; both must be redone before anything
 authoritative:
 
 - The trimmed `state.sqlite` above is built from the 2026-08-09 snapshot
-  (18,700 rows); the final cohort is ≈53k with heterogeneous attempt
-  counts (§1 addendum). Rebuild the workspace from the final snapshot
-  (backup, trim to the gated cohort, vacuum) once it is pulled.
+  (18,700 rows); the final cohort is 53,051 rows with heterogeneous
+  attempt counts (§1 addendum). Rebuild the workspace from the final
+  snapshot, now pulled to the desktop (backup, trim to the gated cohort,
+  vacuum).
 - Transport: four WAF generations passed during the campaign. The
   REQUIRED fetch stack (VM-proven 2026-08-26) is **yt-dlp ≥ nightly
   2026.08.25 + curl_cffi (`pipx inject yt-dlp curl_cffi`) + Deno**;
@@ -176,16 +186,16 @@ authoritative:
   --inbox /home/dmccool/data/d3i/uu-tiktok/cookied-rehearsal/inbox \
   --transcripts /home/dmccool/data/d3i/uu-tiktok/cookied-rehearsal/transcripts \
   --whisper-model /home/dmccool/src/ddp-transcribe/models/ggml-large-v3-turbo-q5_0.bin \
-  --cookies-file <jar> --retries <N per §2> --max-videos 10 --download-workers 1
+  --cookies-file <jar> --retries 4 --max-videos 10 --download-workers 1
 ```
 
 One download worker deliberately: every cookied fetch ties to the account;
 protecting it is the point of 0035's scoping. Verify:
 
 - sweep census: `requeued_for_retry` = the rebuilt workspace's full row
-  count (18,700 in the 2026-08-09 build), `parked_for_cookies 0`,
-  `kept_capped 0` — a nonzero `kept_capped` means `--retries` is below
-  the §2 floor;
+  count (53,051 for a final-snapshot trim; 18,700 in the old 2026-08-09
+  build), `parked_for_cookies 0`, `kept_capped 0` — a nonzero
+  `kept_capped` means `--retries` is below the §2 floor;
 - `cookies=true` on the gated fetch lines, jar path redacted everywhere;
 - `backend="GPU" device="CUDA0"` banner (0013 — absence means the sandbox
   hid the GPU; see §7);
@@ -198,10 +208,11 @@ The whole directory is throwaway; rebuild it from the latest snapshot
 ## 5. Batch calculus (operator-confirmed 2026-08-10 — ⚠ re-ruling PENDING)
 
 ⚠ 2026-08-30: this calculus was ruled on an 18,700-row cohort; the final
-pool is ≈53k — roughly **52 supervised hours ≈ ~100 sessions** at the
-drafted pace. An operator re-ruling on batch size and cadence is pending;
-until it lands, the 2026-08-10 parameters below are the only ratified ones
-(recorded in the desktop-mop-up invariant, `docs/decisions/0051-*`).
+pool is 53,051 (verified) — roughly **52 supervised hours ≈ 106 sessions
+of 500** at the drafted pace. An operator re-ruling on batch size and
+cadence is pending; until it lands, the 2026-08-10 parameters below are
+the only ratified ones (recorded in the desktop-mop-up invariant,
+`docs/decisions/0051-*`).
 
 Single-worker fetch runs ~3.5 s/video → the 18,700-row cohort is roughly
 18 hours of supervised fetch time:
@@ -225,8 +236,9 @@ procedures (`~/src/d3i/d3i-infra/researchcloud-ddp-transcribe`). The drain
 happened 2026-08-30 (queue drained, final sync landed, VM paused). Before
 the first authoritative batch:
 
-- pull the final snapshot to the desktop (operator-run sync) and re-verify
-  every ⚠-marked number in this runbook against it;
+- ~~pull the final snapshot to the desktop and re-verify this runbook's
+  DB-derived numbers against it~~ — DONE 2026-08-30 (operator-run sync;
+  read-only verification of §1's addendum and §2's floor);
 - build the desktop binary from the **v0.5.1 tag** (cut 2026-08-30 —
   0043's promotion discipline applies to the mop-up host too, even though
   it is not SRC-provisioned). v0.5.0 is NOT acceptable: raising
@@ -235,7 +247,9 @@ the first authoritative batch:
 - install and smoke the required fetch stack, then re-run the rebuilt
   rehearsal under it (§4) — cookies + impersonation have never run
   together;
-- re-derive the `--retries` floor from the final DB (§2);
+- re-derive the `--retries` floor from the live DB (§2) — **4** as of the
+  2026-08-30 snapshot; the max climbs as batches run, so re-derive before
+  each session block;
 - re-check the sweep census against the final counts before letting the
   batch proceed past its first few claims.
 
