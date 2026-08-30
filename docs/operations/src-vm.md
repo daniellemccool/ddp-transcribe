@@ -643,7 +643,14 @@ ddp-transcribe --state-db ~/ddp-state/state.sqlite --transcripts ~/ddp-work/tran
   "photo posts". Verified separately: **live** photo posts extract
   successfully through the pipeline (soundtrack audio) and never produce
   10240, so the write-offs are correct either way and some successes are
-  carousel soundtracks. Resolution instruments are filed in FOLLOWUPS;
+  carousel soundtracks. **2026-08-30 extensions (endgame-stratum browser
+  checks):** `NoVideoFormats` retryables in the mop-up strata are
+  live photo posts WITHOUT extractable audio (4/4 checked) — they retry
+  to cap-exhaustion, so `exhausted_retries` is a mixed pool, not an
+  attrition class; and `IpBlockedMessage` means "removed OR **private**"
+  (4/5 browser-checked were private — the intermediate `NoPermission`
+  readings on those rows were literally accurate). Resolution instruments
+  are filed in FOLLOWUPS;
   study-facing note: `~/projects/crime-and-policing/methodology/`
   `10240-photo-posts-note.md`. TikTok's web frontend collapses unavailable
   states into one page — the distinct API status codes preserve

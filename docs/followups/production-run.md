@@ -474,6 +474,15 @@ the sample bounds the photo fraction from below.
 2026-cohort attempted — its composition moves the removal-rate headline by
 several points and gates the differential-removal (crime-content) claim's
 interpretation.
+**2026-08-30 scope extension:** the **cap-exhausted pool joins the sample
+frame**. Endgame-stratum browser checks (4/4) showed `NoVideoFormats`
+retryables are live photo posts WITHOUT extractable audio — they exhaust
+their caps, so `exhausted_retries` is a mixed pool (live photo-no-audio +
+genuinely-transient residue), not an attrition class. Also confirmed:
+`IpBlockedMessage` = "removed OR **private**" (4/5 checked private) — the
+pipeline cannot split those; a browser sub-sample can estimate the ratio.
+The attrition taxonomy for the write-up: removed / private / region-gated
+(10231) / photo-no-audio / login-gated (cookie pool) / transient-exhausted.
 **Trigger to revisit:** methodology writing for the removal/attrition
 section; before any removal-rate number ships.
 
