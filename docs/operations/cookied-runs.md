@@ -127,10 +127,22 @@ every cookied invocation**, rehearsal included (§6).
 ## 3. Project account + jar procedure
 
 - Create the dedicated NL research TikTok account **early** so it ages
-  before the mop-up. Adult birthdate at signup (covers the 18+ tier; no ID
-  verification for new accounts). Let it exist and browse a little — a
-  brand-new account fetching exclusively gated content via yt-dlp is the
-  anti-bot worst case.
+  before the mop-up. Adult birthdate at signup. Let it exist and browse a
+  little — a brand-new account fetching exclusively gated content via
+  yt-dlp is the anti-bot worst case.
+- ⚠ 2026-08-30: the drafted "adult birthdate covers the 18+ tier" premise
+  is DEAD in the EEA. TikTok's 2026 age-assurance rollout (DSA) grants the
+  18+ tier by *predicted or confirmed* age, not the registered birthdate;
+  prediction runs on profile + on-platform behavior, and the confirmation
+  flows (Incode/Yoti selfie, government ID, credit card) are offered
+  reactively — there is no self-service toggle. Browser-verified
+  2026-08-30: the research account does NOT clear the 18+ gate. The
+  sensitivity interstitial (the cohort's parking gate text) is a separate
+  gate and unaffected. Being pursued operator-side: predicted-age readout
+  via an ad's "About this ad" panel, app-side behavior of gated URLs, and
+  the privacy-webform objection route. Until resolved, expect the true-18+
+  subset of the cohort to fail cookied fetches and re-park (harmless);
+  sample-tally its share before investing in verification.
 - Verify in a browser that the account clears real gated URLs from the
   parked pool: `~/data/d3i/uu-tiktok/cookied-rehearsal/sample-gated-urls.txt`
   holds 20 randomly sampled cohort URLs. The sensitivity interstitial and
@@ -152,11 +164,19 @@ snapshot backup reduced to **exactly the 18,700-row gated cohort**
 (18,461 `SensitiveLoginGated` + 239 legacy-kind `Fetch`, per §1; pending,
 succeeded, and terminal rows deleted; vacuumed to 26 MB, rebuilt
 2026-08-10).
-The trim is mandatory, not cosmetic: claim order is `attempt_count ASC`, so
-against a full snapshot copy the fresh pending rows (attempt 0) would
-starve the requeued gated rows and a small rehearsal would never send a
-cookie. Never rehearse against the sync target — the sweep requeues the
-ENTIRE parked pool even under `--max-videos`, and there is no DB merge.
+The trim is mandatory. Post-drain (`pending = 0`) the reasons are: (a) it
+makes the sweep-census check exact — a trimmed DB must report
+`requeued_for_retry` = the cohort count, while a full copy would requeue
+the entire parked pool, non-gated residue included; (b) it keeps
+rehearsal attempts structurally away from the ~14k non-cookie residue;
+(c) a small throwaway file beside a 5.4 GB authoritative one is hard to
+mis-target. (The original pre-drain rationale — millions of pending
+attempt-0 rows starving the gated tiers under `attempt_count ASC` claim
+order — no longer applies to a drained snapshot.) The trim deletes rows
+only; `attempt_count` is never reset — the rehearsal must exercise the
+real §2 arithmetic, and attempt history is forensic (0046 discipline).
+Never rehearse against the sync target — the sweep requeues the ENTIRE
+parked pool even under `--max-videos`, and there is no DB merge.
 
 ⚠ 2026-08-30 — the prepared workspace is STALE and the rehearsal is
 UNPROVEN under the current transport; both must be redone before anything
