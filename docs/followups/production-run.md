@@ -263,6 +263,18 @@ Options when triggered, in ascending effort: re-verify the table against
 the new version's stderr corpus (0033's own procedure); pin the version in
 the deploy role so drift becomes a deliberate act; both.
 
+**2026-08-19 — the trigger FIRED:** the campaign VM was upgraded to
+nightly 2026.08.18.122307 (the 2026-08-18 header-fingerprint incident's
+remedy — see `../operations/incident-2026-08-18-tiktok-header-fingerprint-block.md`),
+a ~13-month jump past the 2026.03.17 pattern corpus. First-order
+verification passed the same day: `IpBlockedMessage` stderr text is
+byte-identical on the nightly (probe), and the 50-video validation census
+classified 8/8 terminals correctly with zero `YtDlpOther`. Standing watch:
+`YtDlpOther` share in the full-cap censuses. The deploy-role pin option is
+now mandatory rather than optional — the role must install ≥ nightly
+2026.08.18 (stable 2026.07.04 cannot fetch TikTok at all post-rollout);
+tracked with the curl_cffi removal in the deploy repo.
+
 ---
 
 ### `swept_stale` event/recovered-set invariant is enforced only in debug builds
@@ -440,6 +452,61 @@ against accepting the cold-cache cost.
 
 **Trigger to revisit:** next epic touching worker/startup code, or before
 the next long unattended campaign stretch.
+
+---
+
+### `VideoNotAvailable10240` composition: stratified redirect sample
+
+**Found in:** the 2026-08-26 post-incident-4 validation batch (browser
+verification of its 17 write-offs). The class is format-mixed — photo-mode
+posts confirmed among it, at least one sampled id not photo-routed — and
+the n=6 sample (one ~hour-wide creation window) cannot estimate the
+105,851-row cohort's composition. Full evidence:
+`~/projects/crime-and-policing/methodology/10240-photo-posts-note.md` and
+the incident-4 record.
+**Disposition:** analysis-side sampling task, no pipeline change. A HEAD
+request to `/video/<id>` classifies format by whether the location
+resolves to `/photo/` (no yt-dlp, no media transfer); stratify by creation
+cohort (snowflake-decoded year). Caveat carried from the evidence: a
+non-redirect is ambiguous (dead video vs routing-stripped photo post), so
+the sample bounds the photo fraction from below.
+**Why it matters:** 10240 is 27% of all terminals and 4.5% of the
+2026-cohort attempted — its composition moves the removal-rate headline by
+several points and gates the differential-removal (crime-content) claim's
+interpretation.
+**2026-08-30 scope extension:** the **cap-exhausted pool joins the sample
+frame**. Endgame-stratum browser checks (4/4) showed `NoVideoFormats`
+retryables are live photo posts WITHOUT extractable audio — they exhaust
+their caps, so `exhausted_retries` is a mixed pool (live photo-no-audio +
+genuinely-transient residue), not an attrition class. Also confirmed:
+`IpBlockedMessage` = "removed OR **private**" (4/5 checked private) — the
+pipeline cannot split those; a browser sub-sample can estimate the ratio.
+The attrition taxonomy for the write-up: removed / private / region-gated
+(10231) / photo-no-audio / login-gated (cookie pool) / transient-exhausted.
+**Trigger to revisit:** methodology writing for the removal/attrition
+section; before any removal-rate number ships.
+
+---
+
+### Photo-post share of SUCCESSES: envelope-based classification
+
+**Found in:** the same 2026-08-26 verification — a known-live photo
+carousel extracts successfully through the pipeline's URL form
+(`Downloading 1 format(s): audio`), so the transcript corpus already
+contains carousel-soundtrack transcripts (music lyrics / TTS), unknown
+fraction.
+**Disposition:** no fetching needed — classify from the captured raw
+metadata envelopes (`video_metadata_raw`, ADR-0042 replayability): photo
+posts' info dicts should be distinguishable (format list shape / image
+fields; derive the discriminator from the known-live specimen's envelope
+once one is captured, or fetch that one specimen's envelope ad hoc).
+Output: a per-video format flag joinable to transcripts for the content
+analysis.
+**Why it matters:** soundtrack transcripts are a different exposure
+object than spoken-video transcripts; the content analysis needs to
+distinguish them (or justify pooling).
+**Trigger to revisit:** before transcript-content analysis begins; pairs
+with the `load-metadata` decision at campaign close.
 
 ---
 
