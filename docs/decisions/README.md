@@ -82,3 +82,4 @@ Load the ADR(s) whose filename matches the area you are touching.
 ### Operations
 
 - [0043 — Deploy only pinned release tags](./0043-production-deployments-build-pinned-release-tags-promotion-is-an-explicit-tag-and-bump.md)
+- [0051 — Run cookied mop-up batches supervised on the desktop](./0051-run-cookied-mop-up-batches-supervised-on-the-desktop.md)
