@@ -127,10 +127,22 @@ every cookied invocation**, rehearsal included (§6).
 ## 3. Project account + jar procedure
 
 - Create the dedicated NL research TikTok account **early** so it ages
-  before the mop-up. Adult birthdate at signup (covers the 18+ tier; no ID
-  verification for new accounts). Let it exist and browse a little — a
-  brand-new account fetching exclusively gated content via yt-dlp is the
-  anti-bot worst case.
+  before the mop-up. Adult birthdate at signup. Let it exist and browse a
+  little — a brand-new account fetching exclusively gated content via
+  yt-dlp is the anti-bot worst case.
+- ⚠ 2026-08-30: the drafted "adult birthdate covers the 18+ tier" premise
+  is DEAD in the EEA. TikTok's 2026 age-assurance rollout (DSA) grants the
+  18+ tier by *predicted or confirmed* age, not the registered birthdate;
+  prediction runs on profile + on-platform behavior, and the confirmation
+  flows (Incode/Yoti selfie, government ID, credit card) are offered
+  reactively — there is no self-service toggle. Browser-verified
+  2026-08-30: the research account does NOT clear the 18+ gate. The
+  sensitivity interstitial (the cohort's parking gate text) is a separate
+  gate and unaffected. Being pursued operator-side: predicted-age readout
+  via an ad's "About this ad" panel, app-side behavior of gated URLs, and
+  the privacy-webform objection route. Until resolved, expect the true-18+
+  subset of the cohort to fail cookied fetches and re-park (harmless);
+  sample-tally its share before investing in verification.
 - Verify in a browser that the account clears real gated URLs from the
   parked pool: `~/data/d3i/uu-tiktok/cookied-rehearsal/sample-gated-urls.txt`
   holds 20 randomly sampled cohort URLs. The sensitivity interstitial and
